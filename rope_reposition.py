@@ -23,24 +23,17 @@ def rotate_k_cache_rope(
     # 计算位置偏移量
     num_heads, seq_len, head_size = k_cache.shape
     device = k_cache.device
-    dtype = k_cache.dtype
-    
+    dtype = torch.float32
     # 计算旋转角度（Llama风格的RoPE）
     theta = 1.0 / (rope_theta ** (torch.arange(0, head_size, 2, dtype=dtype, device=device) / head_size))
-    
     # 计算旋转角度
     delta = theta * delta_pos
-    
-    delta = torch.cat((delta, delta), dim=-1)
-    delta.view((1, 1, head_size))
-
+    delta = torch.cat((delta, delta), dim=-1).unsqueeze(0).unsqueeze(0)
     cos_vals = delta.cos()
     sin_vals = delta.sin()
-    
     # 应用旋转操作
     k_rotated = k_cache * cos_vals + _rotate_half(k_cache) * sin_vals
-    
-    return k_rotated
+    return k_rotated.to(k_cache.dtype)
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """将输入张量的后半部分旋转"""

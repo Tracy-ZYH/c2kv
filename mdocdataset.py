@@ -81,7 +81,7 @@ class WikiMQADataset(AbstractMDQADataset):
             context_list.append(context_str)
         return {
             'qid': self.data['_id'][idx],
-            'question': "Question: " + self.data['question'][idx] + " Answer: ",
+            'question': "Question: " + self.data['question'][idx] + "\n\nAnswer: ",
             'documents': context_list,
             'answer': [self.data['answer'][idx]],
         }
@@ -108,7 +108,7 @@ class MusiqueDataset(AbstractMDQADataset):
             context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
         return {
             'qid': self.data['id'][idx],
-            'question': "Question: " + self.data['question'][idx] + " Answer: ",
+            'question': "Question: " + self.data['question'][idx] + "\n\nAnswer: ",
             'documents': context_list,
             'answer': [self.data['answer'][idx]] + self.data['answer_aliases'][idx],
         }

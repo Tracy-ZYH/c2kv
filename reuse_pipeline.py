@@ -51,19 +51,27 @@ class LLMInference:
             past_key_values: 包含所有层键值缓存的元组
         """
         # 编码文本
-        inputs = self.tokenizer(
-            texts, 
-            padding=True, 
-            return_tensors="pt", 
-            return_attention_mask=True
-        ).to(self.device)
+        try:
+            inputs = self.tokenizer(
+                texts, 
+                padding=True, 
+                return_tensors="pt", 
+                return_attention_mask=True
+            ).to(self.device)
+        except Exception as e:
+            inputs = self.tokenizer(
+                [text.encode("utf-8", errors="ignore").decode("utf-8") for text in texts], 
+                padding=True, 
+                return_tensors="pt", 
+                return_attention_mask=True
+            ).to(self.device)
         # print("get_prefill_kv_cache input_ids")
         # print(inputs.input_ids[:, :10])
         if not keep_begin_of_text and inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
             inputs["input_ids"] = inputs.input_ids[:, 1:]
             inputs["attention_mask"] = inputs.attention_mask[:, 1:]
-        print("get_prefill input_ids")
-        print(inputs.input_ids[:, :10])
+        # print("get_prefill input_ids")
+        # print(inputs.input_ids[:, :10])
         
         # 前向传播获取键值缓存
         with torch.no_grad():
@@ -137,9 +145,9 @@ class LLMInference:
             query_inputs["input_ids"] = torch.cat([past_ids, query_inputs.input_ids], dim=1)
             query_inputs["attention_mask"] = torch.ones_like(query_inputs["input_ids"])
         # print(query_inputs)
-        print("input len", query_inputs.input_ids.shape)
-        print("input ids")
-        print(query_inputs.input_ids[0, 30:40])
+        # print("input len", query_inputs.input_ids.shape)
+        # print("input ids")
+        # print(query_inputs.input_ids[0, 30:40])
         # breakpoint()
         
         # 获取查询文本的attention mask
@@ -195,20 +203,20 @@ class LLMInference:
         
         # 合并两个KV缓存（在序列长度维度上拼接）
         merged_kv = []
-        print("model rope theta", self.model.config.rope_theta)
+        # print("model rope theta", self.model.config.rope_theta)
         for system_layer, recomp_layer in zip(system_kv, precomputed_kv):
             layer_full_kv = []
             for kv_i in range(2):
                 layer_kv = [system_layer[kv_i][0]]
                 cumulative_kv_len = int(system_layer[kv_i][0].shape[1])
                 for recomp_layer_kv in recomp_layer[kv_i]:
-                    # if kv_i == 0: # Rotate key cache to have correct RoPE
-                    #     # print(f"cumulative_kv_len: {cumulative_kv_len}")
-                    #     recomp_layer_kv = rotate_k_cache_rope(
-                    #         recomp_layer_kv, 
-                    #         cumulative_kv_len,
-                    #         self.model.config.rope_theta,
-                    #     )
+                    if kv_i == 0: # Rotate key cache to have correct RoPE
+                        # print(f"cumulative_kv_len: {cumulative_kv_len}")
+                        recomp_layer_kv = rotate_k_cache_rope(
+                            recomp_layer_kv, 
+                            cumulative_kv_len,
+                            self.model.config.rope_theta,
+                        )
                     cumulative_kv_len += int(recomp_layer_kv.shape[1])
                     layer_kv.append(recomp_layer_kv)
                 layer_full_kv.append(torch.cat(layer_kv, dim=1).unsqueeze(0))
@@ -284,13 +292,13 @@ if __name__ == "__main__":
     
     # 示例1: 获取prefill KV缓存
     sys_prompt = ['你是一个人工智能，请按照用户提出的问题准确无误且专业地回答问题：']
-    sys_cache = inference.get_prefill_kv_cache(sys_prompt)
-    print(len(sys_cache), len(sys_cache[0]), len(sys_cache[0][0]), sys_cache[0][0][0].shape)
+    sys_cache, sys_ids = inference.get_prefill_kv_cache(sys_prompt)
+    # print(len(sys_cache), len(sys_cache[0]), len(sys_cache[0][0]), sys_cache[0][0][0].shape)
 
     texts = ["Hello, What about your last job. You are not looking well. ", "It was frustrating."]
-    kv_cache = inference.get_prefill_kv_cache(texts)
-    print(f"获取到 {len(texts)} 个文本的KV缓存")
-    print(len(kv_cache), len(kv_cache[0]), len(kv_cache[0][0]), kv_cache[0][0][0].shape)
+    kv_cache, kv_ids = inference.get_prefill_kv_cache(texts)
+    # print(f"获取到 {len(texts)} 个文本的KV缓存")
+    # print(len(kv_cache), len(kv_cache[0]), len(kv_cache[0][0]), kv_cache[0][0][0].shape)
 
     # 保存KV缓存（可选）
     inference.save_kv_cache(kv_cache, "precomputed_kv.pth")
@@ -299,7 +307,9 @@ if __name__ == "__main__":
     query = "请继续上面的对话："
     query_all = "".join(sys_prompt + texts) + query
     generated_text = inference.decode_with_past_kv(
+        system_prompt_ids=sys_ids,
         system_prompt_kv=sys_cache,
+        precomputed_ids=kv_ids,
         precomputed_kv=kv_cache,
         query_text=query_all,
         max_new_tokens=100

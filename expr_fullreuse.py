@@ -27,8 +27,8 @@ def evaluate_model_on_dataset(
     generation_config = GenerationConfig(
         max_new_tokens=256,
         do_sample=False,
-        temperature=0.1,
-        top_p=0.9,
+        # temperature=0.1,
+        # top_p=0.9,
         pad_token_id=evaluator.tokenizer.pad_token_id
     )
     
@@ -38,18 +38,20 @@ def evaluate_model_on_dataset(
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
 
-    sys_cache = evaluator.get_prefill_kv_cache(dataset.get_system_prompt())
+    sys_cache, sys_ids = evaluator.get_prefill_kv_cache(dataset.get_system_prompt())
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
-        prompt = dataset.get_system_prompt() + "".join(example['documents']) + example['question']
+        # prompt = dataset.get_system_prompt() + "".join(example['documents']) + example['question']
 
-        context_cache = evaluator.get_prefill_kv_cache(example['documents'], False)
+        context_cache, context_ids = evaluator.get_prefill_kv_cache(example['documents'], False)
 
         pred = evaluator.decode_with_past_kv(
+            system_prompt_ids=sys_ids,
             system_prompt_kv=sys_cache,
+            precomputed_ids=context_ids,
             precomputed_kv=context_cache,
-            query_text=prompt,
+            query_text=example['question'],
             max_new_tokens=256
         )
 

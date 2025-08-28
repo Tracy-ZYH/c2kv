@@ -66,12 +66,21 @@ class MDQAEvaluator:
             batch_prompts = prompts[i:i+batch_size]
             
             # Tokenize batch
-            inputs = self.tokenizer(
-                batch_prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-            )
+            try:
+                inputs = self.tokenizer(
+                    batch_prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                )
+            except Exception as e:
+                batch_prompts = [prompt.encode("utf-8", errors="ignore").decode("utf-8") for prompt in batch_prompts]
+                inputs = self.tokenizer(
+                    batch_prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                )
             
             with torch.no_grad():
                 outputs = self.model.generate(
@@ -81,9 +90,6 @@ class MDQAEvaluator:
                     pad_token_id=self.tokenizer.pad_token_id,
                     use_cache=True,
                 )
-            
-            print(outputs)
-            breakpoint()
             
             # Decode each output in the batch
             for j in range(len(batch_prompts)):
@@ -131,12 +137,7 @@ def evaluate_model_on_dataset(
         qids.append(example['qid'])
     
     # Generate answers
-    try:
-        predictions = evaluator.batch_generate_answers(prompts, batch_size, generation_config)
-    except Exception as e:
-        print(e)
-        print(prompt)
-        raise e
+    predictions = evaluator.batch_generate_answers(prompts, batch_size, generation_config)
     
     # Calculate metrics
     em_scores = []
