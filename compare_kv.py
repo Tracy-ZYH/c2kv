@@ -7,7 +7,7 @@ from mdocdataset import MusiqueDataset
 
 
 musique = MusiqueDataset('../musique_ans_v1.0_dev.jsonl', True)
-sample = musique[193]
+sample = musique[249]
 
 full_query = musique.get_system_prompt() + "".join(sample['documents']) + sample['question']
 print(full_query)
@@ -37,16 +37,14 @@ text_reuse, kv_cache_reuse = inference.decode_with_past_kv(
 print(text_reuse)
 print(len(kv_cache_reuse), len(kv_cache_reuse[0]), kv_cache_reuse[0][0].shape)
 
-_, kv_cache_recomp = inference.decode_with_past_kv(
+text_compute, kv_cache_recomp = inference.decode_with_past_kv(
     query_text=full_query,
     max_new_tokens=1,
     return_kv=True,
 )
 
+print(text_compute)
 print(len(kv_cache_recomp), len(kv_cache_recomp[0]), kv_cache_recomp[0][0].shape)
-print(context_cache[0][0][0][0, :10, 0])
-print(kv_cache_reuse[0][0][0][0, :40, 0])
-print(kv_cache_recomp[0][0][0][0, :40, 0])
 
 def save_kv_cache(
     kv_cache: Tuple[Tuple[torch.Tensor, ...], ...],

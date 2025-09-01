@@ -23,15 +23,6 @@ def evaluate_model_on_dataset(
     # Initialize evaluator
     evaluator = LLMInference(model_name)
     
-    # Prepare generation config
-    generation_config = GenerationConfig(
-        max_new_tokens=256,
-        do_sample=False,
-        # temperature=0.1,
-        # top_p=0.9,
-        pad_token_id=evaluator.tokenizer.pad_token_id
-    )
-    
     # Calculate metrics
     em_scores = []
     results = []
@@ -52,7 +43,7 @@ def evaluate_model_on_dataset(
             precomputed_ids=context_ids,
             precomputed_kv=context_cache,
             query_text=example['question'],
-            max_new_tokens=256
+            max_new_tokens=16
         )
 
         em_score = best_subspan_em(pred, example['answer'])

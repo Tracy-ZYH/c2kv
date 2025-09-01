@@ -5,6 +5,15 @@ import string
 import regex
 
 
+
+SYSTEM_PROMPT: str = ("You will be asked a question after reading several passages. "
+    "Please directly answer the question based on the given passages. Do NOT repeat the question. "
+    "The answer should be within 5 words.\n\n")
+
+QUERY_PROMPT: str = ("Answer the question directly based on the given passages. "
+    "Do NOT repeat the question. The answer should be within 5 words.\nQuestion: ")
+
+
 def normalize_answer(s: str) -> str:
     """Normalization from the SQuAD evaluation script.
 
@@ -68,22 +77,27 @@ class AbstractMDQADataset(ABC):
 class WikiMQADataset(AbstractMDQADataset):
     def __init__(self, data_path: str) -> None:
         self.data = datasets.load_dataset("json", data_files=data_path)['train']
-        self.system_prompt: str = ("You are a intelligent AI assistant. Please answer questions based on the user's instruction. "
-            "Below are some reference documents that may help you in answering the user's question.\n\n")
+        self.system_prompt: str = SYSTEM_PROMPT
+        print(f"Loading dataset from {data_path}...")
+        self.context = self.data['context']
+        self.qid = self.data['_id']
+        self.question = self.data['question']
+        self.answer = self.data['answer']
+        print(f"Done loading {data_path}")
     
     def __len__(self) -> int:
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         context_list = []
-        for i, item in enumerate(eval(self.data['context'][idx])):
+        for i, item in enumerate(eval(self.context[idx])):
             context_str = f"Document {i+1} (title: {item[0]}) " + " ".join(item[1]) + '\n\n'
             context_list.append(context_str)
         return {
-            'qid': self.data['_id'][idx],
-            'question': "Question: " + self.data['question'][idx] + "\n\nAnswer: ",
+            'qid': self.qid[idx],
+            'question': QUERY_PROMPT + self.question[idx] + "\n\nAnswer: ",
             'documents': context_list,
-            'answer': [self.data['answer'][idx]],
+            'answer': [self.answer[idx]],
         }
 
     def get_system_prompt(self) -> str:
@@ -93,24 +107,29 @@ class WikiMQADataset(AbstractMDQADataset):
 class MusiqueDataset(AbstractMDQADataset):
     def __init__(self, data_path: str, only_supporting: bool=False) -> None:
         self.data = datasets.load_dataset("jsonl", data_files=data_path)['train']
-        self.system_prompt: str = ("You are a intelligent AI assistant. Please answer questions based on the user's instruction. "
-            "Below are some reference documents that may help you in answering the user's question.\n\n")
+        print(f"Loading dataset from {data_path}...")
+        self.system_prompt: str = SYSTEM_PROMPT
         self.only_supporting = only_supporting
+        self.paragraphs = self.data['paragraphs']
+        self.qid = self.data['id']
+        self.question = self.data['question']
+        self.answer = [[answer] + answer_aliases for answer, answer_aliases in zip(self.data['answer'], self.data['answer_aliases'])]
+        print(f"Done loading {data_path}")
     
     def __len__(self) -> int:
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         context_list = []
-        for item in self.data['paragraphs'][idx]:
+        for item in self.paragraphs[idx]:
             if self.only_supporting and not item['is_supporting']:
                 continue
             context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
         return {
-            'qid': self.data['id'][idx],
-            'question': "Question: " + self.data['question'][idx] + "\n\nAnswer: ",
+            'qid': self.qid[idx],
+            'question': QUERY_PROMPT + self.question[idx] + "\n\nAnswer: ",
             'documents': context_list,
-            'answer': [self.data['answer'][idx]] + self.data['answer_aliases'][idx],
+            'answer': self.answer[idx],
         }
 
     def get_system_prompt(self) -> str:

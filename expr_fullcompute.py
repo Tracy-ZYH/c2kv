@@ -8,7 +8,51 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from transformers.cache_utils import DynamicCache
 from tqdm import tqdm
 import datasets
+import concurrent.futures
+
 from mdocdataset import AbstractMDQADataset, WikiMQADataset, MusiqueDataset, best_subspan_em
+
+
+def prepare_example(example, system_prompt):
+    """处理单个示例的辅助函数"""
+    prompt = system_prompt + "".join(example['documents']) + example['question']
+    return prompt, example['answer'], example['qid']
+
+def prepare_prompts_parallel(dataset, max_examples=None, max_workers=None):
+    """使用多线程准备prompts"""
+    prompts = []
+    ground_truths = []
+    qids = []
+    
+    num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
+    
+    # 获取系统提示（假设对所有示例都相同）
+    system_prompt = dataset.get_system_prompt()
+    
+    # 创建线程池
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_index = {
+            executor.submit(prepare_example, dataset[i], system_prompt): i 
+            for i in range(num_examples)
+        }
+        
+        # 使用tqdm显示进度
+        with tqdm(total=num_examples, desc="Preparing prompts") as pbar:
+            # 按完成顺序处理结果
+            for future in concurrent.futures.as_completed(future_to_index):
+                try:
+                    prompt, answer, qid = future.result()
+                    prompts.append(prompt)
+                    ground_truths.append(answer)
+                    qids.append(qid)
+                    pbar.update(1)
+                except Exception as e:
+                    idx = future_to_index[future]
+                    print(f"Error processing example {idx}: {e}")
+                    pbar.update(1)
+    
+    return prompts, ground_truths, qids
 
 
 class MDQAEvaluator:
@@ -115,7 +159,7 @@ def evaluate_model_on_dataset(
     
     # Prepare generation config
     generation_config = GenerationConfig(
-        max_new_tokens=256,
+        max_new_tokens=16,
         do_sample=False,
         temperature=0.1,
         top_p=0.9,
@@ -123,18 +167,7 @@ def evaluate_model_on_dataset(
     )
     
     # Prepare prompts
-    prompts = []
-    ground_truths = []
-    qids = []
-    
-    num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
-    
-    for i in tqdm(range(num_examples), desc="Preparing prompts"):
-        example = dataset[i]
-        prompt = dataset.get_system_prompt() + "".join(example['documents']) + example['question']
-        prompts.append(prompt)
-        ground_truths.append(example['answer'])
-        qids.append(example['qid'])
+    prompts, ground_truths, qids = prepare_prompts_parallel(dataset, max_examples, max_workers=8)
     
     # Generate answers
     predictions = evaluator.batch_generate_answers(prompts, batch_size, generation_config)
