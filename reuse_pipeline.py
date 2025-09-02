@@ -1,14 +1,34 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
-from transformers.cache_utils import DynamicCache
-from typing import List, Tuple, Dict, Any, Optional
+from transformers.cache_utils import DynamicCache, StaticCache
+from typing import List, Tuple, Dict, Any, Optional, Union
+from dataclasses import dataclass
 import logging
-
 
 from rope_reposition import rotate_k_cache_rope, rotate_yarn_position_encoding
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchedKVInstance:
+    input_ids: List[torch.LongTensor]
+    """
+    Shape: Tuple(layer_num) * Tuple(2)(key or value) * List(batch_size) * Tensor(head_num, seq_len, head_size)
+    """
+    past_key_values: Tuple[Tuple[List[torch.Tensor], List[torch.Tensor]], ...]
+
+    def unpack(self):
+        return self.input_ids, self.past_key_values
+    
+    def stack(self, other):
+        self.input_ids.extend(other.input_ids)
+        for layer, other_layer in zip(self.past_key_values, other.past_key_values):
+            for korv, other_korv in zip(layer, other_layer):
+                korv.extend(other_korv)
+        return self
+
 
 class LLMInference:
     def __init__(self, model_name_or_path: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
@@ -26,11 +46,11 @@ class LLMInference:
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            # device_map="auto" if device == "cuda" else None,
+            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+            device_map="auto" if device == "cuda" else None,
             trust_remote_code=True,
             local_files_only=True,
-        ).to(self.device)
+        )
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -39,13 +59,14 @@ class LLMInference:
 
     def get_prefill_kv_cache(self, 
         texts: List[str],
-        keep_begin_of_text: bool=True,
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        keep_bos: bool,
+    ) -> BatchedKVInstance:
         """
         获取一批文本prefill后的键值缓存
         
         Args:
             texts: 文本列表
+            keep_bos: 是否保留begin_of_sentence特殊Token
             
         Returns:
             past_key_values: 包含所有层键值缓存的元组
@@ -65,13 +86,10 @@ class LLMInference:
                 return_tensors="pt", 
                 return_attention_mask=True
             ).to(self.device)
-        # print("get_prefill_kv_cache input_ids")
-        # print(inputs.input_ids[:, :10])
-        if not keep_begin_of_text and inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
+
+        if not keep_bos and inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
             inputs["input_ids"] = inputs.input_ids[:, 1:]
             inputs["attention_mask"] = inputs.attention_mask[:, 1:]
-        # print("get_prefill input_ids")
-        # print(inputs.input_ids[:, :10])
         
         # 前向传播获取键值缓存
         with torch.no_grad():
@@ -92,32 +110,30 @@ class LLMInference:
                 korv = []
                 for seq_i, seq_l in enumerate(seq_len):
                     korv.append(layer[kv_i][seq_i][:, :seq_l])
-                layer_kv.append(tuple(korv))
+                layer_kv.append(korv)
             full_kv.append(tuple(layer_kv))
-        return tuple(full_kv), input_ids
+        # return tuple(full_kv), input_ids
+        return BatchedKVInstance(input_ids, tuple(full_kv))
 
     def decode_with_past_kv(
         self,
         query_text: str,
-        system_prompt_ids: Optional[List[torch.Tensor]] = None,
-        system_prompt_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]] = None,
-        precomputed_ids: Optional[List[torch.Tensor]] = None,
-        precomputed_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]] = None,
+        system_prompt_kv: Optional[BatchedKVInstance] = None,
+        precomputed_kv: Optional[BatchedKVInstance] = None,
         max_new_tokens: int = 512,
         return_kv: bool = False,
-    ) -> str:
+    ) -> Union[str, Tuple[str, Tuple[Tuple[torch.Tensor, ...], ...]]]:
         """
         使用已有的键值缓存进行解码
-        
-        Args:
-            system_prompt_kv: 系统提示词的键值缓存
-            precomputed_kv: 预先计算好的键值缓存
-            query_text: 查询文本
-            max_new_tokens: 最大生成token数
-            
-        Returns:
-            generated_text: 生成的文本
         """
+        # Unpack system_prompt_kv and precomputed_kv
+        system_prompt_ids = None
+        if system_prompt_kv is not None:
+            system_prompt_ids, system_prompt_kv = system_prompt_kv.unpack()
+        precomputed_ids = None
+        if precomputed_kv is not None:
+            precomputed_ids, precomputed_kv = precomputed_kv.unpack()
+
         # 合并所有past key values
         past_key_values = self._merge_kv_caches(system_prompt_kv, precomputed_kv)
         if past_key_values is not None:
@@ -144,11 +160,6 @@ class LLMInference:
                 query_inputs.input_ids = query_inputs.input_ids[:, 1:]
             query_inputs["input_ids"] = torch.cat([past_ids, query_inputs.input_ids], dim=1)
             query_inputs["attention_mask"] = torch.ones_like(query_inputs["input_ids"])
-        # print(query_inputs)
-        # print("input len", query_inputs.input_ids.shape)
-        # print("input ids")
-        # print(query_inputs.input_ids[0, 30:40])
-        # breakpoint()
         
         # 获取查询文本的attention mask
         # if past_key_values is not None:
@@ -174,6 +185,7 @@ class LLMInference:
         
         # 解码生成的文本（跳过查询部分）
         generated_tokens = generated_outputs[0][len(query_inputs.input_ids[0]):]
+        generated_tokens = generated_tokens[:max_new_tokens] # force limited output
         generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         
         if return_kv:
@@ -198,11 +210,13 @@ class LLMInference:
         if system_kv is None and precomputed_kv is None:
             return None
         
+        merged_kv = []
         if precomputed_kv is None:
-            return system_kv
+            for key, value in system_kv:
+                merged_kv.append((key[0].unsqueeze(0), value[0].unsqueeze(0)))
+            return tuple(merged_kv)
         
         # 合并两个KV缓存（在序列长度维度上拼接）
-        merged_kv = []
         # print("model rope theta", self.model.config.rope_theta)
         for system_layer, recomp_layer in zip(system_kv, precomputed_kv):
             layer_full_kv = []
@@ -260,59 +274,119 @@ class LLMInference:
         
         return full_attention_mask
 
-    def save_kv_cache(self, kv_cache: Tuple[Tuple[torch.Tensor, ...], ...], filepath: str):
-        """
-        保存键值缓存到文件
+    def _merge_selected_kv_layer(
+        self,
+        system_kv_layer: torch.Tensor, # (head_num, seq_len, head_size)
+        precomputed_kv_layer: List[torch.Tensor], # [batch_size] * (head_num, seq_len, head_size)
+        retained_masks: List[torch.BoolTensor],
+        rotate: bool,
+    ) -> torch.Tensor:
+        retained_kv_list = [system_kv_layer]
+        retained_length = int(system_kv_layer.shape[1])
+        prefix_length = retained_length
+        for kv, mask in zip(precomputed_kv_layer, retained_masks):
+            retained_kv = kv[:, mask]
+            if rotate:
+                retained_kv = rotate_k_cache_rope(retained_kv, prefix_length, self.model.config.rope_theta)
+            retained_kv_list.append(retained_kv)
+            retained_length += int(torch.sum(mask))
+            prefix_length += int(kv.shape[1])
+        merged_kv = torch.cat(retained_kv_list, dim=1)
+        assert retained_length == merged_kv.shape[1], f"{retained_length} != merged_kv length {merged_kv.shape[1]}"
+        return merged_kv.unsqueeze(0) # (batch_size=1, head_num, seq_len, head_size)
+    
+    def selective_recompute(
+        self,
+        system_kv: BatchedKVInstance,
+        precomputed_kv: BatchedKVInstance,
+        recompute_masks: List[torch.BoolTensor],
+    ) -> BatchedKVInstance:
+        # 0. 检查传入Tensor形状是否匹配
+        device = system_kv.past_key_values[0][0][0].device
+        assert len(precomputed_kv.past_key_values[0][0]) == len(recompute_masks)
+
+        full_input_ids = system_kv.input_ids + precomputed_kv.input_ids
+        full_input_ids = torch.cat(full_input_ids, dim=0)
+        full_kv_length = len(full_input_ids)
+
+        recompute_masks = [mask.bool() for mask in recompute_masks]
+        retained_masks = [~mask for mask in recompute_masks]
+
+        # print(system_kv.input_ids)
+        # print(precomputed_kv.input_ids)
+
+        # 1. 从precomputed_kv中去除重算部分，再拼接
+        past_kv = []
+        for (sys_key, sys_val), (pre_key, pre_val) in zip(system_kv.past_key_values, precomputed_kv.past_key_values):
+            past_kv.append((
+                self._merge_selected_kv_layer(sys_key[0], pre_key, retained_masks, True),
+                self._merge_selected_kv_layer(sys_val[0], pre_val, retained_masks, False),
+            ))
+
+        retained_kv_length = int(past_kv[0][0].shape[2])
+        retained_kv = DynamicCache.from_legacy_cache(tuple(past_kv))
+
+        # 2. Concatenate ids to recompute + prepare customized attention_mask
+        recompute_length = full_kv_length - retained_kv_length
+        prefix_length = len(system_kv.input_ids[0])
+        position_counter = prefix_length
+        rearranged_index = torch.arange(full_kv_length, dtype=torch.long, device=device)
+        print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
+        attention_mask_past = torch.zeros((recompute_length, retained_kv_length), dtype=torch.long, device=device)
+        attention_mask_tril = torch.tril(torch.ones((recompute_length, recompute_length), dtype=torch.long, device=device))
         
-        Args:
-            kv_cache: 要保存的键值缓存
-            filepath: 文件路径
-        """
-        torch.save(kv_cache, filepath)
-        logger.info(f"KV缓存已保存到: {filepath}")
+        recompute_ids = []
+        recompute_counter = 0
+        for ids, mask in zip(precomputed_kv.input_ids, recompute_masks):
+            recompute_ids.append(ids[mask])
+            for masked in mask:
+                if masked:
+                    rearranged_index[retained_kv_length + recompute_counter] = position_counter
+                    attention_mask_past[recompute_counter, :prefix_length] = 1
+                    recompute_counter += 1
+                else:
+                    rearranged_index[prefix_length] = position_counter
+                    prefix_length += 1
+                position_counter += 1
 
-    def load_kv_cache(self, filepath: str) -> Tuple[Tuple[torch.Tensor, ...], ...]:
-        """
-        从文件加载键值缓存
+        assert recompute_counter == recompute_length, \
+            f"recompute_counter {recompute_counter} != recompute_length {recompute_length}"
+        assert prefix_length == retained_kv_length
+        recompute_ids = torch.cat(recompute_ids, dim=0)
+        attention_mask = torch.cat([attention_mask_past, attention_mask_tril], dim=-1).bool()
+        # print(torch.sum(attention_mask[:, :-10], dim=-1))
+        # print(attention_mask[:, -15:])
+        # print(recompute_ids)
+        # print(rearranged_index)
+
+        # 3. 调整输入形状，准备推理
+        recompute_ids = recompute_ids.unsqueeze(0) # (batch_size, query_len)
+        attention_mask = attention_mask.unsqueeze(0).unsqueeze(0) # (batch_size, head_size, query_len, kv_length)
+        position_ids = rearranged_index[-recompute_length:].unsqueeze(0) # (batch_size, query_len)
+
+        # 4. 推理
+        output = self.model(
+            recompute_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=retained_kv,
+            use_cache=True,
+        )
+
+        # 5. 重新排列KV Cache
+        assert isinstance(output.past_key_values, DynamicCache)
+        rearranged_index = rearranged_index.squeeze(0)
+        ret_kv = []
+        for output_key, output_value in output.past_key_values:
+            output_key, output_value = output_key[0], output_value[0] # only 1 sequence
+            key = torch.empty_like(output_key)
+            value = torch.empty_like(output_value)
+            ret_kv.append((
+                [key.index_copy_(1, rearranged_index, output_key)],
+                [value.index_copy_(1, rearranged_index, output_value)]
+            ))
         
-        Args:
-            filepath: 文件路径
-            
-        Returns:
-            加载的键值缓存
-        """
-        kv_cache = torch.load(filepath, map_location=self.device)
-        logger.info(f"KV缓存已从 {filepath} 加载")
-        return kv_cache
-
-# 使用示例
-if __name__ == "__main__":
-    # 初始化推理器
-    inference = LLMInference("Qwen/Qwen2.5-7B-Instruct")
-    
-    # 示例1: 获取prefill KV缓存
-    sys_prompt = ['你是一个人工智能，请按照用户提出的问题准确无误且专业地回答问题：']
-    sys_cache, sys_ids = inference.get_prefill_kv_cache(sys_prompt)
-    # print(len(sys_cache), len(sys_cache[0]), len(sys_cache[0][0]), sys_cache[0][0][0].shape)
-
-    texts = ["Hello, What about your last job. You are not looking well. ", "It was frustrating."]
-    kv_cache, kv_ids = inference.get_prefill_kv_cache(texts)
-    # print(f"获取到 {len(texts)} 个文本的KV缓存")
-    # print(len(kv_cache), len(kv_cache[0]), len(kv_cache[0][0]), kv_cache[0][0][0].shape)
-
-    # 保存KV缓存（可选）
-    inference.save_kv_cache(kv_cache, "precomputed_kv.pth")
-    
-    # 示例2: 使用KV缓存进行解码
-    query = "请继续上面的对话："
-    query_all = "".join(sys_prompt + texts) + query
-    generated_text = inference.decode_with_past_kv(
-        system_prompt_ids=sys_ids,
-        system_prompt_kv=sys_cache,
-        precomputed_ids=kv_ids,
-        precomputed_kv=kv_cache,
-        query_text=query_all,
-        max_new_tokens=100
-    )
-    
-    print(f"生成的文本: {generated_text}")
+        return BatchedKVInstance(
+            input_ids=[full_input_ids],
+            past_key_values=tuple(ret_kv),
+        )

@@ -29,18 +29,22 @@ def evaluate_model_on_dataset(
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
 
-    sys_cache, sys_ids = evaluator.get_prefill_kv_cache(dataset.get_system_prompt())
+    sys_cache = evaluator.get_prefill_kv_cache(dataset.get_system_prompt(), True)
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
-        # prompt = dataset.get_system_prompt() + "".join(example['documents']) + example['question']
 
-        context_cache, context_ids = evaluator.get_prefill_kv_cache(example['documents'], False)
+        # Avoid CUDA OOM in get_prefill_kv_cache
+        # context_cache = None
+        # for idx in range(0, len(example['documents']), 8):
+        #     batched_documents = example['documents'][idx: idx+4]
+        #     cache_batch = evaluator.get_prefill_kv_cache(batched_documents, False)
+        #     context_cache = cache_batch if context_cache is None else context_cache.stack(cache_batch)
+
+        context_cache = evaluator.get_prefill_kv_cache(example['documents'], False)
 
         pred = evaluator.decode_with_past_kv(
-            system_prompt_ids=sys_ids,
             system_prompt_kv=sys_cache,
-            precomputed_ids=context_ids,
             precomputed_kv=context_cache,
             query_text=example['question'],
             max_new_tokens=16

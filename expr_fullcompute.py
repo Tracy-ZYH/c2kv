@@ -56,7 +56,7 @@ def prepare_prompts_parallel(dataset, max_examples=None, max_workers=None):
 
 
 class MDQAEvaluator:
-    def __init__(self, model_name: str, device: str = "cuda", torch_dtype: torch.dtype = torch.float16):
+    def __init__(self, model_name: str, device: str = "cuda", torch_dtype: torch.dtype = torch.bfloat16):
         self.model_name = model_name
         self.device = device
         self.torch_dtype = torch_dtype
@@ -68,10 +68,10 @@ class MDQAEvaluator:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
-            # device_map="auto",
+            device_map="auto",
             trust_remote_code=True,
             local_files_only=True,
-        ).to(device)
+        )
         
         # Set padding token if not present
         if self.tokenizer.pad_token is None:
