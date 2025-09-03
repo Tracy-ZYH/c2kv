@@ -5,13 +5,12 @@ import string
 import regex
 
 
-
 SYSTEM_PROMPT: str = ("You will be asked a question after reading several passages. "
     "Please directly answer the question based on the given passages. Do NOT repeat the question. "
     "The answer should be within 5 words.\n\n")
 
 QUERY_PROMPT: str = ("Answer the question directly based on the given passages. "
-    "Do NOT repeat the question. The answer should be within 5 words.\nQuestion: ")
+    "Do NOT repeat the question. The answer should be within 5 words.\n\nQuestion: ")
 
 
 def normalize_answer(s: str) -> str:
@@ -106,7 +105,8 @@ class WikiMQADataset(AbstractMDQADataset):
 
 class MusiqueDataset(AbstractMDQADataset):
     def __init__(self, data_path: str, only_supporting: bool=False) -> None:
-        self.data = datasets.load_dataset("jsonl", data_files=data_path)['train']
+        self.data = datasets.load_dataset("json", data_files=data_path)['train']
+        # self.data = datasets.load_dataset(data_path)['train']
         print(f"Loading dataset from {data_path}...")
         self.system_prompt: str = SYSTEM_PROMPT
         self.only_supporting = only_supporting

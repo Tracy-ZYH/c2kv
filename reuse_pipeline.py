@@ -46,7 +46,7 @@ class LLMInference:
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+            dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             device_map="auto" if device == "cuda" else None,
             trust_remote_code=True,
             local_files_only=True,
@@ -55,7 +55,12 @@ class LLMInference:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        logger.info(f"模型加载完成，设备: {device}")
+        config = self.model.config
+        self.rope_theta = config.rope_theta
+        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
+            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+        else:
+            self.rope_type = "default"
 
     def get_prefill_kv_cache(self, 
         texts: List[str],
@@ -87,7 +92,7 @@ class LLMInference:
                 return_attention_mask=True
             ).to(self.device)
 
-        if not keep_bos and inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
+        if not keep_bos and int(inputs.input_ids[0, 0]) == self.tokenizer.bos_token_id:
             inputs["input_ids"] = inputs.input_ids[:, 1:]
             inputs["attention_mask"] = inputs.attention_mask[:, 1:]
         
@@ -145,8 +150,6 @@ class LLMInference:
             past_ids = torch.cat(past_ids).unsqueeze(0)
             assert past_ids.shape[1] == past_key_values[0][0][0].shape[1]
             past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-        else:
-            past_key_values = None
         
         # 编码查询文本
         query_inputs = self.tokenizer(
@@ -157,8 +160,8 @@ class LLMInference:
 
         if past_key_values is not None:
             if query_inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
-                query_inputs.input_ids = query_inputs.input_ids[:, 1:]
-            query_inputs["input_ids"] = torch.cat([past_ids, query_inputs.input_ids], dim=1)
+                query_inputs["input_ids"] = query_inputs.input_ids[:, 1:]
+            query_inputs["input_ids"] = torch.cat([past_ids, query_inputs["input_ids"]], dim=1)
             query_inputs["attention_mask"] = torch.ones_like(query_inputs["input_ids"])
         
         # 获取查询文本的attention mask
@@ -177,8 +180,7 @@ class LLMInference:
                 # attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                # temperature=0.1,
-                # top_p=0.9,
+                temperature=None, top_p=None, top_k=None,
                 pad_token_id=self.tokenizer.eos_token_id,
                 use_cache=True,
             )
@@ -229,7 +231,8 @@ class LLMInference:
                         recomp_layer_kv = rotate_k_cache_rope(
                             recomp_layer_kv, 
                             cumulative_kv_len,
-                            self.model.config.rope_theta,
+                            self.rope_theta,
+                            self.rope_type,
                         )
                     cumulative_kv_len += int(recomp_layer_kv.shape[1])
                     layer_kv.append(recomp_layer_kv)
@@ -287,7 +290,7 @@ class LLMInference:
         for kv, mask in zip(precomputed_kv_layer, retained_masks):
             retained_kv = kv[:, mask]
             if rotate:
-                retained_kv = rotate_k_cache_rope(retained_kv, prefix_length, self.model.config.rope_theta)
+                retained_kv = rotate_k_cache_rope(retained_kv, prefix_length, self.rope_theta, self.rope_type)
             retained_kv_list.append(retained_kv)
             retained_length += int(torch.sum(mask))
             prefix_length += int(kv.shape[1])
@@ -312,9 +315,6 @@ class LLMInference:
         recompute_masks = [mask.bool() for mask in recompute_masks]
         retained_masks = [~mask for mask in recompute_masks]
 
-        # print(system_kv.input_ids)
-        # print(precomputed_kv.input_ids)
-
         # 1. 从precomputed_kv中去除重算部分，再拼接
         past_kv = []
         for (sys_key, sys_val), (pre_key, pre_val) in zip(system_kv.past_key_values, precomputed_kv.past_key_values):
@@ -331,7 +331,7 @@ class LLMInference:
         prefix_length = len(system_kv.input_ids[0])
         position_counter = prefix_length
         rearranged_index = torch.arange(full_kv_length, dtype=torch.long, device=device)
-        print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
+        # print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
         attention_mask_past = torch.zeros((recompute_length, retained_kv_length), dtype=torch.long, device=device)
         attention_mask_tril = torch.tril(torch.ones((recompute_length, recompute_length), dtype=torch.long, device=device))
         
@@ -354,10 +354,6 @@ class LLMInference:
         assert prefix_length == retained_kv_length
         recompute_ids = torch.cat(recompute_ids, dim=0)
         attention_mask = torch.cat([attention_mask_past, attention_mask_tril], dim=-1).bool()
-        # print(torch.sum(attention_mask[:, :-10], dim=-1))
-        # print(attention_mask[:, -15:])
-        # print(recompute_ids)
-        # print(rearranged_index)
 
         # 3. 调整输入形状，准备推理
         recompute_ids = recompute_ids.unsqueeze(0) # (batch_size, query_len)

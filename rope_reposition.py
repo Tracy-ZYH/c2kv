@@ -1,11 +1,39 @@
 import torch
 import math
-from typing import Tuple, List
+from typing import Tuple, List, Optional
+
+
+# Copied from hugginface transformers
+def _llama3_inv_freq_process(
+    inv_freq: torch.Tensor
+) -> torch.Tensor:
+
+    # factor = config.rope_scaling["factor"]  # `8` in the original implementation
+    # low_freq_factor = config.rope_scaling["low_freq_factor"]  # `1` in the original implementation
+    # high_freq_factor = config.rope_scaling["high_freq_factor"]  # `4` in the original implementation
+    # old_context_len = config.rope_scaling["original_max_position_embeddings"]  # `8192` in the original implementation
+    factor, low_freq_factor, high_freq_factor, old_context_len = 8, 1, 4, 8192
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+
+    wavelen = 2 * math.pi / inv_freq
+    # wavelen < high_freq_wavelen: do nothing
+    # wavelen > low_freq_wavelen: divide by factor
+    inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+    # otherwise: interpolate between the two, using a smooth factor
+    smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+    smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+    is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+    inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+
+    return inv_freq_llama
 
 def rotate_k_cache_rope(
     k_cache: torch.Tensor,
     delta_pos: int,
     rope_theta: float,
+    rope_type: str,
 ) -> torch.Tensor:
     """
     将KV Cache中的RoPE位置编码旋转到新的起始位置
@@ -23,11 +51,14 @@ def rotate_k_cache_rope(
     # 计算位置偏移量
     num_heads, seq_len, head_size = k_cache.shape
     device = k_cache.device
-    dtype = torch.float32
+    dtype = torch.float
     # 计算旋转角度（Llama风格的RoPE）
-    theta = 1.0 / (rope_theta ** (torch.arange(0, head_size, 2, dtype=dtype, device=device) / head_size))
+    inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_size, 2, dtype=dtype, device=device) / head_size))
+    # 特殊 Rope 后处理
+    if rope_type == "llama3":
+        inv_freq = _llama3_inv_freq_process(inv_freq)
     # 计算旋转角度
-    delta = theta * delta_pos
+    delta = inv_freq * delta_pos
     delta = torch.cat((delta, delta), dim=-1).unsqueeze(0).unsqueeze(0)
     cos_vals = delta.cos()
     sin_vals = delta.sin()

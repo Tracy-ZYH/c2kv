@@ -20,8 +20,12 @@ def save_kv_cache(
 
 # ============ 1. Load Dataset and Model ==============
 
-musique = MusiqueDataset('../musique_ans_v1.0_dev.jsonl', True)
-sample = musique[223]
+max_new_tokens = 16
+musique = MusiqueDataset('../musique_ans_v1.0_dev.jsonl', False)
+sample = musique[203]
+# doc1 = "".join(sample['documents'][:10])
+# doc2 = "".join(sample['documents'][10:])
+# sample['documents'] = [doc1, doc2]
 
 full_query = musique.get_system_prompt() + "".join(sample['documents']) + sample['question']
 print("============ Request ============")
@@ -29,7 +33,7 @@ print(full_query)
 print("Answer:", sample['answer'])
 print("=================================")
 
-inference = LLMInference("meta-llama/Meta-Llama-3-8B-Instruct")
+inference = LLMInference("Qwen/Qwen3-4B-Instruct-2507")
 
 # ============ 2. Prefill System Prompt and Documents ==============
 
@@ -44,7 +48,7 @@ print("Context KV Cache Shape")
 print(len(context_cache), len(context_cache[0]))
 for cache in context_cache[0][0]:
     print(cache.shape, end=' ')
-print()
+print("\n===================\n")
 
 # ============ 3. Full Reuse ==============
 
@@ -52,7 +56,7 @@ output_text, kv_cache = inference.decode_with_past_kv(
     system_prompt_kv=sys_instance,
     precomputed_kv=context_instance,
     query_text=sample['question'],
-    max_new_tokens=1,
+    max_new_tokens=max_new_tokens,
     return_kv=True,
 )
 
@@ -66,11 +70,11 @@ del kv_cache
 
 output_text, kv_cache = inference.decode_with_past_kv(
     query_text=full_query,
-    max_new_tokens=1,
+    max_new_tokens=max_new_tokens,
     return_kv=True,
 )
 
-print("Recompute output:", output_text)
+print("\nRecompute output:", output_text)
 print(len(kv_cache), len(kv_cache[0]), kv_cache[0][0].shape)
 
 save_kv_cache(kv_cache, './saved_kv/recompute.npy')
@@ -89,11 +93,11 @@ updated_cache = inference.selective_recompute(sys_instance, context_instance, re
 output_text, kv_cache = inference.decode_with_past_kv(
     system_prompt_kv=updated_cache,
     query_text=sample['question'],
-    max_new_tokens=1,
+    max_new_tokens=max_new_tokens,
     return_kv=True,
 )
 
-print("Selective Recompute output:", output_text)
+print("\nSelective output:", output_text)
 print(len(kv_cache), len(kv_cache[0]), kv_cache[0][0].shape)
 
 save_kv_cache(kv_cache, './saved_kv/selective.npy')

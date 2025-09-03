@@ -67,7 +67,7 @@ class MDQAEvaluator:
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             device_map="auto",
             trust_remote_code=True,
             local_files_only=True,
@@ -161,8 +161,8 @@ def evaluate_model_on_dataset(
     generation_config = GenerationConfig(
         max_new_tokens=16,
         do_sample=False,
-        temperature=0.1,
-        top_p=0.9,
+        temperature=None,
+        top_p=None,
         pad_token_id=evaluator.tokenizer.pad_token_id
     )
     
