@@ -2,8 +2,9 @@ import torch
 import numpy as np
 from typing import Tuple, List
 
+from itertools import batched
 from reuse_pipeline import LLMInference
-from mdocdataset import MusiqueDataset
+from mdocdataset import MusiqueDataset, WikiMQADataset
 
 
 def save_kv_cache(
@@ -20,20 +21,23 @@ def save_kv_cache(
 
 # ============ 1. Load Dataset and Model ==============
 
-max_new_tokens = 16
+max_new_tokens = 1
 musique = MusiqueDataset('../musique_ans_v1.0_dev.jsonl', False)
-sample = musique[203]
-# doc1 = "".join(sample['documents'][:10])
-# doc2 = "".join(sample['documents'][10:])
-# sample['documents'] = [doc1, doc2]
+# musique = WikiMQADataset('../2WikiMultihopQA/dev.json')
 
+sample = musique[203]
+
+print(len(sample["documents"]))
+sample["documents"] = sample["documents"][:12]
+# sample["documents"] = ["".join(batch_doc) for batch_doc in batched(sample["documents"], 3)]
 full_query = musique.get_system_prompt() + "".join(sample['documents']) + sample['question']
+
 print("============ Request ============")
 print(full_query)
 print("Answer:", sample['answer'])
 print("=================================")
 
-inference = LLMInference("Qwen/Qwen3-4B-Instruct-2507")
+inference = LLMInference("Qwen/Qwen2.5-32B-Instruct")
 
 # ============ 2. Prefill System Prompt and Documents ==============
 
@@ -85,7 +89,7 @@ del kv_cache
 recompute_masks = []
 for cache in context_cache[0][0]:
     mask = torch.zeros((cache.shape[1]), dtype=torch.bool)
-    mask[:5] = 1
+    mask[:10] = 1
     recompute_masks.append(mask)
 
 updated_cache = inference.selective_recompute(sys_instance, context_instance, recompute_masks)

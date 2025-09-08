@@ -10,7 +10,7 @@ from tqdm import tqdm
 import datasets
 import concurrent.futures
 
-from mdocdataset import AbstractMDQADataset, WikiMQADataset, MusiqueDataset, best_subspan_em
+from mdocdataset import load_mdoc_dataset, AbstractMDQADataset
 
 
 def prepare_example(example, system_prompt):
@@ -27,7 +27,7 @@ def prepare_prompts_parallel(dataset, max_examples=None, max_workers=None):
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
     
     # 获取系统提示（假设对所有示例都相同）
-    system_prompt = dataset.get_system_prompt()
+    system_prompt = dataset.system_prompt
     
     # 创建线程池
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -63,7 +63,7 @@ class MDQAEvaluator:
         
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, trust_remote_code=True, local_files_only=True,
+            model_name, trust_remote_code=True, local_files_only=True, padding_side='left',
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -159,7 +159,7 @@ def evaluate_model_on_dataset(
     
     # Prepare generation config
     generation_config = GenerationConfig(
-        max_new_tokens=16,
+        max_new_tokens=dataset.max_new_tokens,
         do_sample=False,
         temperature=None,
         top_p=None,
@@ -177,7 +177,7 @@ def evaluate_model_on_dataset(
     results = []
     
     for pred, gt, qid, prompt in zip(predictions, ground_truths, qids, prompts):
-        em_score = best_subspan_em(pred, gt)
+        em_score = dataset.metric(pred, gt)
         em_scores.append(em_score)
         
         results.append({
@@ -220,12 +220,12 @@ def main():
     # Required arguments
     parser.add_argument("--model", type=str, required=True, 
                        help="Model name or path (e.g., 'Qwen/Qwen2-7B-Instruct', 'mistralai/Mistral-7B-v0.1')")
-    parser.add_argument("--dataset", type=str, required=True, 
-                       help="Dataset path")
-    parser.add_argument("--dataset_type", type=str, required=True, choices=["wikimqa", "musique"],
+    parser.add_argument("--dataset", type=str, required=True,
                        help="Type of dataset")
     
     # Optional arguments
+    parser.add_argument("--dataset_path", type=str, default=None, 
+                       help="Dataset path")
     parser.add_argument("--batch_size", type=int, default=1, 
                        help="Batch size for inference")
     parser.add_argument("--max_examples", type=int, default=None,
@@ -240,14 +240,13 @@ def main():
     args = parser.parse_args()
     
     # Load dataset
-    if args.dataset_type == "wikimqa":
-        dataset = WikiMQADataset(args.dataset)
-    elif args.dataset_type == "musique":
-        dataset = MusiqueDataset(args.dataset, args.only_supporting)
-    else:
-        raise ValueError(f"Unknown dataset type: {args.dataset_type}")
+    dataset = load_mdoc_dataset(
+        args.dataset, 
+        args.dataset_path, 
+        only_supporting=args.only_supporting,
+    )
     
-    print(f"Loaded {len(dataset)} examples from {args.dataset_type} dataset")
+    print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")
     
     # Evaluate model
     results = evaluate_model_on_dataset(
@@ -260,9 +259,9 @@ def main():
     
     print(f"\nEvaluation Results:")
     print(f"Model: {args.model}")
-    print(f"Dataset: {args.dataset_type}")
+    print(f"Dataset: {args.dataset}")
     print(f"Number of examples evaluated: {results['num_examples']}")
-    print(f"Exact Match Score: {results['exact_match']:.4f}")
+    print(f"Score: {results['exact_match']:.4f}")
 
 
 if __name__ == "__main__":
