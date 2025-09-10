@@ -11,6 +11,10 @@ def max_f1_score(pred: str, gt_list: List[str]) -> float:
     pred = pred.split('. ')[0]
     return max([qa_f1_score(pred, gt) for gt in gt_list])
 
+def max_rouge_score(pred: str, gt_list: List[str]) -> float:
+    pred = pred.split('\n')[0]
+    return max([rouge_score(pred, gt) for gt in gt_list])
+
 QA_SYSTEM_PROMPT: str = ("You will be asked a question after reading several passages. "
     "Please directly answer the question based on the given passages. Do NOT repeat the question. "
     "The answer should be within 5 words.\n\n")
@@ -19,7 +23,6 @@ QA_QUERY_PROMPT: str = ("Answer the question directly based on the given passage
     "Do NOT repeat the question. The answer should be within 5 words.\n\nQuestion: ")
 
 QA_MAX_NEW_TOKENS: int = 8
-SUMMARY_MAX_NEW_TOKENS: int = 512
 
 
 class AbstractMDQADataset(ABC):
@@ -141,12 +144,12 @@ class MultiNewsDataset(AbstractMDQADataset):
         print(f"Loading dataset from zai-org/LongBench multi_news...")
         self.data = datasets.load_dataset('zai-org/LongBench', 'multi_news')['test']
         self.system_prompt: str = "You are given several news passages. Write a one-page summary of all news. \n\nNews:"
-        self.max_new_tokens: int = SUMMARY_MAX_NEW_TOKENS
+        self.max_new_tokens: int = 512
         self.paragraphs = self.data['context']
         self.qid = self.data['_id']
         self.answer = self.data['answers']
         self.question = '\n\nNow, write a one-page summary of all the news.\n\nSummary: '
-        self.metric = rouge_score
+        self.metric = max_rouge_score
         print(f"Done loading zai-org/LongBench multi_news")
     
     def __len__(self) -> int:
@@ -165,15 +168,54 @@ class MultiNewsDataset(AbstractMDQADataset):
         }
 
 
-def load_mdoc_dataset(name: str, path: Optional[str], **kwargs) -> AbstractMDQADataset:
+class SAMSumDataset(AbstractMDQADataset):
+    def __init__(self) -> None:
+        print(f"Loading dataset from zai-org/LongBench samsum...")
+        self.data = datasets.load_dataset('zai-org/LongBench', 'samsum')['test']
+        self.system_prompt: str = "Summarize the dialogue into a few short sentences. The following are some examples.\n\n"
+        self.max_new_tokens: int = 128
+        self.paragraphs = self.data['context']
+        self.qid = self.data['_id']
+        self.answer = self.data['answers']
+        self.question = self.data['input']
+        self.metric = max_rouge_score
+        print(f"Done loading zai-org/LongBench multi_news")
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        context_list = []
+        for item in self.paragraphs[idx].split('Dialogue'):
+            if len(item) > 10:
+                context_list.append('Dialogue' + item + '\n')
+        return {
+            'qid': self.qid[idx],
+            'question': self.question[idx],
+            'documents': context_list,
+            'answer': self.answer[idx],
+        }
+
+
+def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
     if name == "musique":
-        assert path is not None, "path should be specified when using Musique dataset"
+        if path is None:
+            print('Defaulting musique dataset path to "../datasets/musique.jsonl"')
+            path = "../datasets/musique.jsonl"
+        if 'only_supporting' not in kwargs:
+            kwargs['only_supporting'] = False
         return MusiqueDataset(path, kwargs['only_supporting'])
     elif name == "wikimqa":
-        assert path is not None, "path should be specified when using 2WikiMQA dataset"
+        if path is None:
+            print('Defaulting wikimqa dataset path to "../datasets/wikimqa.json"')
+            path = "../datasets/wikimqa.json"
         return WikiMQADataset(path)
     elif name == "hotpotqa":
         return HotpotQADataset()
+    elif name == "multinews":
+        return MultiNewsDataset()
+    elif name == "samsum":
+        return SAMSumDataset()
     else:
         raise ValueError(f"Unsupported dataset name: {name}")
 

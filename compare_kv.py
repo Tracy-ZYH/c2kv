@@ -4,7 +4,7 @@ from typing import Tuple, List
 
 from itertools import batched
 from reuse_pipeline import LLMInference
-from mdocdataset import MusiqueDataset, WikiMQADataset
+from mdocdataset import load_mdoc_dataset
 
 
 def save_kv_cache(
@@ -21,27 +21,29 @@ def save_kv_cache(
 
 # ============ 1. Load Dataset and Model ==============
 
-max_new_tokens = 1
-musique = MusiqueDataset('../musique_ans_v1.0_dev.jsonl', False)
-# musique = WikiMQADataset('../2WikiMultihopQA/dev.json')
+# musique = load_mdoc_dataset('musique', '../musique_ans_v1.0_dev.jsonl', False)
+# musique = load_mdoc_dataset('wikimqa', '../2WikiMultihopQA/dev.json')
+musique = load_mdoc_dataset('samsum')
+sample = musique[20]
 
-sample = musique[203]
+# max_new_tokens = musique.max_new_tokens
+max_new_tokens = 1
 
 print(len(sample["documents"]))
-sample["documents"] = sample["documents"][:12]
+sample["documents"] = sample["documents"][:10]
 # sample["documents"] = ["".join(batch_doc) for batch_doc in batched(sample["documents"], 3)]
-full_query = musique.get_system_prompt() + "".join(sample['documents']) + sample['question']
+full_query = musique.system_prompt + "".join(sample['documents']) + sample['question']
 
 print("============ Request ============")
 print(full_query)
 print("Answer:", sample['answer'])
 print("=================================")
 
-inference = LLMInference("Qwen/Qwen2.5-32B-Instruct")
+inference = LLMInference("Qwen/Qwen3-4B-Instruct-2507")
 
 # ============ 2. Prefill System Prompt and Documents ==============
 
-sys_instance = inference.get_prefill_kv_cache(musique.get_system_prompt(), True)
+sys_instance = inference.get_prefill_kv_cache(musique.system_prompt, True)
 sys_ids, sys_cache = sys_instance.unpack()
 print("System prompt KV Cache Shape")
 print(len(sys_cache), len(sys_cache[0]), len(sys_cache[0][0]), sys_cache[0][0][0].shape)

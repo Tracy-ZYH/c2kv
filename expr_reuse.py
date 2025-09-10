@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from tqdm import tqdm
+from itertools import batched
 import datasets
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
@@ -49,9 +50,8 @@ def evaluate_model_on_dataset(
 
         # Avoid CUDA OOM in get_prefill_kv_cache
         # context_cache = None
-        # for idx in range(0, len(example['documents']), 8):
-        #     batched_documents = example['documents'][idx: idx+4]
-        #     cache_batch = evaluator.get_prefill_kv_cache(batched_documents, False)
+        # for batch_doc in batched(example['documents'], 4):
+        #     cache_batch = evaluator.get_prefill_kv_cache(batch_doc, False)
         #     context_cache = cache_batch if context_cache is None else context_cache.stack(cache_batch)
 
         system_cache = sys_cache
@@ -69,6 +69,10 @@ def evaluate_model_on_dataset(
             query_text=example['question'],
             max_new_tokens=dataset.max_new_tokens,
         )
+
+        del context_cache
+        del system_cache
+        torch.cuda.empty_cache()
 
         em_score = dataset.metric(pred, example['answer'])
         em_scores.append(em_score)
