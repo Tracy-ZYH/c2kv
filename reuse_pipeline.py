@@ -1,4 +1,5 @@
 import torch
+import string
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 from transformers.cache_utils import DynamicCache, StaticCache
 from typing import List, Tuple, Dict, Any, Optional, Union
@@ -31,7 +32,12 @@ class BatchedKVInstance:
 
 
 class LLMInference:
-    def __init__(self, model_name_or_path: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(
+        self, 
+        model_name_or_path: str, 
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        attn_impl: str = "sdpa",
+    ):
         """
         初始化模型和分词器
         
@@ -39,6 +45,7 @@ class LLMInference:
             model_name_or_path: 模型名称或路径
             device: 设备类型 (cuda/cpu)
         """
+        self.attn_impl = attn_impl
         self.device = device
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path,
@@ -50,6 +57,7 @@ class LLMInference:
             device_map="auto" if device == "cuda" else None,
             trust_remote_code=True,
             local_files_only=True,
+            attn_implementation=attn_impl,
         )
         
         if self.tokenizer.pad_token is None:
@@ -386,3 +394,38 @@ class LLMInference:
             input_ids=[full_input_ids],
             past_key_values=tuple(ret_kv),
         )
+
+
+def gen_recompute_mask(
+    tokenizer: AutoTokenizer,
+    batch: BatchedKVInstance, 
+    recompute_type: str,
+) -> List[torch.Tensor]:
+    recompute_masks = []
+    if recompute_type.startswith("leading"):
+        leading_num = int(recompute_type.split('-')[1])
+        for cache in batch.past_key_values[0][0]:
+            mask = torch.zeros((cache.shape[1],), dtype=torch.bool, device=cache.device)
+            mask[:leading_num] = 1
+            recompute_masks.append(mask)
+    elif recompute_type.startswith("pctg"):
+        leading_num = int(recompute_type.split('-')[1])
+        for cache in batch.past_key_values[0][0]:
+            prefix_length = max(4, int(cache.shape[1] * leading_num / 100))
+            mask = torch.zeros((cache.shape[1],), dtype=torch.bool, device=cache.device)
+            mask[:prefix_length] = 1
+            recompute_masks.append(mask)
+    elif recompute_type.startswith("punc"):
+        leading_num = int(recompute_type.split('-')[1])
+        punctuations = set([ch for ch in string.punctuation])
+        for input_ids in batch.input_ids:
+            mask = torch.zeros((input_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
+            mask[:leading_num] = 1
+            for idx, token_id in enumerate(input_ids):
+                token = tokenizer.decode(token_id)
+                if token[0] in punctuations or token[-1] in punctuations:
+                    mask[idx] = 1
+            recompute_masks.append(mask)
+    else:
+        raise ValueError(f"Unrecognized recompute type {recompute_type}")
+    return recompute_masks

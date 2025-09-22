@@ -4,6 +4,7 @@ from dataclasses import asdict
 import argparse
 import contextlib
 import os
+import sys
 import time
 import json
 from tqdm import tqdm
@@ -168,7 +169,7 @@ def main():
 
         print_output(llm, warmup_prompt, sampling_params, "warmup")
 
-        for i in tqdm(range(num_examples)):
+        for i in tqdm(range(num_examples), file=sys.stdout):
             example = dataset[i]
 
             example_input = []
@@ -184,9 +185,9 @@ def main():
             example_input.extend(blend_special_str)
             example_input.extend(tokenizer.encode(example['question']))
 
-            # _ = llm.generate(
-            #     prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
-            # ) # warmup
+            _ = llm.generate(
+                prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
+            ) # warmup
             output = llm.generate(
                 prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
             )

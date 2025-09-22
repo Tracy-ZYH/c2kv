@@ -1,29 +1,15 @@
 import argparse
 import json
-import string
-import regex
 from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from tqdm import tqdm
+import numpy as np
 from itertools import batched
-import datasets
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
-from reuse_pipeline import LLMInference, BatchedKVInstance
+from reuse_pipeline import LLMInference, BatchedKVInstance, gen_recompute_mask
 
-
-def gen_recompute_mask(batch: BatchedKVInstance, recompute_type: str) -> List[torch.Tensor]:
-    recompute_masks = []
-    if recompute_type.startswith("leading"):
-        leading_num = int(recompute_type.split('-')[1])
-        for cache in batch.past_key_values[0][0]:
-            mask = torch.zeros((cache.shape[1],), dtype=torch.bool, device=cache.device)
-            mask[:leading_num] = 1
-            recompute_masks.append(mask)
-    else:
-        raise ValueError(f"Unrecognized recompute type {recompute_type}")
-    return recompute_masks
 
 def evaluate_model_on_dataset(
     model_name: str,
@@ -59,7 +45,7 @@ def evaluate_model_on_dataset(
 
         if recompute_type is not None:
             system_cache = evaluator.selective_recompute(
-                sys_cache, context_cache, gen_recompute_mask(context_cache, recompute_type)
+                sys_cache, context_cache, gen_recompute_mask(evaluator.tokenizer, context_cache, recompute_type)
             )
             context_cache = None
 
@@ -134,7 +120,7 @@ def main():
                        help="Type of mask for selective recompute (e.g. \"leading-5\")")
     
     args = parser.parse_args()
-    
+
     # Load dataset
     dataset = load_mdoc_dataset(
         args.dataset, 

@@ -130,7 +130,7 @@ class HotpotQADataset(AbstractMDQADataset):
         context_list = []
         for item in self.paragraphs[idx].split('Passage'):
             if len(item) > 10:
-                context_list.append('\n\nPassage' + item)
+                context_list.append('Passage' + item + '\n\n')
         return {
             'qid': self.qid[idx],
             'question': QA_QUERY_PROMPT + self.question[idx] + "\n\nAnswer: ",
