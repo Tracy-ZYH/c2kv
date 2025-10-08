@@ -1,9 +1,9 @@
 import torch
 import numpy as np
 from typing import Tuple, List
-
 from itertools import batched
-from reuse_pipeline import LLMInference
+
+from reuse_pipeline import LLMInference, gen_recompute_mask
 from mdocdataset import load_mdoc_dataset
 
 
@@ -13,24 +13,27 @@ def save_kv_cache(
 ):
     layer_num = len(kv_cache)
     batch_size, head_num, seq_len, head_size = kv_cache[0][0].shape
-    cache_np = np.zeros((layer_num, 2, batch_size, head_num, seq_len, head_size))
+    # cache_np = np.zeros((layer_num, 2, batch_size, head_num, seq_len, head_size))
+    cache_np = np.zeros((layer_num, 2, batch_size, 1, seq_len, head_size))
     for layer_i, layer_kv in enumerate(kv_cache):
         for kv_i, korv in enumerate(layer_kv):
-            cache_np[layer_i][kv_i] = korv.cpu().float().numpy()
+            # cache_np[layer_i][kv_i] = korv.cpu().float().numpy()
+            cache_np[layer_i][kv_i] = korv[:, 0].view((batch_size, 1, seq_len, head_size)).cpu().float().numpy()
     np.save(filepath, cache_np)
 
 # ============ 1. Load Dataset and Model ==============
 
-# musique = load_mdoc_dataset('musique', '../musique_ans_v1.0_dev.jsonl', False)
-# musique = load_mdoc_dataset('wikimqa', '../2WikiMultihopQA/dev.json')
-musique = load_mdoc_dataset('samsum')
-sample = musique[20]
-
+musique = load_mdoc_dataset('musique', only_supporting=False)
+# musique = load_mdoc_dataset('hotpotqa')
+# musique = load_mdoc_dataset('samsum')
+# musique = load_mdoc_dataset('multinews')
+sample = musique[179]
+    
 # max_new_tokens = musique.max_new_tokens
 max_new_tokens = 1
 
 print(len(sample["documents"]))
-sample["documents"] = sample["documents"][:10]
+# sample["documents"] = sample["documents"][:10]
 # sample["documents"] = ["".join(batch_doc) for batch_doc in batched(sample["documents"], 3)]
 full_query = musique.system_prompt + "".join(sample['documents']) + sample['question']
 
@@ -39,7 +42,9 @@ print(full_query)
 print("Answer:", sample['answer'])
 print("=================================")
 
-inference = LLMInference("Qwen/Qwen3-4B-Instruct-2507")
+inference = LLMInference("meta-llama/Meta-Llama-3.1-8B-Instruct")
+query_input = inference.tokenizer(full_query).input_ids
+np.save("./saved_kv/input_ids.npy", np.array(query_input))
 
 # ============ 2. Prefill System Prompt and Documents ==============
 
@@ -57,6 +62,13 @@ for cache in context_cache[0][0]:
 print("\n===================\n")
 
 # ============ 3. Full Reuse ==============
+
+# inference._prefill_with_past_kv(
+#     system_prompt_kv=sys_instance,
+#     precomputed_kv=context_instance,
+#     query_text=sample['question'],
+#     max_new_tokens=max_new_tokens,
+# )
 
 output_text, kv_cache = inference.decode_with_past_kv(
     system_prompt_kv=sys_instance,
@@ -88,11 +100,11 @@ del kv_cache
 
 # ============ 5. Selective Recompute ==============
 
-recompute_masks = []
-for cache in context_cache[0][0]:
-    mask = torch.zeros((cache.shape[1]), dtype=torch.bool)
-    mask[:10] = 1
-    recompute_masks.append(mask)
+recompute_masks = gen_recompute_mask(
+    inference.tokenizer,
+    context_instance,
+    "punc-4",
+)
 
 updated_cache = inference.selective_recompute(sys_instance, context_instance, recompute_masks)
 

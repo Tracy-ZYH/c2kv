@@ -324,15 +324,15 @@ class LLMInference:
         retained_masks = [~mask for mask in recompute_masks]
 
         # 1. 从precomputed_kv中去除重算部分，再拼接
-        past_kv = []
+        retained_kv = []
         for (sys_key, sys_val), (pre_key, pre_val) in zip(system_kv.past_key_values, precomputed_kv.past_key_values):
-            past_kv.append((
+            retained_kv.append((
                 self._merge_selected_kv_layer(sys_key[0], pre_key, retained_masks, True),
                 self._merge_selected_kv_layer(sys_val[0], pre_val, retained_masks, False),
             ))
 
-        retained_kv_length = int(past_kv[0][0].shape[2])
-        retained_kv = DynamicCache.from_legacy_cache(tuple(past_kv))
+        retained_kv_length = int(retained_kv[0][0].shape[2])
+        retained_kv = DynamicCache.from_legacy_cache(tuple(retained_kv))
 
         # 2. Concatenate ids to recompute + prepare customized attention_mask
         recompute_length = full_kv_length - retained_kv_length
