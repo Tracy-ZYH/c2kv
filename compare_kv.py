@@ -24,13 +24,17 @@ def save_kv_cache(
 # ============ 1. Load Dataset and Model ==============
 
 musique = load_mdoc_dataset('musique', only_supporting=False)
+musique.system_prompt = ("You will be asked a question after reading several passages. "
+    "Please answer the question based on the given passages. Think step by step before answering.\n\n")
+musique.query_prompt = ("Answer the question based on the given passages. "
+    "Think step by step before answering.\n\nQuestion: ")
 # musique = load_mdoc_dataset('hotpotqa')
 # musique = load_mdoc_dataset('samsum')
 # musique = load_mdoc_dataset('multinews')
-sample = musique[179]
+sample = musique[24]
     
 # max_new_tokens = musique.max_new_tokens
-max_new_tokens = 1
+max_new_tokens = 128
 
 print(len(sample["documents"]))
 # sample["documents"] = sample["documents"][:10]

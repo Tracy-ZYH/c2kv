@@ -182,8 +182,7 @@ class Qwen3Config(PretrainedConfig):
         gist_type="interleave-4",
         gist_param="qkv", # which param in attention would be altered for gist tokens
         gist_pos="post", # where to insert gist tokens
-        gist_ratio=0.1, # how many gist tokens related to the original tokens
-        gist_token_id=None, # gist token id (default to be bos token id)
+        gist_token_id=None, # gist token id (default to be eos token)
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -230,8 +229,7 @@ class Qwen3Config(PretrainedConfig):
         self.gist_type = gist_type
         self.gist_param = gist_param
         self.gist_pos = gist_pos
-        self.gist_ratio = gist_ratio
-        self.gist_token_id = kwargs["eos_token_id"] if gist_token_id is None else gist_token_id
+        self.gist_token_id = gist_token_id
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

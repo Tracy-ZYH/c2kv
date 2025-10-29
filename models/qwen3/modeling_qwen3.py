@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from collections.abc import Callable
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, List
 
 import torch
 from torch import nn
@@ -39,8 +39,7 @@ from transformers.utils import TransformersKwargs, auto_docstring, can_return_tu
 from transformers.utils.generic import check_model_inputs
 from .configuration_qwen3 import Qwen3Config
 
-
-from ..gist_utils import prepare_gist_input
+from ..gist_utils import prepare_gist_input, blend_gist_key_values
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -112,6 +111,13 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
+
+def apply_rotary_pos_emb_single(x, cos, sin, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    x_embed = (x * cos) + (rotate_half(x) * sin)
+    return x_embed
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -259,17 +265,17 @@ class Qwen3Attention(nn.Module):
         query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
         gist_query_states = self.q_norm(self.gist_q_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
         gist_key_states = self.k_norm(self.gist_k_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
-        gist_value_states = self.v_proj(gist_hidden_states).view(gist_hidden_shape).transpose(1, 2)
-        
+        gist_value_states = self.gist_v_proj(gist_hidden_states).view(gist_hidden_shape).transpose(1, 2)
 
         # copy gist states to query, key, value
         query_states = torch.cat([query_states, gist_query_states], dim=2)
         key_states = torch.cat([key_states, gist_key_states], dim=2)
         value_states = torch.cat([value_states, gist_value_states], dim=2)
-
-        # save gist key value states before RoPE
+        
+        # save gist key value states before reshaping and RoPE
         gist_key_values = (gist_key_states, gist_value_states)
 
         cos, sin = position_embeddings
@@ -458,12 +464,13 @@ class Qwen3Model(Qwen3PreTrainedModel):
         self.gist_type = config.gist_type
         self.gist_embed_tokens = nn.Embedding(1, config.hidden_size, self.padding_idx)
         self.gist_embed_tokens._is_hf_initialized = True
+        assert config.gist_token_id is not None
         self.gist_token_id = config.gist_token_id
 
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs()
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,
@@ -536,16 +543,16 @@ class Qwen3Model(Qwen3PreTrainedModel):
             past_key_values=past_key_values if use_cache else None,
         )
 
-    
     def generate_gist(
         self,
         input_ids: torch.LongTensor,
+        attention_mask: torch.BoolTensor,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> BaseModelOutputWithPast:
+    ) -> Tuple[BaseModelOutputWithPast, torch.Tensor]:
         attention_mask, gist_mask, position_ids = prepare_gist_input(
             self.vocab_size, input_ids, attention_mask, self.gist_type
         )
-        gist_embed = self.gist_embed_tokens(torch.zeros_like(gist_mask))
+        gist_embed = self.gist_embed_tokens(torch.zeros_like(gist_mask, dtype=torch.long))
         inputs_embeds = self.embed_tokens(input_ids)
         inputs_embeds = torch.cat([inputs_embeds, gist_embed], dim=1)
 
@@ -559,7 +566,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             hidden_states, gist_layer_kv = decoder_layer.forward_with_gist(
                 hidden_states,
                 gist_mask,
-                causal_mask_mapping[decoder_layer.attention_type],
+                attention_mask,
                 position_embeddings,
                 **kwargs,
             )
@@ -569,10 +576,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=tuple(gist_key_values),
-        )
+        ), gist_mask, position_ids[:, -gist_mask.shape[1]:]
     
     def _init_gist_embed(self, missing_keys):
-        if "gist_embed_tokens.weight" in missing_keys:
+        if "model.gist_embed_tokens.weight" in missing_keys:
             self.gist_embed_tokens.weight.data[:] = self.embed_tokens.weight.data[
                 self.gist_token_id: self.gist_token_id + 1
             ]
@@ -606,6 +613,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         r"""
@@ -613,6 +621,9 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
             config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
             (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+        context_input_ids (`torch.LongTensor` of shape `(batch_size, chunk_num, sequence_length)`, *optional*):
+            List of input ids for generating gist.
 
         Example:
 
@@ -630,6 +641,49 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        # Generate gist
+        if context_input_ids is not None:
+            assert past_key_values is None, "past_key_values should be None when context_input_ids is not None"
+            # gist_key_values = []
+            # gist_masks = []
+            # gist_position_ids = []
+            # for context in context_input_ids:
+            #     gist_attention_mask = torch.ones_like(context, dtype=torch.bool)
+            #     outputs, gist_mask, pos_ids = self.model.generate_gist(context, gist_attention_mask, **kwargs)
+            #     gist_key_values.append(outputs.past_key_values)
+            #     gist_masks.append(gist_mask)
+            #     gist_position_ids.append(pos_ids)
+            # past_key_values, gist_attn_mask = blend_gist_key_values(
+            #     self.config, gist_key_values, gist_masks, gist_position_ids,
+            #     self.model.rotary_emb, 0
+            # )
+            batch_size, chunk_num, seq_len = context_input_ids.shape
+            context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
+            gist_attn_mask = torch.ones_like(context_input_ids, dtype=torch.bool)
+            outputs, gist_mask, pos_ids = self.model.generate_gist(context_input_ids, gist_attn_mask, **kwargs)
+            gist_len = gist_mask.shape[1]
+            pos_ids = pos_ids.reshape(batch_size, chunk_num, gist_len)
+            for chunk_i in range(chunk_num):
+                pos_ids[:, chunk_i] += chunk_i * seq_len
+            pos_ids = pos_ids.reshape(batch_size * chunk_num, gist_len)
+            cos, sin = self.model.rotary_emb(outputs.last_hidden_state, pos_ids)
+            past_key_values = []
+            head_num = outputs.past_key_values[0][0].shape[1]
+            for key, value in outputs.past_key_values:
+                key = apply_rotary_pos_emb_single(key, cos, sin)
+                key = key.reshape(batch_size, chunk_num, head_num, gist_len, -1).transpose(1, 2)
+                value = value.reshape(batch_size, chunk_num, head_num, gist_len, -1).transpose(1, 2)
+                past_key_values.append((
+                    key.reshape(batch_size, head_num, chunk_num * gist_len, -1),
+                    value.reshape(batch_size, head_num, chunk_num * gist_len, -1)
+                ))
+            past_key_values = DynamicCache(past_key_values, config=self.config)
+            gist_mask = gist_mask.reshape(batch_size, chunk_num * gist_len)
+            breakpoint()
+            # concat gist_attn_mask to attention_mask
+            if attention_mask is not None:
+                attention_mask = torch.cat([gist_mask, attention_mask], dim=1)
+
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -671,9 +725,6 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         # initialize weights of possible q,k,v,o,mlp
         for layer in model.model.layers:
             layer.self_attn._init_gist_proj(missing_keys)
-        
-        for name, module in model.named_modules():
-            module.requires_grad_('gist' in name)
 
         return model
 
