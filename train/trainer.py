@@ -44,8 +44,8 @@ class GistTrainer(Trainer):
         outputs = super().compute_loss(model, inputs, return_outputs)
         return outputs
     
-    def _get_train_sampler(self, data_source) -> Optional[Sampler]:
-        return InifiniteSampler(data_source)
+    def _get_train_sampler(self, data_source) -> Sampler:
+        return InifiniteSampler()
 
 
 class InifiniteSampler(Sampler):

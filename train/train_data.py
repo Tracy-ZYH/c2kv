@@ -55,15 +55,23 @@ def _preprocess_pretrain_data(
 
 
 class PretrainDataset:
-    def __init__(self, path: str, tokenizer: AutoTokenizer = None, shuffle_seed: int = 42):
-        dataset = datasets.load_dataset(path, split='train', streaming=True)
+    def __init__(self, 
+        path: str, 
+        tokenizer: AutoTokenizer = None, 
+        split: str = 'train', 
+        shuffle_seed: int = 42,
+        min_length: int = 1024,
+        max_length: int = 4096,
+        **kwargs: Any,
+    ):
+        dataset = datasets.load_dataset(path, split=split, streaming=True)
         dataset.shuffle(seed=shuffle_seed)
         self.dataset = dataset.map(
             _preprocess_pretrain_data,
             fn_kwargs={
                 'tokenizer': tokenizer,
-                'min_length': 1024,
-                'max_length': 4096,
+                'min_length': min_length,
+                'max_length': max_length,
             },
             batched=True, batch_size=32, with_indices=True,
             remove_columns=['text', 'meta'],
@@ -78,7 +86,7 @@ class PretrainDataset:
         return next(self.iterator)
 
 
-def get_training_dataset(type: str, path: str, tokenizer: AutoTokenizer):
+def get_dataset(type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
     if type == "pretrain":
-        return PretrainDataset(path, tokenizer)
+        return PretrainDataset(path, tokenizer, **kwargs)
     return None

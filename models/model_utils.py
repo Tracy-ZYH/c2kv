@@ -167,7 +167,7 @@ def get_model_and_tokenizer(
         if evaluation_mode:
             # NOTE: essential to disable all gradient in-place, so that when calling accelerator.prepare, the forward function will not be wrapped that may consume extra GPU memory
             model.requires_grad_(False)
-        logger.info(model.config)
+        # logger.info(model.config)
 
     # override the default generation config
     generation_config = model_args.get_generation_config()

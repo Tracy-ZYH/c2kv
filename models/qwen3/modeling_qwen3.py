@@ -37,6 +37,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
 from transformers.utils.generic import check_model_inputs
+from transformers.integrations import is_deepspeed_zero3_enabled
 from .configuration_qwen3 import Qwen3Config
 
 from ..gist_utils import prepare_gist_input, blend_gist_key_values
@@ -221,9 +222,14 @@ class Qwen3Attention(nn.Module):
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
+            if self.training: # when training, use the cached key and value states
+                key_cache, value_cache = past_key_values[self.layer_idx]
+                key_states = torch.cat([key_cache, key_states], dim=2)
+                value_states = torch.cat([value_cache, value_states], dim=2)
+            else:
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+    
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
@@ -302,6 +308,23 @@ class Qwen3Attention(nn.Module):
         return attn_output, gist_key_values
     
     def _init_gist_proj(self, missing_keys):
+        if is_deepspeed_zero3_enabled():
+            import deepspeed
+            def init_proj_deepspeed(gist_proj, proj, gist_name):
+                if gist_name not in self.config.gist_param:
+                    return
+                params = [gist_proj.weight, proj.weight]
+                if proj.bias is not None:
+                    params.extend[gist_proj.bias, proj.bias]
+                with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+                    if (gist_proj.weight.sum(-1) == 0).any() or (gist_proj.weight > 1e29).any():
+                        gist_proj.weight.data.copy_(proj.weight.data)
+                    if proj.bias is not None:
+                        gist_proj.bias.data.copy_(proj.bias.data)
+            init_proj_deepspeed(self.gist_q_proj, self.q_proj, 'q')
+            init_proj_deepspeed(self.gist_k_proj, self.k_proj, 'k')
+            init_proj_deepspeed(self.gist_v_proj, self.v_proj, 'v')
+            return
         def init_proj(gist_proj, proj, gist_name):
             module_name = f'gist_{gist_name}_proj'
             if gist_name not in self.config.gist_param:
@@ -464,7 +487,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         self.gist_type = config.gist_type
         self.gist_embed_tokens = nn.Embedding(1, config.hidden_size, self.padding_idx)
         self.gist_embed_tokens._is_hf_initialized = True
-        assert config.gist_token_id is not None
+        assert config.gist_token_id is not None, "Make sure gist_token_id is set in the config"
         self.gist_token_id = config.gist_token_id
 
         # Initialize weights and apply final processing
@@ -579,6 +602,16 @@ class Qwen3Model(Qwen3PreTrainedModel):
         ), gist_mask, position_ids[:, -gist_mask.shape[1]:]
     
     def _init_gist_embed(self, missing_keys):
+        if is_deepspeed_zero3_enabled():
+            import deepspeed
+            params = [self.gist_embed_tokens.weight, self.embed_tokens.weight]
+            with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+                # deepspeed will initialize the parameters to zero
+                if (self.gist_embed_tokens.weight == 0).all():
+                    self.gist_embed_tokens.weight.data[:] = self.embed_tokens.weight.data[
+                        self.gist_token_id: self.gist_token_id + 1
+                    ]
+            return
         if "model.gist_embed_tokens.weight" in missing_keys:
             self.gist_embed_tokens.weight.data[:] = self.embed_tokens.weight.data[
                 self.gist_token_id: self.gist_token_id + 1
@@ -679,7 +712,6 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 ))
             past_key_values = DynamicCache(past_key_values, config=self.config)
             gist_mask = gist_mask.reshape(batch_size, chunk_num * gist_len)
-            breakpoint()
             # concat gist_attn_mask to attention_mask
             if attention_mask is not None:
                 attention_mask = torch.cat([gist_mask, attention_mask], dim=1)

@@ -123,9 +123,13 @@ class ModelArgs:
 
 @dataclass
 class TrainingArgs(TrainingArguments):
-    min_length: int = field(
-        default=0,
+    pretrain_min_length: int = field(
+        default=1024,
         metadata={'help': 'Minimum length of the input for training'}
+    )
+    pretrain_max_length: int = field(
+        default=4096,
+        metadata={'help': 'Maximum length of the input for training'}
     )
     only_train_gist: bool = field(
         default=True,
