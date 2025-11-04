@@ -4,7 +4,7 @@ import datasets
 import string
 import regex
 
-from longbench_metrics import qa_f1_score, rouge_score
+from longbench_metrics import qa_f1_score, rouge_score, qa_f1_zh_score, rouge_zh_score
 
 
 def max_f1_score(pred: str, gt_list: List[str]) -> float:
@@ -14,6 +14,7 @@ def max_f1_score(pred: str, gt_list: List[str]) -> float:
 def max_rouge_score(pred: str, gt_list: List[str]) -> float:
     pred = pred.split('\n')[0]
     return max([rouge_score(pred, gt) for gt in gt_list])
+    
 
 QA_SYSTEM_PROMPT: str = ("You will be asked a question after reading several passages. "
     "Please directly answer the question based on the given passages. Do NOT repeat the question. "
@@ -54,6 +55,7 @@ class WikiMQADataset(AbstractMDQADataset):
         self.data = datasets.load_dataset("json", data_files=data_path)['train']
         self.system_prompt: str = QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS
+        self.query_prompt: str = QA_QUERY_PROMPT
         print(f"Loading dataset from {data_path}...")
         self.context = self.data['context']
         self.qid = self.data['_id']
@@ -72,7 +74,7 @@ class WikiMQADataset(AbstractMDQADataset):
             context_list.append(context_str)
         return {
             'qid': self.qid[idx],
-            'question': QA_QUERY_PROMPT + self.question[idx] + "\n\nAnswer: ",
+            'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
             'documents': context_list,
             'answer': [self.answer[idx]],
         }
@@ -85,6 +87,7 @@ class MusiqueDataset(AbstractMDQADataset):
         print(f"Loading dataset from {data_path}...")
         self.system_prompt: str = QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS
+        self.query_prompt: str = QA_QUERY_PROMPT
         self.only_supporting = only_supporting
         self.paragraphs = self.data['paragraphs']
         self.qid = self.data['id']
@@ -104,7 +107,7 @@ class MusiqueDataset(AbstractMDQADataset):
             context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
         return {
             'qid': self.qid[idx],
-            'question': QA_QUERY_PROMPT + self.question[idx] + "\n\nAnswer: ",
+            'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
             'documents': context_list,
             'answer': self.answer[idx],
         }
@@ -116,6 +119,7 @@ class HotpotQADataset(AbstractMDQADataset):
         self.data = datasets.load_dataset('zai-org/LongBench', 'hotpotqa')['test']
         self.system_prompt: str = QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS
+        self.query_prompt: str = QA_QUERY_PROMPT
         self.paragraphs = self.data['context']
         self.qid = self.data['_id']
         self.answer = self.data['answers']
@@ -133,7 +137,7 @@ class HotpotQADataset(AbstractMDQADataset):
                 context_list.append('Passage' + item + '\n\n')
         return {
             'qid': self.qid[idx],
-            'question': QA_QUERY_PROMPT + self.question[idx] + "\n\nAnswer: ",
+            'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
             'documents': context_list,
             'answer': self.answer[idx],
         }
@@ -197,6 +201,49 @@ class SAMSumDataset(AbstractMDQADataset):
         }
 
 
+class AmapDataset(AbstractMDQADataset):
+    CONTEXT_BEGIN: str = "\n<召回的通用搜索内容>\n"
+    CONTEXT_END: str = "</召回的通用搜索内容>"
+
+    @staticmethod
+    def metric(pred: str, gt_list: List[str]) -> float:
+        return max([qa_f1_zh_score(pred, gt) for gt in gt_list])
+
+    def _preprocess_amap_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        system_prompt, prompt = sample['prompt'].split(self.CONTEXT_BEGIN, 1)
+        context_str, question = prompt.split(self.CONTEXT_END, 1)
+        contexts = [
+            '[1]' + context for context in context_str.split('[1]')
+            if len(context) > 10
+        ]
+        return {
+            'qid': sample['traceId'],
+            'system_prompt': system_prompt + self.CONTEXT_BEGIN,
+            'question': self.CONTEXT_END + question,
+            'documents': contexts,
+            'answer': [sample['response']],
+        }
+
+    def __init__(self, csv_path: str) -> None:
+        print(f"Loading inhouse Amap dataset from {csv_path}...")
+        data = datasets.load_dataset("csv", data_files=csv_path)['train']
+        data = data.filter(
+            lambda sample: len(sample['prompt']) < 6e3 and self.CONTEXT_BEGIN in sample['prompt'], 
+            num_proc=32
+        )
+        data = data.map(self._preprocess_amap_sample, num_proc=32, remove_columns=data.column_names)
+        self.data = data.filter(lambda sample: len(sample['documents']) > 0, num_proc=32).select(range(1000))
+        self.system_prompt: Optional[str] = None
+        self.max_new_tokens: int = 512
+        print(f"Done loading Amap dataset from {csv_path}")
+
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
+
+
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
     if name == "musique":
         if path is None:
@@ -216,15 +263,10 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         return MultiNewsDataset()
     elif name == "samsum":
         return SAMSumDataset()
+    elif name == "amap":
+        if path is None:
+            print('Defaulting amap dataset path to "../datasets/AmapData.csv"')
+            path = "../datasets/AmapData.csv"
+        return AmapDataset(path)
     else:
         raise ValueError(f"Unsupported dataset name: {name}")
-
-
-if __name__ == "__main__":
-    wikimqa = WikiMQADataset("../datasets/wikimqa.json")
-    print(wikimqa[100])
-    dataset = datasets.load_dataset("jsonl", data_files="../datasets/musique_ans_v1.0_dev.jsonl")['train']
-    print(dataset)
-    print(dataset['answer'][:10])
-    musique = MusiqueDataset("../musique_ans_v1.0_dev.jsonl")
-    print(musique[100])

@@ -29,23 +29,23 @@ def evaluate_model_on_dataset(
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
 
-    sys_cache = evaluator.get_prefill_kv_cache(dataset.system_prompt, True)
+    if dataset.system_prompt is None:
+        sys_cache = None
+    else:
+        sys_cache = evaluator.get_prefill_kv_cache(dataset.system_prompt, True)
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
 
-        # Avoid CUDA OOM in get_prefill_kv_cache
-        # context_cache = None
-        # for batch_doc in batched(example['documents'], 4):
-        #     cache_batch = evaluator.get_prefill_kv_cache(batch_doc, False)
-        #     context_cache = cache_batch if context_cache is None else context_cache.stack(cache_batch)
-
         system_cache = sys_cache
+        if 'system_prompt' in example:
+            system_cache = evaluator.get_prefill_kv_cache(example['system_prompt'], True)
         context_cache = evaluator.get_prefill_kv_cache(example['documents'], False)
 
         if recompute_type is not None:
             system_cache = evaluator.selective_recompute(
-                sys_cache, context_cache, gen_recompute_mask(evaluator.tokenizer, context_cache, recompute_type)
+                system_cache, context_cache, gen_recompute_mask(evaluator.tokenizer, context_cache, recompute_type),
+                discard_kv='system_prompt' in example
             )
             context_cache = None
 
@@ -76,7 +76,7 @@ def evaluate_model_on_dataset(
     # Save results if output file is specified
     if output_file:
         with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
+            json.dump(results, f, indent=2, ensure_ascii=False)
         
         # Also save a summary
         summary = {

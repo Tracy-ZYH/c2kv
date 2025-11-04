@@ -1,4 +1,6 @@
+import os
 import datasets
+import glob
 from random import randint
 from functools import partial
 from transformers import AutoTokenizer
@@ -64,7 +66,12 @@ class PretrainDataset:
         max_length: int = 4096,
         **kwargs: Any,
     ):
-        dataset = datasets.load_dataset(path, split=split, streaming=True)
+        # dataset = datasets.load_dataset(path, split=split, streaming=True)
+        data_files = [
+            file for file in glob.iglob(os.path.join(path, split, '**'), recursive=True)
+            if '.' in os.path.basename(file)
+        ]
+        dataset = datasets.load_dataset(path, data_files=data_files, streaming=True)['train']
         dataset.shuffle(seed=shuffle_seed)
         self.dataset = dataset.map(
             _preprocess_pretrain_data,

@@ -30,35 +30,32 @@ def setup_environment_variables(
 ):
     # LMCache-related environment variables
 
-    # LMCache is set to use 256 tokens per chunk
-    os.environ["LMCACHE_CHUNK_SIZE"] = "256"
-
-    # Blending related config
+    # Blending related config# Enable blending in LMCache
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
-    os.environ["LMCACHE_BLEND_SPECIAL_STR"] = blend_special_str
+
+    # Separator string between different chunks
+    os.environ["LMCACHE_BLEND_SPECIAL_STR"] = " # # "
+
+    # Layerwise must be turned on when blending is enabled
     os.environ["LMCACHE_USE_LAYERWISE"] = "True"
 
+    # Determining which tokens to recompute at layer 1
+    os.environ["LMCACHE_BLEND_CHECK_LAYERS"] = "1"
+
+    # Ratio of tokens to recompute
+    os.environ["LMCACHE_BLEND_RECOMPUTE_RATIOS"] = "0.15"
+
+    # Optionally, we can use sparse attention to improve generation quality
+    # by using more accurate attention mask
     if enable_sparse:
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
         os.environ["LMCACHE_EXTRA_CONFIG"] = '{"enable_sparse": true}'
+    
+    # Enable local CPU backend in LMCache
+    os.environ["LMCACHE_LOCAL_CPU"] = "True"
 
-    if use_disk:
-        # Disable local CPU backend in LMCache
-        os.environ["LMCACHE_LOCAL_CPU"] = "False"
-
-        # Set the maximum size of the local CPU buffer size to 5GB
-        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
-
-        # Enable local disk backend in LMCache
-        os.environ["LMCACHE_LOCAL_DISK"] = "file://local_disk/"
-
-        # Set the maximum size of the local disk size to 10GB
-        os.environ["LMCACHE_MAX_LOCAL_DISK_SIZE"] = "10"
-    else:
-        # Enable local CPU backend in LMCache
-        os.environ["LMCACHE_LOCAL_CPU"] = "True"
-
-        # Set the maximum size of the local CPU size to 5GB
-        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
+    # Set the maximum size of the local CPU size to 5GB
+    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
 
 
 @contextlib.contextmanager
@@ -160,7 +157,11 @@ def main():
         tokenizer_has_bos = (warmup_prompt[0] == tokenizer.bos_token_id)
         print(f"Tokenizer has begin_of_sentence special token: {tokenizer_has_bos}.")
 
-        sys_prompt = tokenizer.encode(dataset.system_prompt)
+        if dataset.system_prompt is None:
+            sys_prompt = None
+        else:
+            sys_prompt = tokenizer.encode(dataset.system_prompt)
+        
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))
         if tokenizer_has_bos:
             blend_special_str = blend_special_str[1:]
@@ -173,7 +174,10 @@ def main():
             example = dataset[i]
 
             example_input = []
-            example_input.extend(sys_prompt)
+            if 'system_prompt' in example:
+                example_input.extend(tokenizer.encode(example['system_prompt']))
+            else:
+                example_input.extend(sys_prompt)
 
             for doc in example['documents']:
                 example_input.extend(blend_special_str)
@@ -205,7 +209,7 @@ def main():
     avg_score = sum(scores) / len(scores) if scores else 0
 
     with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, ensure_ascii=False)
     
     # Also save a summary
     summary = {

@@ -1,10 +1,11 @@
+import os
 import logging
 from transformers import HfArgumentParser, DataCollatorWithPadding
 from transformers.integrations import is_deepspeed_zero3_enabled
 
 from .train_data import get_dataset
 from .trainer import GistTrainer
-from models.model_utils import get_model_and_tokenizer, format_numel_str
+from models import *
 from gist_args import ModelArgs, TrainingArgs
 
 logging.basicConfig(

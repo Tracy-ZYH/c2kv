@@ -15,6 +15,8 @@ from mdocdataset import load_mdoc_dataset, AbstractMDQADataset
 
 def prepare_example(example, system_prompt):
     """处理单个示例的辅助函数"""
+    if 'system_prompt' in example:
+        system_prompt = example['system_prompt']
     prompt = system_prompt + "".join(example['documents']) + example['question']
     return prompt, example['answer'], example['qid']
 
@@ -193,7 +195,7 @@ def evaluate_model_on_dataset(
     # Save results if output file is specified
     if output_file:
         with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
+            json.dump(results, f, indent=2, ensure_ascii=False)
         
         # Also save a summary
         summary = {

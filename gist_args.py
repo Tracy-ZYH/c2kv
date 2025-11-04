@@ -22,10 +22,6 @@ class ModelArgs:
         default="sdpa",
         metadata={'help': 'Attention implementation.'}
     )
-    max_length: int = field(
-        default=4096,
-        metadata={'help': 'Maximum length of the input.'}
-    )
     chat_template: str = field(
         default='hf',
         metadata={'help': 'Instruction template name in fastchat.'}

@@ -41,6 +41,7 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 from .configuration_qwen3 import Qwen3Config
 
 from ..gist_utils import prepare_gist_input, blend_gist_key_values
+from ..gist_utils import apply_rotary_pos_emb as apply_rotary_pos_emb_single
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -114,13 +115,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-def apply_rotary_pos_emb_single(x, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    x_embed = (x * cos) + (rotate_half(x) * sin)
-    return x_embed
-
-
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -189,7 +183,7 @@ class Qwen3Attention(nn.Module):
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
         
         def _gen_gist_proj(head_num: int) -> nn.Linear:
-            proj = nn.Linear(config.hidden_size, head_num * self.head_dim, config.attention_bias)
+            proj = nn.Linear(config.hidden_size, head_num * self.head_dim, bias=config.attention_bias)
             proj.weight.data.zero_()
             proj._is_hf_initialized = True
             return proj

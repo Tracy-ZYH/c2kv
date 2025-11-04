@@ -311,6 +311,7 @@ class LLMInference:
         system_kv: BatchedKVInstance,
         precomputed_kv: BatchedKVInstance,
         recompute_masks: List[torch.BoolTensor],
+        discard_kv: bool = False
     ) -> BatchedKVInstance:
         # 0. 检查传入Tensor形状是否匹配
         device = system_kv.past_key_values[0][0][0].device
@@ -330,6 +331,10 @@ class LLMInference:
                 self._merge_selected_kv_layer(sys_key[0], pre_key, retained_masks, True),
                 self._merge_selected_kv_layer(sys_val[0], pre_val, retained_masks, False),
             ))
+
+        if discard_kv:
+            system_kv.past_key_values = ()
+            precomputed_kv.past_key_values = ()
 
         retained_kv_length = int(retained_kv[0][0].shape[2])
         retained_kv = DynamicCache.from_legacy_cache(tuple(retained_kv))
