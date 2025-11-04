@@ -234,7 +234,7 @@ class AmapDataset(AbstractMDQADataset):
         data = data.map(self._preprocess_amap_sample, num_proc=32, remove_columns=data.column_names)
         self.data = data.filter(lambda sample: len(sample['documents']) > 0, num_proc=32).select(range(1000))
         self.system_prompt: Optional[str] = None
-        self.max_new_tokens: int = 512
+        self.max_new_tokens: int = 768
         print(f"Done loading Amap dataset from {csv_path}")
 
     def __len__(self) -> int:
