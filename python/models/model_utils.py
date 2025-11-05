@@ -1,15 +1,34 @@
 import torch
-import transformers
-from dataclasses import asdict
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
-from transformers.utils import logging
-from transformers.integrations import is_deepspeed_zero3_enabled
 from packaging import version
 from logging import getLogger
+from typing import Tuple, Type
+from dataclasses import asdict
+import transformers
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers.modeling_utils import PreTrainedModel, PretrainedConfig
+from transformers.utils import logging
+from transformers.integrations import is_deepspeed_zero3_enabled
 
 from gist_args import ModelArgs
 
 logger = getLogger(__name__)
+
+
+def get_model_class(model_name_or_path: str) -> Tuple[Type[PretrainedConfig], Type[PreTrainedModel]]:
+    # from .llama import LlamaForCausalLM, LlamaConfig
+    from .qwen3 import Qwen3ForCausalLM, Qwen3Config
+    ARCHITECTURE_TO_CLASS = {
+        # 'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
+        'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
+    }
+    probe_config = AutoConfig.from_pretrained(
+        model_name_or_path, 
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+    architecture = probe_config.architectures[0]
+    config_class, model_class = ARCHITECTURE_TO_CLASS[architecture]
+    return config_class, model_class
 
 
 def get_model_and_tokenizer(
@@ -93,14 +112,7 @@ def get_model_and_tokenizer(
     architecture = probe_config.architectures[0]
 
     if model_args_dict["enable_gist"]:
-        # from .llama import LlamaForCausalLM, LlamaConfig
-        from .qwen3 import Qwen3ForCausalLM, Qwen3Config
-        ARCHITECTURE_TO_CLASS = {
-            # 'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
-            'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
-        }
-
-        config_class, model_class = ARCHITECTURE_TO_CLASS[architecture]
+        config_class, model_class = get_model_class(model_name_or_path)
 
         config = config_class.from_pretrained(
             model_name_or_path, 

@@ -12,6 +12,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def tokenize_for_reuse(
+    tokenizer: PreTrainedTokenizer,
+    texts: List[str],
+    keep_bos: bool = False,
+) -> Dict[str, torch.Tensor]:
+    kwargs = {"padding": True, "return_tensors": "pt", "return_attention_mask": True}
+    try:
+        inputs = tokenizer(texts, **kwargs)
+    except Exception as e:
+        texts = [text.encode("utf-8", errors="ignore").decode("utf-8") for text in texts]
+        inputs = tokenizer(texts, **kwargs)
+    # 去除begin_of_sentence特殊Token
+    if not keep_bos and int(inputs.input_ids[0, 0]) == tokenizer.bos_token_id:
+        inputs["input_ids"] = inputs.input_ids[:, 1:]
+        inputs["attention_mask"] = inputs.attention_mask[:, 1:]
+    return inputs
+
+
+def prefill_kv_cache(
+    model: PreTrainedModel,
+    inputs: Dict[str, torch.Tensor],
+) -> DynamicCache:
+    with torch.no_grad():
+        outputs = model(**inputs, use_cache=True, return_dict=True)
+    return outputs.past_key_values
+
+
 @dataclass
 class BatchedKVInstance:
     input_ids: List[torch.LongTensor]
@@ -84,48 +111,16 @@ class LLMInference:
         Returns:
             past_key_values: 包含所有层键值缓存的元组
         """
-        # 编码文本
-        try:
-            inputs = self.tokenizer(
-                texts, 
-                padding=True, 
-                return_tensors="pt", 
-                return_attention_mask=True
-            ).to(self.device)
-        except Exception as e:
-            inputs = self.tokenizer(
-                [text.encode("utf-8", errors="ignore").decode("utf-8") for text in texts], 
-                padding=True, 
-                return_tensors="pt", 
-                return_attention_mask=True
-            ).to(self.device)
+        inputs = tokenize_for_reuse(self.tokenizer, texts, keep_bos=keep_bos).to(self.device)
+        past_key_values = prefill_kv_cache(self.model, inputs)
 
-        if not keep_bos and int(inputs.input_ids[0, 0]) == self.tokenizer.bos_token_id:
-            inputs["input_ids"] = inputs.input_ids[:, 1:]
-            inputs["attention_mask"] = inputs.attention_mask[:, 1:]
-        
-        # 前向传播获取键值缓存
-        with torch.no_grad():
-            outputs = self.model(
-                **inputs,
-                use_cache=True,
-                return_dict=True
-            )
-        
-        # 返回past_key_values (包含所有层的key和value)
-        seq_len = [sum(seq_attn.cpu().tolist()) for seq_attn in inputs.attention_mask]
+        seq_len = [sum(seq_attn.tolist()) for seq_attn in inputs.attention_mask]
         input_ids = [ids[:seql] for ids, seql in zip(inputs.input_ids, seq_len)]
 
         full_kv = []
-        for layer in outputs.past_key_values:
-            layer_kv = []
-            for kv_i in range(2):
-                korv = []
-                for seq_i, seq_l in enumerate(seq_len):
-                    korv.append(layer[kv_i][seq_i][:, :seq_l])
-                layer_kv.append(korv)
-            full_kv.append(tuple(layer_kv))
-        # return tuple(full_kv), input_ids
+        for key, value in past_key_values:
+            for seq_i, seq_l in enumerate(seq_len):
+                full_kv.append((key[seq_i][:, :seq_l], value[seq_i][:, :seq_l]))
         return BatchedKVInstance(input_ids, tuple(full_kv))
 
     def decode_with_past_kv(
@@ -170,7 +165,7 @@ class LLMInference:
             if query_inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
                 query_inputs["input_ids"] = query_inputs.input_ids[:, 1:]
             query_inputs["input_ids"] = torch.cat([past_ids, query_inputs["input_ids"]], dim=1)
-            query_inputs["attention_mask"] = torch.ones_like(query_inputs["input_ids"])
+            query_inputs["attention_mask"] = torch.ones_like(query_inputs["input_ids"], dtype=torch.bool)
         
         # 获取查询文本的attention mask
         # if past_key_values is not None:
@@ -181,17 +176,16 @@ class LLMInference:
             past_key_values = DynamicCache()
 
         # 生成文本
-        with torch.no_grad():
-            generated_outputs = self.model.generate(
-                **query_inputs,
-                past_key_values=past_key_values,
-                # attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=None, top_p=None, top_k=None,
-                pad_token_id=self.tokenizer.eos_token_id,
-                use_cache=True,
-            )
+        generated_outputs = self.model.generate(
+            **query_inputs,
+            past_key_values=past_key_values,
+            # attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=None, top_p=None, top_k=None,
+            pad_token_id=self.tokenizer.eos_token_id,
+            use_cache=True,
+        )
         
         # 解码生成的文本（跳过查询部分）
         generated_tokens = generated_outputs[0][len(query_inputs.input_ids[0]):]

@@ -214,7 +214,7 @@ class AmapDataset(AbstractMDQADataset):
         context_str, question = prompt.split(self.CONTEXT_END, 1)
         contexts = [
             '[1]' + context for context in context_str.split('[1]')
-            if len(context) > 10
+            if len(context.strip()) > 2
         ]
         return {
             'qid': sample['traceId'],

@@ -189,9 +189,9 @@ def main():
             example_input.extend(blend_special_str)
             example_input.extend(tokenizer.encode(example['question']))
 
-            _ = llm.generate(
-                prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
-            ) # warmup
+            # _ = llm.generate(
+            #     prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
+            # ) # warmup
             output = llm.generate(
                 prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
             )

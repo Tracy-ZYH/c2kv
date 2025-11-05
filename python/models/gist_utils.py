@@ -82,8 +82,9 @@ def _concat_gist_key_values(
     seq_lens = gist_mask.sum(dim=1).tolist()
     # first accumulate the positional embeddings
     for i, seq_len in enumerate(seq_lens):
+        original_seq_len = gist_position_ids[i, seq_len-1].item() + 1
         gist_position_ids[i, :seq_len] += prefix_length
-        prefix_length += seq_len
+        prefix_length += original_seq_len
     cos, sin = rotary_emb(gist_key_values[0][0], gist_position_ids)
     pad_length = pad_length - sum(seq_lens)
     key_values = []

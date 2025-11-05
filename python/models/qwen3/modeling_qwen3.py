@@ -565,7 +565,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         input_ids: torch.LongTensor,
         attention_mask: torch.BoolTensor,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Tuple[BaseModelOutputWithPast, torch.Tensor]:
+    ) -> Tuple[BaseModelOutputWithPast, torch.Tensor, torch.Tensor]:
         attention_mask, gist_mask, position_ids = prepare_gist_input(
             self.vocab_size, input_ids, attention_mask, self.gist_type
         )

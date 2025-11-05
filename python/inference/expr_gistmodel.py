@@ -3,12 +3,14 @@ import json
 from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+from transformers.cache_utils import DynamicCache
 from tqdm import tqdm
 import numpy as np
 from itertools import batched
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
-from reuse_pipeline import LLMInference, BatchedKVInstance, gen_recompute_mask
+from models import get_model_class, blend_gist_key_values
+from reuse_pipeline import tokenize_for_reuse, prefill_kv_cache
 
 
 @torch.inference_mode()
@@ -17,50 +19,93 @@ def evaluate_model_on_dataset(
     dataset: AbstractMDQADataset,
     max_examples: Optional[int] = None,
     output_file: Optional[str] = None,
-    recompute_type: Optional[str] = None,
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
     
-    # Initialize evaluator
-    evaluator = LLMInference(model_name)
+    # Initialize tokenizer and model
+    tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+    _, model_class = get_model_class(model_name)
+    model = model_class.from_pretrained(
+        model_name, 
+        device_map="auto",
+        trust_remote_code=True,
+        local_files_only=True,
+        dtype=torch.bfloat16,
+        attn_implementation="sdpa"
+    )
+    device = model.device
     
     # Calculate metrics
     em_scores = []
     results = []
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
+    max_new_tokens = dataset.max_new_tokens
 
     if dataset.system_prompt is None:
         sys_cache = None
     else:
-        sys_cache = evaluator.get_prefill_kv_cache(dataset.system_prompt, True)
+        system_inputs = tokenize_for_reuse(tokenizer, [dataset.system_prompt], keep_bos=True).to(device)
+        sys_cache = prefill_kv_cache(model, system_inputs)
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
 
+        # Pre-compute system prompt
         system_cache = sys_cache
         if 'system_prompt' in example:
-            system_cache = evaluator.get_prefill_kv_cache(example['system_prompt'], True)
-        assert system_cache is not None, "System prompt is not pre-computed"
-        context_cache = evaluator.get_prefill_kv_cache(example['documents'], False)
+            system_inputs = tokenize_for_reuse(tokenizer, [example['system_prompt']], keep_bos=True).to(device)
+            system_cache = prefill_kv_cache(model, system_inputs)
+        assert system_cache is not None, "System prompt has not been pre-computed"
+        system_length = system_cache.get_seq_length()
 
-        if recompute_type is not None:
-            system_cache = evaluator.selective_recompute(
-                system_cache, context_cache, gen_recompute_mask(evaluator.tokenizer, context_cache, recompute_type),
-                discard_kv='system_prompt' in example
-            )
-            context_cache = None
-
-        pred = evaluator.decode_with_past_kv(
-            system_prompt_kv=system_cache,
-            precomputed_kv=context_cache,
-            query_text=example['question'],
-            max_new_tokens=dataset.max_new_tokens,
+        # Pre-compute context
+        context_inputs = tokenize_for_reuse(tokenizer, example['documents'], keep_bos=False).to(device)
+        outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
+        context_cache, _ = blend_gist_key_values(
+            model.config, [outputs.past_key_values], [gist_mask], [pos_ids],
+            model.model.rotary_emb, system_length
         )
+        context_length = context_inputs.attention_mask.sum().item()
+        precompute_length = pos_ids.max().item() + 1
+        assert precompute_length == system_length + context_length, \
+            f"Precompute position id mismatch: {precompute_length} != {system_length} + {context_length}"
+
+        # Concatenate system prompt and context
+        for system_layer, context_layer in zip(system_cache.layers, context_cache.layers):
+            context_layer.keys = torch.cat([system_layer.keys, context_layer.keys], dim=-2)
+            context_layer.values = torch.cat([system_layer.values, context_layer.values], dim=-2)
+        cache_length = context_cache.get_seq_length()
+        del system_cache
+
+        input_ids = tokenize_for_reuse(tokenizer, [example['question']], keep_bos=False).input_ids.to(device)
+        query_length = input_ids.shape[1]
+        original_length = query_length + precompute_length
+        position_ids = torch.arange(precompute_length, original_length, dtype=torch.long, device=device)
+        mock_gist_ids = torch.full((1, cache_length), 0, dtype=torch.long, device=device)
+        input_ids = torch.cat([mock_gist_ids, input_ids], dim=1)
+        attention_mask = torch.ones_like(input_ids)
+
+        # 生成文本
+        generated_outputs = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids.unsqueeze(0),
+            past_key_values=context_cache,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=None, top_p=None, top_k=None,
+            pad_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )
+        
+        # 解码生成的文本（跳过查询部分）
+        generated_tokens = generated_outputs[0][input_ids.shape[1]:]
+        generated_tokens = generated_tokens[:max_new_tokens] # force limited output
+        pred = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        print(pred)
 
         del context_cache
-        del system_cache
-        # torch.cuda.empty_cache()
 
         em_score = dataset.metric(pred, example['answer'])
         em_scores.append(em_score)
@@ -116,10 +161,6 @@ def main():
                        help="Output file to save results")
     parser.add_argument("--only_supporting", action="store_true",
                        help="For Musique dataset, use only supporting paragraphs")
-    parser.add_argument("--device", type=str, default="cuda",
-                       help="Device to use (cuda, cpu, mps)")
-    parser.add_argument("--recompute_type", type=str, default=None,
-                       help="Type of mask for selective recompute (e.g. \"leading-5\")")
     
     args = parser.parse_args()
 
@@ -138,7 +179,6 @@ def main():
         dataset=dataset,
         max_examples=args.max_examples,
         output_file=args.output_file,
-        recompute_type=args.recompute_type,
     )
     
     print(f"\nEvaluation Results:")

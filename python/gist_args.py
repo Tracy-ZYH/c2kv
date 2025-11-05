@@ -19,7 +19,7 @@ class ModelArgs:
         metadata={'help': 'Padding side of the tokenizer.'}
     )
     attn_impl: Optional[str] = field(
-        default="sdpa",
+        default="flex_attention",
         metadata={'help': 'Attention implementation.'}
     )
     chat_template: str = field(
