@@ -686,7 +686,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             # )
             batch_size, chunk_num, seq_len = context_input_ids.shape
             context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
-            gist_attn_mask = torch.ones_like(context_input_ids, dtype=torch.bool)
+            gist_attn_mask = context_input_ids != -100
             outputs, gist_mask, pos_ids = self.model.generate_gist(context_input_ids, gist_attn_mask, **kwargs)
             gist_len = gist_mask.shape[1]
             pos_ids = pos_ids.reshape(batch_size, chunk_num, gist_len)

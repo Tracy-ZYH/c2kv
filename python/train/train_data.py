@@ -1,7 +1,7 @@
 import os
 import datasets
 import glob
-from random import randint
+from itertools import repeat
 from functools import partial
 from transformers import AutoTokenizer
 from typing import Dict, List, Any, Mapping
@@ -30,29 +30,19 @@ def add_eos(inputs: Mapping, eos_token_id: int):
 
 def _preprocess_pretrain_data(
     data: Dict[str, List[Any]], 
-    indices: List[int],
     tokenizer: AutoTokenizer,
     min_length: int,
     max_length: int,
 ) -> Dict[str, List[Any]]:
-    outputs = {'input_ids': [], "length": [], "index": []}
-    for index, text in zip(indices, data['text']):
-        # truncate text for faster processing
-        encoded = tokenizer(text)
-        if len(encoded["input_ids"]) < min_length:
-            continue
-        if len(encoded['input_ids']) < max_length:
-            encoded = add_eos(encoded, tokenizer.eos_token_id)
-        else: # sample a substring from the text
-            start = randint(0, len(encoded['input_ids']) - max_length)
-            encoded = {k: v[start:start+max_length] for k, v in encoded.items()}
-        # encoded["labels"] = encoded["input_ids"]
-        for k, v in encoded.items():
-            if k in outputs:
-                outputs[k].append(v)
-        # length is required for grouping
-        outputs["length"].append(len(encoded['input_ids']))
-        outputs["index"].append(index)
+    outputs = {'input_ids': [], "length": []}
+    for encoded in map(tokenizer, data['text']):  # ignore max model input length warning here
+        seq_len = len(encoded["input_ids"])
+        for start in range(0, seq_len - min_length, max_length):
+            chunk_len = min(max_length, seq_len - start)
+            for k, v in encoded.items():
+                if k in outputs:
+                    outputs[k].append(v[start:start + chunk_len])
+            outputs["length"].append(chunk_len)
     return outputs
 
 
@@ -67,12 +57,12 @@ class PretrainDataset:
         **kwargs: Any,
     ):
         # dataset = datasets.load_dataset(path, split=split, streaming=True)
-        data_files = [
+        # NOTE: package datasets is modified to avoid globbing on nas, which costs hours
+        data_files = [ 
             file for file in glob.iglob(os.path.join(path, split, '**'), recursive=True)
             if '.' in os.path.basename(file)
         ]
         dataset = datasets.load_dataset(path, data_files=data_files, streaming=True)['train']
-        dataset.shuffle(seed=shuffle_seed)
         self.dataset = dataset.map(
             _preprocess_pretrain_data,
             fn_kwargs={
@@ -80,9 +70,9 @@ class PretrainDataset:
                 'min_length': min_length,
                 'max_length': max_length,
             },
-            batched=True, batch_size=32, with_indices=True,
+            batched=True, batch_size=32,
             remove_columns=['text', 'meta'],
-        )
+        ).shuffle(seed=shuffle_seed)
         self.iterator = iter(self.dataset)
     
     def __iter__(self):

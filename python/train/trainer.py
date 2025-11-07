@@ -15,9 +15,23 @@ class GistTrainer(Trainer):
         gist_mode_args = model_args.gist_mode.split("-")
         self.gist_chunk_size = list(map(int, gist_mode_args[0].split(",")))
         self.gist_max_chunk_num = int(gist_mode_args[1])
+        self.gist_max_chunk_size = max(self.gist_chunk_size)
+        self.frozen_model_loss: Optional[float] = None
+    
+    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
+        logs["frozen_model_loss"] = self.frozen_model_loss
+        self.frozen_model_loss = None
+        super().log(logs, start_time)
 
-    def compute_loss(
-        self, model, inputs, num_items_in_batch, return_outputs=False):
+    @torch.no_grad()
+    def _update_frozen_model_loss(self, model, inputs, context_len: int) -> None:
+        labels = inputs["input_ids"].clone()
+        labels[~inputs["attention_mask"]] = -100
+        labels[:, :context_len] = -100
+        loss = model(**inputs, labels=labels, use_cache=False).loss.detach().mean().item()
+        self.frozen_model_loss = loss
+
+    def compute_loss(self, model, inputs, num_items_in_batch, return_outputs=False):
         """
         Override the default compute_loss to process inputs 
         """
@@ -26,13 +40,16 @@ class GistTrainer(Trainer):
         min_seq_len = inputs["attention_mask"].sum(dim=1).min().item()
         chunk_sizes = [size for size in self.gist_chunk_size if size < min_seq_len]
         assert len(chunk_sizes) > 0, "The minimum sequence length is less than the gist chunk size!"
-        gist_chunk_size = rand_choice(chunk_sizes)
-        # gist_chunk_size = ((min_seq_len - 1) // self.gist_chunk_size) * self.gist_chunk_size # !! stage 1
+        # gist_chunk_size = rand_choice(chunk_sizes)
+        gist_chunk_size = max(chunk_sizes)
         num_chunk = min((min_seq_len - 1) // gist_chunk_size, self.gist_max_chunk_num)
         context_len = gist_chunk_size * num_chunk
+        # compute frozen model loss if necessary
+        if self.frozen_model_loss is None:
+            self._update_frozen_model_loss(model, inputs, context_len)
         # split inputs_ids into context and input_ids
-        inputs["context_input_ids"] = inputs["input_ids"][:, :context_len].reshape((batch_size, num_chunk, gist_chunk_size))
-        # inputs["context_input_ids"] = [context for context in inputs["context_input_ids"]]
+        context_input_ids = inputs["input_ids"][:, :context_len].reshape((batch_size, num_chunk, gist_chunk_size))
+        inputs["context_input_ids"] = context_input_ids
         inputs["input_ids"] = inputs["input_ids"][:, context_len:]
         inputs["attention_mask"] = inputs["attention_mask"][:, context_len:].bool()
         # prepare position_ids

@@ -41,7 +41,12 @@ def main():
         args=training_args,
         model_args=model_args,
         train_dataset=train_dataset,
-        data_collator=DataCollatorWithPadding(tokenizer=tokenizer, return_tensors='pt'),
+        data_collator=DataCollatorWithPadding(
+            tokenizer=tokenizer, 
+            padding="max_length",
+            max_length=training_args.pretrain_max_length,
+            return_tensors='pt',
+        ),
     )
 
     if train_dataset is not None:
