@@ -26,7 +26,7 @@ class GistTrainer(Trainer):
     @torch.no_grad()
     def _update_frozen_model_loss(self, model, inputs, context_len: int) -> None:
         labels = inputs["input_ids"].clone()
-        labels[~inputs["attention_mask"]] = -100
+        labels[~inputs["attention_mask"].bool()] = -100
         labels[:, :context_len] = -100
         loss = model(**inputs, labels=labels, use_cache=False).loss.detach().mean().item()
         self.frozen_model_loss = loss

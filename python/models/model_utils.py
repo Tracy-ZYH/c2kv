@@ -15,10 +15,10 @@ logger = getLogger(__name__)
 
 
 def get_model_class(model_name_or_path: str) -> Tuple[Type[PretrainedConfig], Type[PreTrainedModel]]:
-    # from .llama import LlamaForCausalLM, LlamaConfig
+    from .llama import LlamaForCausalLM, LlamaConfig
     from .qwen3 import Qwen3ForCausalLM, Qwen3Config
     ARCHITECTURE_TO_CLASS = {
-        # 'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
+        'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
         'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
     }
     probe_config = AutoConfig.from_pretrained(

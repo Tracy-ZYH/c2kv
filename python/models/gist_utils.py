@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, Callable, List, Union
 from transformers import PretrainedConfig
 from transformers.cache_utils import DynamicCache
+from transformers.integrations import is_deepspeed_zero3_enabled
 
 
 def rotate_half(x):
@@ -128,3 +129,57 @@ def blend_gist_key_values(
             torch.stack([kv[layer_i][1] for kv in key_values], dim=0)
         ))
     return DynamicCache(merged_gist_kv, config=model_config), attention_mask
+
+def gen_gist_proj(attn_hidden_size: int, config: PretrainedConfig) -> torch.nn.Linear:
+    proj = torch.nn.Linear(config.hidden_size, attn_hidden_size, bias=config.attention_bias)
+    proj.weight.data.zero_()
+    proj._is_hf_initialized = True
+    return proj
+
+def init_gist_proj(model, missing_keys):
+    if is_deepspeed_zero3_enabled():
+        import deepspeed
+        def init_proj_deepspeed(gist_proj, proj, gist_name):
+            if gist_name not in model.config.gist_param:
+                return
+            params = [gist_proj.weight, proj.weight]
+            if proj.bias is not None:
+                params.extend[gist_proj.bias, proj.bias]
+            with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+                if (gist_proj.weight.sum(-1) == 0).any() or (gist_proj.weight > 1e29).any():
+                    gist_proj.weight.data.copy_(proj.weight.data)
+                if proj.bias is not None:
+                    gist_proj.bias.data.copy_(proj.bias.data)
+        init_proj_deepspeed(model.gist_q_proj, model.q_proj, 'q')
+        init_proj_deepspeed(model.gist_k_proj, model.k_proj, 'k')
+        init_proj_deepspeed(model.gist_v_proj, model.v_proj, 'v')
+        return
+    def init_proj(gist_proj, proj, gist_name):
+        module_name = f'gist_{gist_name}_proj'
+        if gist_name not in model.config.gist_param:
+            return
+        if not any(module_name in missing_key for missing_key in missing_keys):
+            return
+        gist_proj.weight.data.copy_(proj.weight.data)
+        if proj.bias is not None:
+            gist_proj.bias.data.copy_(proj.bias.data)
+    init_proj(model.gist_q_proj, model.q_proj, 'q')
+    init_proj(model.gist_k_proj, model.k_proj, 'k')
+    init_proj(model.gist_v_proj, model.v_proj, 'v')
+    
+def init_gist_embed(model, missing_keys):
+    if is_deepspeed_zero3_enabled():
+        import deepspeed
+        params = [model.gist_embed_tokens.weight, model.embed_tokens.weight]
+        with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
+            # deepspeed will initialize the parameters to zero
+            # NOTE: with Llama3.1, change the following line to `if True` in order to initialize the parameters
+            if (model.gist_embed_tokens.weight == 0).all():
+                model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
+                    model.gist_token_id: model.gist_token_id + 1
+                ]
+        return
+    if "model.gist_embed_tokens.weight" in missing_keys:
+        model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
+            model.gist_token_id: model.gist_token_id + 1
+        ]

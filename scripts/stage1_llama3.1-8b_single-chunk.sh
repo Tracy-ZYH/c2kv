@@ -1,16 +1,17 @@
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
+export OUTPUT_DIR=/home/admin/workspace/aop_lab/app_data/checkpoints/llama3.1-8b/
 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage1 \
-    --max_steps 100000 \
-    --model_name_or_path ./outputs/qwen3-4b/32x-single-chunk/checkpoint-50000 \
+    --max_steps 60000 \
+    --model_name_or_path meta-llama/Meta-Llama-3.1-8B \
     --padding_side right \
-    --pretrain_min_length 2048 \
-    --pretrain_max_length 6144 \
+    --pretrain_min_length 1536 \
+    --pretrain_max_length 4096 \
     --per_device_train_batch_size 3 \
     --enable_gist True \
     --gist_type interleave-32 \
-    --gist_mode 128,256,512,1024-4 \
-    --output_dir ./outputs/qwen3-4b/32x-multi-chunk \
-    --logging_dir ./logs/qwen3-4b/32x-multi-chunk \
+    --gist_mode 1024,1536,2048,2560,3072-1 \
+    --output_dir $OUTPUT_DIR/32x-single-chunk \
+    --logging_dir ./logs/llama3.1-8b/32x-single-chunk \
     --logging_steps 10 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \
@@ -21,4 +22,3 @@ OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage1 \
     --save_steps 5000
     # --gradient_checkpointing True
     # --device_map auto \
-    # --model_name_or_path Qwen/Qwen3-4B-Instruct-2507 \

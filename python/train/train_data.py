@@ -84,6 +84,9 @@ class PretrainDataset:
 
 
 def get_dataset(type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
+    for k, v in kwargs.items():
+        if v is None:
+            kwargs.pop(k)
     if type == "pretrain":
         return PretrainDataset(path, tokenizer, **kwargs)
     return None

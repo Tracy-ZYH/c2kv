@@ -135,3 +135,7 @@ class TrainingArgs(TrainingArguments):
         default=None,
         metadata={'help': 'Path to training data'}
     )
+    dataset_shuffle_seed: int = field(
+        default=42,
+        metadata={'help': 'Seed for dataset shuffling'}
+    )

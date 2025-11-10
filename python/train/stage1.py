@@ -34,6 +34,7 @@ def main():
             'pretrain', training_args.train_data, tokenizer, 
             max_length=training_args.pretrain_max_length,
             min_length=training_args.pretrain_min_length,
+            shuffle_seed=training_args.dataset_shuffle_seed,
         )
 
     trainer = GistTrainer(
