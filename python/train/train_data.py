@@ -39,6 +39,8 @@ def _preprocess_pretrain_data(
         seq_len = len(encoded["input_ids"])
         for start in range(0, seq_len - min_length, max_length):
             chunk_len = min(max_length, seq_len - start)
+            if chunk_len < max_length:
+                encoded = add_eos(encoded, tokenizer.eos_token_id)
             for k, v in encoded.items():
                 if k in outputs:
                     outputs[k].append(v[start:start + chunk_len])

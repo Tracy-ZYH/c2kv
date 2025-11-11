@@ -119,8 +119,11 @@ class LLMInference:
 
         full_kv = []
         for key, value in past_key_values:
+            layer_keys, layer_values = [], []
             for seq_i, seq_l in enumerate(seq_len):
-                full_kv.append((key[seq_i][:, :seq_l], value[seq_i][:, :seq_l]))
+                layer_keys.append(key[seq_i][:, :seq_l])
+                layer_values.append(value[seq_i][:, :seq_l])
+            full_kv.append((tuple(layer_keys), tuple(layer_values)))
         return BatchedKVInstance(input_ids, tuple(full_kv))
 
     def decode_with_past_kv(
@@ -181,8 +184,8 @@ class LLMInference:
             past_key_values=past_key_values,
             # attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None, top_p=None, top_k=None,
+            # do_sample=False,
+            # temperature=None, top_p=None, top_k=None,
             pad_token_id=self.tokenizer.eos_token_id,
             use_cache=True,
         )

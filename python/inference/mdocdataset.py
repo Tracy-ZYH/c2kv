@@ -228,7 +228,7 @@ class AmapDataset(AbstractMDQADataset):
         print(f"Loading inhouse Amap dataset from {csv_path}...")
         data = datasets.load_dataset("csv", data_files=csv_path)['train']
         data = data.filter(
-            lambda sample: len(sample['prompt']) < 6e3 and self.CONTEXT_BEGIN in sample['prompt'], 
+            lambda sample: 16e3 < len(sample['prompt']) < 24e3 and self.CONTEXT_BEGIN in sample['prompt'], 
             num_proc=32
         )
         data = data.map(self._preprocess_amap_sample, num_proc=32, remove_columns=data.column_names)
