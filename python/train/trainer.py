@@ -29,7 +29,7 @@ class GistTrainer(Trainer):
         labels[~inputs["attention_mask"].bool()] = -100
         labels[:, :context_len] = -100
         loss = model(**inputs, labels=labels, use_cache=False).loss.detach().mean().item()
-        self.frozen_model_loss = loss
+        self.frozen_model_loss = round(loss, 4)
 
     def compute_loss(self, model, inputs, num_items_in_batch, return_outputs=False):
         """
@@ -40,8 +40,8 @@ class GistTrainer(Trainer):
         min_seq_len = inputs["attention_mask"].sum(dim=1).min().item()
         chunk_sizes = [size for size in self.gist_chunk_size if size < min_seq_len]
         assert len(chunk_sizes) > 0, "The minimum sequence length is less than the gist chunk size!"
-        # gist_chunk_size = rand_choice(chunk_sizes)
-        gist_chunk_size = max(chunk_sizes)
+        gist_chunk_size = rand_choice(chunk_sizes)
+        # gist_chunk_size = max(chunk_sizes)
         num_chunk = min((min_seq_len - 1) // gist_chunk_size, self.gist_max_chunk_num)
         context_len = gist_chunk_size * num_chunk
         # compute frozen model loss if necessary

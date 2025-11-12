@@ -89,7 +89,8 @@ class MDQAEvaluator:
             outputs = self.model.generate(
                 inputs.input_ids.to(self.device),
                 attention_mask=inputs.attention_mask.to(self.device),
-                generation_config=generation_config,
+                # generation_config=generation_config,
+                max_new_tokens=generation_config.max_new_tokens,
                 pad_token_id=self.tokenizer.pad_token_id,
                 use_cache=True,
             )
@@ -132,7 +133,8 @@ class MDQAEvaluator:
                 outputs = self.model.generate(
                     inputs.input_ids.to(self.device),
                     attention_mask=inputs.attention_mask.to(self.device),
-                    generation_config=generation_config,
+                    # generation_config=generation_config,
+                    max_new_tokens=generation_config.max_new_tokens,
                     pad_token_id=self.tokenizer.pad_token_id,
                     use_cache=True,
                 )

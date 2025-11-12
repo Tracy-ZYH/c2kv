@@ -1,4 +1,3 @@
-# python python/inference/expr_blockattention.py --model /home/admin/workspace/aop_lab/app_data/models/ldsjmdy--Tulu3-Block-FT --dataset musique --program_path /home/admin/workspace/aop_lab/app_source/duchuheng/Block-Attention/server/block_generate_server.py --output_file results/musique/llama3.1-8b_blockattn.json --port PORT
 import os
 import argparse
 import json

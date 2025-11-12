@@ -54,8 +54,8 @@ def setup_environment_variables(
     # Enable local CPU backend in LMCache
     os.environ["LMCACHE_LOCAL_CPU"] = "True"
 
-    # Set the maximum size of the local CPU size to 5GB
-    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
+    # Set the maximum size of the local CPU size to 128GB
+    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "128"
 
 
 @contextlib.contextmanager

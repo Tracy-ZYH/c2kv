@@ -224,15 +224,19 @@ class AmapDataset(AbstractMDQADataset):
             'answer': [sample['response']],
         }
 
-    def __init__(self, csv_path: str) -> None:
+    def __init__(self, csv_path: str, load_full: bool=False) -> None:
         print(f"Loading inhouse Amap dataset from {csv_path}...")
-        data = datasets.load_dataset("csv", data_files=csv_path)['train']
-        data = data.filter(
-            lambda sample: 16e3 < len(sample['prompt']) < 24e3 and self.CONTEXT_BEGIN in sample['prompt'], 
-            num_proc=32
+        data = datasets.load_dataset("csv", data_files=csv_path)['train'].filter(
+            lambda sample: (
+                (load_full or 16e3 < len(sample['prompt']) < 24e3) and 
+                self.CONTEXT_BEGIN in sample['prompt']
+            ), num_proc=32
         )
         data = data.map(self._preprocess_amap_sample, num_proc=32, remove_columns=data.column_names)
-        self.data = data.filter(lambda sample: len(sample['documents']) > 0, num_proc=32).select(range(1000))
+        data = data.filter(lambda sample: len(sample['documents']) > 0, num_proc=32)
+        if not load_full:
+            data = data.shuffle(seed=42).select(range(1000))
+        self.data = data
         self.system_prompt: Optional[str] = None
         self.max_new_tokens: int = 768
         print(f"Done loading Amap dataset from {csv_path}")
@@ -267,6 +271,6 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         if path is None:
             print('Defaulting amap dataset path to "../datasets/AmapData.csv"')
             path = "../datasets/AmapData.csv"
-        return AmapDataset(path)
+        return AmapDataset(path, load_full=kwargs.get('load_full', False))
     else:
         raise ValueError(f"Unsupported dataset name: {name}")

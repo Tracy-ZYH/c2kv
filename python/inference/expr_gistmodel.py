@@ -93,19 +93,16 @@ def evaluate_model_on_dataset(
             position_ids=position_ids.unsqueeze(0),
             past_key_values=context_cache,
             max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None, top_p=None, top_k=None,
             pad_token_id=tokenizer.eos_token_id,
             use_cache=True,
         )
+        del context_cache
         
         # 解码生成的文本（跳过查询部分）
         generated_tokens = generated_outputs[0][input_ids.shape[1]:]
         generated_tokens = generated_tokens[:max_new_tokens] # force limited output
         pred = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        print(pred)
-
-        del context_cache
+        # print(pred)
 
         em_score = dataset.metric(pred, example['answer'])
         em_scores.append(em_score)

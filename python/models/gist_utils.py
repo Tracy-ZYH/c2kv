@@ -24,7 +24,8 @@ def prepare_gist_input(
     gist_id: int,
     input_ids: torch.LongTensor,
     attention_mask: torch.Tensor,
-    gist_type: str
+    gist_type: str,
+    padding_side: str = "right",
 ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
     """
     Insert gist tokens to the input embeddings.
@@ -35,7 +36,8 @@ def prepare_gist_input(
             attention_mask, None,
             torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device).unsqueeze(0)
         )
-    assert attention_mask[:, 0].all(), "tokenizer must be right-padded"
+    padding_check_idx = 0 if padding_side == "right" else -1
+    assert attention_mask[:, padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
         batch_size = input_ids.shape[0]
@@ -49,10 +51,11 @@ def prepare_gist_input(
         position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
         gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
         gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
+        seq_lens = attention_mask.sum(dim=1).tolist()
         for i in range(batch_size):
-            seqlen = attention_mask[i].sum().item()
-            padlen = max_seqlen - seqlen
-            new_attn_mask[i, padlen:max_seqlen, padlen:max_seqlen] = torch.tril(
+            seqlen = seq_lens[i]
+            padlen = 0 if padding_side == "right" else max_seqlen - seqlen
+            new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
                 torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
             )
             gist_num = math.ceil(seqlen / ratio)
@@ -61,9 +64,7 @@ def prepare_gist_input(
                 begin = j * ratio
                 end = min(begin + ratio, seqlen)
                 gist_position_ids[i, j] = end - 1
-                begin += padlen
-                end += padlen
-                new_attn_mask[i, max_seqlen + j, begin:end] = 1
+                new_attn_mask[i, max_seqlen + j, begin + padlen:end + padlen] = 1
                 new_attn_mask[i, max_seqlen + j, max_seqlen:max_seqlen + j + 1] = 1
         new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
         position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
