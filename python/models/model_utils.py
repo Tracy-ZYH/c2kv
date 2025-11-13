@@ -119,7 +119,7 @@ def get_model_and_tokenizer(
             # cache_dir=cache_dir,
             # token=access_token,
             # NOTE: keep the torch_dtype in config consistent with that in model
-            torch_dtype=dtype,
+            dtype=dtype,
             local_files_only=True,
             **gist_kwargs,
             **rope_kwargs,
@@ -131,7 +131,7 @@ def get_model_and_tokenizer(
             model_name_or_path, 
             config=config,
             # cache_dir=cache_dir, 
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map=device_map, 
             # token=access_token,
             local_files_only=True,
@@ -141,7 +141,7 @@ def get_model_and_tokenizer(
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path, 
             cache_dir=cache_dir, 
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map=device_map,
             # token=access_token,
             trust_remote_code=True,

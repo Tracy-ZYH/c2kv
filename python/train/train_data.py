@@ -40,6 +40,7 @@ def _preprocess_pretrain_data(
         for start in range(0, seq_len - min_length, max_length):
             chunk_len = min(max_length, seq_len - start)
             if chunk_len < max_length:
+                chunk_len += 1
                 encoded = add_eos(encoded, tokenizer.eos_token_id)
             for k, v in encoded.items():
                 if k in outputs:
@@ -58,6 +59,7 @@ class PretrainDataset:
         max_length: int = 4096,
         **kwargs: Any,
     ):
+        shuffle_seed += int(os.environ.get("LOCAL_RANK", 0))
         # dataset = datasets.load_dataset(path, split=split, streaming=True)
         # NOTE: package datasets is modified to avoid globbing on nas, which costs hours
         data_files = [ 
@@ -86,9 +88,7 @@ class PretrainDataset:
 
 
 def get_dataset(type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
-    for k, v in kwargs.items():
-        if v is None:
-            kwargs.pop(k)
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
     if type == "pretrain":
         return PretrainDataset(path, tokenizer, **kwargs)
     return None

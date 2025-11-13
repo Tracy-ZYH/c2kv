@@ -29,13 +29,12 @@ def main():
     logger.info(f"Total Model params: {format_numel_str(sum(p.numel() for p in model.parameters()))}")
     logger.info(f"Trainable Model params: {format_numel_str(sum(p.numel() for p in model.parameters() if p.requires_grad))}")
 
-    with training_args.main_process_first():
-        train_dataset = get_dataset(
-            'pretrain', training_args.train_data, tokenizer, 
-            max_length=training_args.pretrain_max_length,
-            min_length=training_args.pretrain_min_length,
-            shuffle_seed=training_args.dataset_shuffle_seed,
-        )
+    train_dataset = get_dataset(
+        'pretrain', training_args.train_data, tokenizer, 
+        max_length=training_args.pretrain_max_length,
+        min_length=training_args.pretrain_min_length,
+        shuffle_seed=training_args.dataset_shuffle_seed,
+    )
 
     trainer = GistTrainer(
         model=model,
