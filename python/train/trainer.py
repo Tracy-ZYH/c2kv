@@ -1,6 +1,5 @@
 import torch
 import itertools
-from random import choice as rand_choice
 from gist_args import ModelArgs
 from torch.utils.data import Sampler
 from transformers import DataCollatorWithPadding
@@ -16,22 +15,14 @@ class GistTrainer(Trainer):
         self.gist_chunk_size = list(map(int, gist_mode_args[0].split(",")))
         self.gist_max_chunk_num = int(gist_mode_args[1])
         self.gist_max_chunk_size = max(self.gist_chunk_size)
-        self.frozen_model_loss: Optional[float] = None
-    
-    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
-        logs["frozen_model_loss"] = self.frozen_model_loss
-        self.frozen_model_loss = None
-        super().log(logs, start_time)
 
-    @torch.no_grad()
-    def _update_frozen_model_loss(self, model, inputs, context_len: int) -> None:
-        labels = inputs["input_ids"].clone()
-        labels[~inputs["attention_mask"].bool()] = -100
-        labels[:, :context_len] = -100
-        loss = model(**inputs, labels=labels, use_cache=False).loss.detach().mean().item()
-        self.frozen_model_loss = round(loss, 4)
-
-    def compute_loss(self, model, inputs, num_items_in_batch, return_outputs=False):
+    def compute_loss(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, Union[torch.Tensor, Any]],
+        return_outputs: bool = False,
+        num_items_in_batch: Optional[torch.Tensor] = None
+    ):
         """
         Override the default compute_loss to process inputs 
         """
@@ -40,13 +31,16 @@ class GistTrainer(Trainer):
         min_seq_len = inputs["attention_mask"].sum(dim=1).min().item()
         chunk_sizes = [size for size in self.gist_chunk_size if size < min_seq_len]
         assert len(chunk_sizes) > 0, "The minimum sequence length is less than the gist chunk size!"
-        gist_chunk_size = rand_choice(chunk_sizes)
+        gist_chunk_size = chunk_sizes[min_seq_len % len(chunk_sizes)] # pseudo-random
         # gist_chunk_size = max(chunk_sizes)
         num_chunk = min((min_seq_len - 1) // gist_chunk_size, self.gist_max_chunk_num)
         context_len = gist_chunk_size * num_chunk
-        # compute frozen model loss if necessary
-        if self.frozen_model_loss is None:
-            self._update_frozen_model_loss(model, inputs, context_len)
+        if not self.model_args.enable_gist:
+            labels = inputs["input_ids"].clone()
+            labels[~inputs["attention_mask"].bool()] = -100
+            labels[:, :context_len] = -100
+            inputs["labels"] = labels
+            return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
         # split inputs_ids into context and input_ids
         context_input_ids = inputs["input_ids"][:, :context_len].reshape((batch_size, num_chunk, gist_chunk_size))
         inputs["context_input_ids"] = context_input_ids
@@ -59,8 +53,21 @@ class GistTrainer(Trainer):
         labels = inputs["input_ids"].clone()
         labels[~inputs["attention_mask"]] = -100
         inputs["labels"] = labels
-        outputs = super().compute_loss(model, inputs, return_outputs)
-        return outputs
+        return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+    
+    def prediction_step(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[list[str]] = None,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        inputs["labels"] = inputs["input_ids"].clone()
+        attn_impl = model.model.config._attn_implementation
+        model.model.config._attn_implementation = "sdpa"
+        pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        model.model.config._attn_implementation = attn_impl
+        return pred
     
     def _get_train_sampler(self, data_source) -> Sampler:
         return InifiniteSampler()

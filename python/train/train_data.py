@@ -4,7 +4,7 @@ import glob
 from itertools import repeat
 from functools import partial
 from transformers import AutoTokenizer
-from typing import Dict, List, Any, Mapping
+from typing import Dict, List, Any, Mapping, Optional
 from logging import getLogger
 
 logger = getLogger(__name__)
@@ -57,7 +57,7 @@ class PretrainDataset:
         shuffle_seed: int = 42,
         min_length: int = 1024,
         max_length: int = 4096,
-        **kwargs: Any,
+        max_samples: Optional[int] = None,
     ):
         shuffle_seed += int(os.environ.get("LOCAL_RANK", 0))
         # dataset = datasets.load_dataset(path, split=split, streaming=True)
@@ -87,8 +87,23 @@ class PretrainDataset:
         return next(self.iterator)
 
 
-def get_dataset(type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
+class PretrainEvalDataset(PretrainDataset):
+    def __init__(self, *args, **kwargs):
+        kwargs['shuffle_seed'] = 42 # fix seed for evaluation
+        super().__init__(*args, **kwargs)
+        self.dataset = [sample for _, sample in zip(range(256), self.dataset)]
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, index):
+        return self.dataset[index]
+
+
+def get_dataset(dataset_type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    if type == "pretrain":
+    if dataset_type == "pretrain":
         return PretrainDataset(path, tokenizer, **kwargs)
+    elif dataset_type == "pretrain_eval":
+        return PretrainEvalDataset(path, tokenizer, **kwargs)
     return None
