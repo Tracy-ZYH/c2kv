@@ -3,7 +3,7 @@ import logging
 from transformers import HfArgumentParser, DataCollatorWithPadding
 
 from .train_data import get_dataset
-from .trainer import GistPretrainTrainer
+from .trainer import GistSFTTrainer
 from models import *
 from gist_args import ModelArgs, TrainingArgs
 
@@ -28,16 +28,17 @@ def main():
     logger.info(f"Total Model params: {format_numel_str(sum(p.numel() for p in model.parameters()))}")
     logger.info(f"Trainable Model params: {format_numel_str(sum(p.numel() for p in model.parameters() if p.requires_grad))}")
 
-    dataset_args = {
-        'tokenizer': tokenizer,
-        'max_length': training_args.dataset_max_length,
-        'min_length': training_args.dataset_min_length,
-        'shuffle_seed': training_args.dataset_shuffle_seed,
-    }
-    train_dataset = get_dataset('pretrain', training_args.train_data, **dataset_args)
-    eval_dataset = get_dataset('pretrain_eval', training_args.train_data, **dataset_args)
+    with training_args.main_process_first(desc="Get dataset"):
+        dataset_args = {
+            'tokenizer': tokenizer,
+            'max_length': training_args.dataset_max_length,
+            'min_length': training_args.dataset_min_length,
+            'shuffle_seed': training_args.dataset_shuffle_seed,
+        }
+        train_dataset = get_dataset('sft', training_args.train_data, **dataset_args)
+        eval_dataset = get_dataset('sft_eval', training_args.train_data, **dataset_args)
 
-    trainer = GistPretrainTrainer(
+    trainer = GistSFTTrainer(
         model=model,
         args=training_args,
         model_args=model_args,

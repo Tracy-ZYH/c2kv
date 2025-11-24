@@ -60,7 +60,7 @@ def evaluate_model_on_dataset(
 
         del context_cache
         del system_cache
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
         em_score = dataset.metric(pred, example['answer'])
         em_scores.append(em_score)

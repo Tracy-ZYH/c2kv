@@ -119,11 +119,11 @@ class ModelArgs:
 
 @dataclass
 class TrainingArgs(TrainingArguments):
-    pretrain_min_length: int = field(
+    dataset_min_length: int = field(
         default=1024,
         metadata={'help': 'Minimum length of the input for training'}
     )
-    pretrain_max_length: int = field(
+    dataset_max_length: int = field(
         default=4096,
         metadata={'help': 'Maximum length of the input for training'}
     )

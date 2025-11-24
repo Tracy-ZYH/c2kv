@@ -620,41 +620,37 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         # Generate gist (only used in training)
         if context_input_ids is not None:
             assert past_key_values is None, "past_key_values should be None when context_input_ids is not None"
-            # gist_key_values = []
-            # gist_masks = []
-            # gist_position_ids = []
-            # for context in context_input_ids:
-            #     gist_attention_mask = torch.ones_like(context, dtype=torch.bool)
-            #     outputs, gist_mask, pos_ids = self.model.generate_gist(context, gist_attention_mask, **kwargs)
-            #     gist_key_values.append(outputs.past_key_values)
-            #     gist_masks.append(gist_mask)
-            #     gist_position_ids.append(pos_ids)
-            # past_key_values, gist_attn_mask = blend_gist_key_values(
-            #     self.config, gist_key_values, gist_masks, gist_position_ids,
-            #     self.model.rotary_emb, 0
-            # )
+            # reshape context_input_ids and generate gist
             batch_size, chunk_num, seq_len = context_input_ids.shape
             context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
             gist_attn_mask = context_input_ids != -100
             outputs, gist_mask, pos_ids = self.model.generate_gist(context_input_ids, gist_attn_mask, **kwargs)
-            gist_len = gist_mask.shape[1]
-            pos_ids = pos_ids.reshape(batch_size, chunk_num, gist_len)
-            for chunk_i in range(chunk_num):
-                pos_ids[:, chunk_i] += chunk_i * seq_len
-            pos_ids = pos_ids.reshape(batch_size * chunk_num, gist_len)
+            # prepare pos_ids and generate positional embeddings
+            max_gist_len = gist_mask.shape[1]
+            pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
+            if gist_mask.all(): # context input_ids is full
+                for j in range(chunk_num):
+                    pos_ids[:, j] += chunk_num * max_gist_len
+            else:
+                cu_gist_len = gist_mask.reshape(batch_size, chunk_num, max_gist_len).sum(dim=2).cumsum(dim=1)
+                for i in range(batch_size):
+                    for j in range(chunk_num - 1):
+                        pos_ids[i, j+1] += cu_gist_len[i, j]
+            pos_ids = pos_ids.reshape(batch_size * chunk_num, max_gist_len)
             cos, sin = self.model.rotary_emb(outputs.last_hidden_state, pos_ids)
+            # apply rotary pos emb to gist key/value and store in past_key_values
             past_key_values = []
             head_num = outputs.past_key_values[0][0].shape[1]
             for key, value in outputs.past_key_values:
                 key = apply_rotary_pos_emb_single(key, cos, sin)
-                key = key.reshape(batch_size, chunk_num, head_num, gist_len, -1).transpose(1, 2)
-                value = value.reshape(batch_size, chunk_num, head_num, gist_len, -1).transpose(1, 2)
+                key = key.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
+                value = value.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
                 past_key_values.append((
-                    key.reshape(batch_size, head_num, chunk_num * gist_len, -1),
-                    value.reshape(batch_size, head_num, chunk_num * gist_len, -1)
+                    key.reshape(batch_size, head_num, chunk_num * max_gist_len, -1),
+                    value.reshape(batch_size, head_num, chunk_num * max_gist_len, -1)
                 ))
             past_key_values = DynamicCache(past_key_values, config=self.config)
-            gist_mask = gist_mask.reshape(batch_size, chunk_num * gist_len)
+            gist_mask = gist_mask.reshape(batch_size, chunk_num * max_gist_len)
             # concat gist_attn_mask to attention_mask
             if attention_mask is not None:
                 attention_mask = torch.cat([gist_mask, attention_mask], dim=1)

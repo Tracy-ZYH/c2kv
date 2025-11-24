@@ -239,7 +239,61 @@ class AmapDataset(AbstractMDQADataset):
         self.data = data
         self.system_prompt: Optional[str] = None
         self.max_new_tokens: int = 768
-        print(f"Done loading Amap dataset from {csv_path}")
+        print(f"Loaded {len(self.data)} Amap dataset from {csv_path}")
+
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
+    
+
+class LongAlpacaDataset(AbstractMDQADataset):
+    CONTEXT_BEGIN: str = "The paper begins. "
+    CONTEXT_END: str = "Now the paper ends."
+
+    def __init__(self, prompts_path: str) -> None:
+        self.system_prompt = None
+        with open(prompts_path, 'r') as f:
+            self.system_prompts = f.readlines()
+        data = datasets.load_dataset("Yukang/LongAlpaca-16k-length")['train']
+        data = data.filter(
+            lambda sample: (
+                # len(sample['instruction']) < 5e4 and 
+                self.CONTEXT_BEGIN in sample['instruction'] and
+                self.CONTEXT_END in sample['instruction']
+            ), num_proc=32
+        )
+        data = data.map(
+            self._preprocess_sample, 
+            remove_columns=data.column_names,
+            num_proc=32, with_indices=True
+        )
+        self.data = data.filter(lambda sample: len(sample['documents']) > 0, num_proc=32)
+        self.max_new_tokens: int = 768
+        self.metric = max_rouge_score
+
+    def _preprocess_sample(self, sample: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        documents = []
+        last_document = []
+        context = sample['instruction'].split(self.CONTEXT_BEGIN, 1)[1]
+        context, question = context.split(self.CONTEXT_END, 1)
+        for line in context.split('\n'):
+            if len(line) > 0 and line[0] in string.digits:
+                if len(last_document) > 0:
+                    documents.append('\n'.join(last_document))
+                last_document = []
+            last_document.append(line)
+        if len(last_document) > 0:
+            documents.append('\n'.join(last_document))
+        system_prompt = self.system_prompts[idx % len(self.system_prompts)] + self.CONTEXT_BEGIN
+        return {
+            'qid': str(idx),
+            'system_prompt': system_prompt,
+            'question': question,
+            'documents': documents,
+            'answer': [self.CONTEXT_END + sample['output']],
+        }
 
     def __len__(self) -> int:
         return len(self.data)
@@ -253,9 +307,7 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         if path is None:
             print('Defaulting musique dataset path to "../datasets/musique.jsonl"')
             path = "../datasets/musique.jsonl"
-        if 'only_supporting' not in kwargs:
-            kwargs['only_supporting'] = False
-        return MusiqueDataset(path, kwargs['only_supporting'])
+        return MusiqueDataset(path, only_supporting=kwargs.get('only_supporting', False))
     elif name == "wikimqa":
         if path is None:
             print('Defaulting wikimqa dataset path to "../datasets/wikimqa.json"')
@@ -272,5 +324,10 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
             print('Defaulting amap dataset path to "../datasets/AmapData.csv"')
             path = "../datasets/AmapData.csv"
         return AmapDataset(path, load_full=kwargs.get('load_full', False))
+    elif name == "longalpaca":
+        if path is None:
+            print('Defaulting longalpaca dataset path to "../datasets/longalpaca_prompts.txt"')
+            path = "../datasets/longalpaca_prompts.txt"
+        return LongAlpacaDataset(path)
     else:
         raise ValueError(f"Unsupported dataset name: {name}")
