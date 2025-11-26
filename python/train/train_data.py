@@ -1,11 +1,11 @@
 import os
 import datasets
 import glob
-from itertools import repeat
-from functools import partial
 from transformers import AutoTokenizer
-from typing import Dict, List, Any, Mapping, Optional
+from typing import Dict, List, Any, Mapping, Optional, Callable
 from logging import getLogger
+
+from inference.mdocdataset import load_mdoc_dataset, QA_SYSTEM_PROMPT
 
 logger = getLogger(__name__)
 
@@ -117,6 +117,10 @@ class SFTDataset:
     ):
         self.path = path
         data = datasets.load_dataset(path, split=split)
+        if num_samples is not None:
+            data = data.select(range(num_samples))
+        else:
+            data = data.select(range(256, len(data)))
         self.data = data.map(
             self._preprocess_sft_data,
             fn_kwargs={
@@ -161,6 +165,81 @@ class SFTDataset:
         return iter(self.data)
 
 
+class MultiDocDataset:
+    def __init__(
+        self,
+        path: str,
+        tokenizer: AutoTokenizer,
+        max_length: int = 256,
+        max_doc_length: int = 512,
+        num_samples: Optional[int] = None,
+        shuffle_seed: int = 42,
+    ):
+        self.max_doc_length = max_doc_length
+        self.system_prompt_ids = QA_SYSTEM_PROMPT
+        dataset = load_mdoc_dataset("musique", path)
+        if num_samples is None:
+            data = dataset.data.select(range(512, len(dataset.data)))
+        else:
+            data = dataset.data.select(range(num_samples))
+        self.data = data.map(
+            self._preprocess_mdoc_sample,
+            fn_kwargs={
+                'tokenizer': tokenizer,
+                'max_length': max_length,
+                'max_doc_length': max_doc_length,
+                'extract_docs': dataset.extract_documents
+            },
+            batched=False, 
+            num_proc=32,
+            remove_columns=data.column_names
+        ).shuffle(seed=shuffle_seed)
+
+    @staticmethod
+    def _preprocess_mdoc_sample(
+        sample: Dict[str, Any], 
+        tokenizer: AutoTokenizer,
+        max_length: int,
+        max_doc_length: int,
+        extract_docs: Callable
+    ) -> Dict[str, Any]:
+        sample = extract_docs(sample)
+        documents_ids = tokenizer(sample['documents'], add_special_tokens=False)["input_ids"]
+        concat_doc_ids = []
+        for doc_ids in documents_ids:
+            if len(doc_ids) > max_doc_length:
+                doc_ids = doc_ids[:max_doc_length]
+            pad_length = max_doc_length - len(doc_ids)
+            concat_doc_ids.extend(doc_ids)
+            concat_doc_ids.extend([-100] * pad_length)
+        concat_doc_ids.extend([-100] * (max_doc_length * (20 - len(documents_ids))))
+        question_ids = tokenizer(sample['question'], add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(sample['answer'][0], add_special_tokens=False)["input_ids"]
+        answer_ids.append(tokenizer.eos_token_id)
+        input_ids = question_ids + answer_ids
+        labels = [-100] * len(question_ids) + answer_ids
+        pad_length = max_length - len(input_ids)
+        assert pad_length >= 0, f"pad_length {pad_length} < 0"
+        attention_mask = [1] * len(input_ids) + [0] * pad_length
+        input_ids.extend([tokenizer.pad_token_id] * pad_length)
+        labels.extend([-100] * pad_length)
+        return {
+            'context_input_ids': concat_doc_ids,
+            'input_ids': input_ids,
+            'labels': labels,
+            'attention_mask': attention_mask
+        }
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, index):
+        return self.data[index]
+    
+    def __iter__(self):
+        return iter(self.data)
+
+
 def get_dataset(dataset_type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     if '_eval' in dataset_type:
@@ -174,4 +253,9 @@ def get_dataset(dataset_type: str, path: str, tokenizer: AutoTokenizer, **kwargs
     elif dataset_type == "sft_eval":
         kwargs['num_samples'] = kwargs.pop('num_samples', 256)
         return SFTDataset(path, tokenizer, **kwargs)
+    elif dataset_type == "mdoc":
+        return MultiDocDataset(path, tokenizer, **kwargs)
+    elif dataset_type == "mdoc_eval":
+        kwargs['num_samples'] = kwargs.pop('num_samples', 512)
+        return MultiDocDataset(path, tokenizer, **kwargs)
     return None

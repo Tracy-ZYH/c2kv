@@ -4,7 +4,10 @@ import datasets
 import string
 import regex
 
-from longbench_metrics import qa_f1_score, rouge_score, qa_f1_zh_score, rouge_zh_score
+try:
+    from .longbench_metrics import qa_f1_score, rouge_score, qa_f1_zh_score, rouge_zh_score
+except ImportError:
+    from longbench_metrics import qa_f1_score, rouge_score, qa_f1_zh_score, rouge_zh_score
 
 
 def max_f1_score(pred: str, gt_list: List[str]) -> float:
@@ -96,21 +99,23 @@ class MusiqueDataset(AbstractMDQADataset):
         self.metric = max_f1_score
         print(f"Done loading {data_path}")
     
+    @staticmethod
+    def extract_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
+        context_list = []
+        for item in sample['paragraphs']:
+            context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
+        return {
+            'qid': sample['id'],
+            'question': QA_QUERY_PROMPT + sample['question'] + '\n\nAnswer: ',
+            'documents': context_list,
+            'answer': sample['answer'],
+        }
+    
     def __len__(self) -> int:
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        context_list = []
-        for item in self.paragraphs[idx]:
-            if self.only_supporting and not item['is_supporting']:
-                continue
-            context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
-        return {
-            'qid': self.qid[idx],
-            'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
-            'documents': context_list,
-            'answer': self.answer[idx],
-        }
+        return self.extract_documents(self.data[idx])
 
 
 class HotpotQADataset(AbstractMDQADataset):

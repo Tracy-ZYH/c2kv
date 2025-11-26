@@ -37,7 +37,9 @@ def prepare_gist_input(
             torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device).unsqueeze(0)
         )
     padding_check_idx = 0 if padding_side == "right" else -1
-    assert attention_mask[:, padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
+    for mask in attention_mask:
+        if mask.any(): # only check non-empty sequences
+            assert mask[padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
         batch_size = input_ids.shape[0]
@@ -48,12 +50,13 @@ def prepare_gist_input(
             dtype=torch.bool, device=input_ids.device
         )
         position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
         gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
         gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
         seq_lens = attention_mask.sum(dim=1).tolist()
-        for i in range(batch_size):
-            seqlen = seq_lens[i]
+        for i, seqlen in enumerate(seq_lens):
+            if seqlen == 0:
+                continue
             padlen = 0 if padding_side == "right" else max_seqlen - seqlen
             new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
                 torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
@@ -61,7 +64,11 @@ def prepare_gist_input(
             gist_num = math.ceil(seqlen / ratio)
             gist_mask[i, :gist_num] = 1
             for j in range(gist_num):
-                begin = j * ratio
+                # attention sink at beginning of chunk
+                sink_end = min(seqlen, ratio)
+                new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
+                # attention sink at end of chunk
+                begin = max(0, (j - 1) * ratio) # overlap with previous gist token
                 end = min(begin + ratio, seqlen)
                 gist_position_ids[i, j] = end - 1
                 new_attn_mask[i, max_seqlen + j, begin + padlen:end + padlen] = 1

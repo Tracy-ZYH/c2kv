@@ -606,11 +606,14 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         ```"""
         # Generate gist (only used in training)
         if context_input_ids is not None:
-            assert past_key_values is None, "past_key_values should be None when context_input_ids is not None"
+            if past_key_values is None:
+                past_key_values = DynamicCache(config=self.config)
+            past_length = past_key_values.get_seq_length()
             # reshape context_input_ids and generate gist
             batch_size, chunk_num, seq_len = context_input_ids.shape
             context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
             gist_attn_mask = context_input_ids != -100
+            context_input_ids[~gist_attn_mask] = self.model.gist_token_id
             outputs, gist_mask, pos_ids = self.model.generate_gist(context_input_ids, gist_attn_mask, **kwargs)
             # prepare pos_ids and generate positional embeddings
             max_gist_len = gist_mask.shape[1]
@@ -623,24 +626,27 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 for i in range(batch_size):
                     for j in range(chunk_num - 1):
                         pos_ids[i, j+1] += cu_gist_len[i, j]
+                pos_ids += past_length
             pos_ids = pos_ids.reshape(batch_size * chunk_num, max_gist_len)
             cos, sin = self.model.rotary_emb(outputs.last_hidden_state, pos_ids)
             # apply rotary pos emb to gist key/value and store in past_key_values
-            past_key_values = []
+            gist_key_values = []
             head_num = outputs.past_key_values[0][0].shape[1]
             for key, value in outputs.past_key_values:
                 key = apply_rotary_pos_emb_single(key, cos, sin)
                 key = key.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
                 value = value.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
-                past_key_values.append((
+                gist_key_values.append((
                     key.reshape(batch_size, head_num, chunk_num * max_gist_len, -1),
                     value.reshape(batch_size, head_num, chunk_num * max_gist_len, -1)
                 ))
-            past_key_values = DynamicCache(past_key_values, config=self.config)
+            for layer_idx, (keys, values) in enumerate(gist_key_values):
+                past_key_values.update(keys, values, layer_idx)
             gist_mask = gist_mask.reshape(batch_size, chunk_num * max_gist_len)
+            past_mask = gist_mask.new_ones((batch_size, past_length))
             # concat gist_attn_mask to attention_mask
             if attention_mask is not None:
-                attention_mask = torch.cat([gist_mask, attention_mask], dim=1)
+                attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
 
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
