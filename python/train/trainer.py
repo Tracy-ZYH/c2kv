@@ -69,14 +69,6 @@ class GistPretrainTrainer(Trainer):
         pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
         model.model.config._attn_implementation = attn_impl
         return pred
-    
-    def _get_train_sampler(self, data_source) -> Sampler:
-        return InifiniteSampler()
-
-
-class InifiniteSampler(Sampler):
-    def __iter__(self) -> Iterator[int]:
-        return itertools.count(start=0)
 
 
 class GistSFTTrainer(Trainer):

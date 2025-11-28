@@ -29,7 +29,21 @@ def add_eos(inputs: Mapping, eos_token_id: int):
     return inputs
 
 
-class PretrainDataset:
+class GistDataset:
+    def __init__(self, data: datasets.Dataset):
+        self.data = data
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, index):
+        return self.data[index]
+    
+    def __iter__(self):
+        return iter(self.data)
+
+
+class PretrainDataset(GistDataset):
     def __init__(self, 
         path: str, 
         tokenizer: AutoTokenizer = None, 
@@ -37,7 +51,8 @@ class PretrainDataset:
         shuffle_seed: int = 42,
         min_length: int = 1024,
         max_length: int = 4096,
-        max_samples: Optional[int] = None,
+        num_samples: int = 16384,
+        cut_long_seq: bool = False,
     ):
         shuffle_seed += int(os.environ.get("LOCAL_RANK", 0))
         # dataset = datasets.load_dataset(path, split=split, streaming=True)
@@ -46,18 +61,20 @@ class PretrainDataset:
             file for file in glob.iglob(os.path.join(path, split, '**'), recursive=True)
             if '.' in os.path.basename(file)
         ]
-        dataset = datasets.load_dataset(path, data_files=data_files, streaming=True)['train']
-        self.dataset = dataset.map(
+        self.data = datasets.load_dataset(path, data_files=data_files, streaming=True)['train'].map(
             self._preprocess_pretrain_data,
             fn_kwargs={
                 'tokenizer': tokenizer,
                 'min_length': min_length,
                 'max_length': max_length,
+                'cut_long_seq': cut_long_seq
             },
             batched=True, batch_size=32,
             remove_columns=['text', 'meta'],
         ).shuffle(seed=shuffle_seed)
-        self.iterator = iter(self.dataset)
+        self.iterator = iter(self.data)
+        self.num_samples = num_samples
+        self.counter = 0
 
     @staticmethod
     def _preprocess_pretrain_data(
@@ -65,6 +82,7 @@ class PretrainDataset:
         tokenizer: AutoTokenizer,
         min_length: int,
         max_length: int,
+        cut_long_seq: bool,
     ) -> Dict[str, List[Any]]:
         outputs = {'input_ids': [], "length": []}
         for encoded in map(tokenizer, data['text']):  # ignore max model input length warning here
@@ -78,33 +96,25 @@ class PretrainDataset:
                     if k in outputs:
                         outputs[k].append(v[start:start + chunk_len])
                 outputs["length"].append(chunk_len)
+                if cut_long_seq:
+                    break
         return outputs
     
     def __iter__(self):
-        assert False, "PretrainDataset is not iterable"
-        return iter(self.dataset)
-
-    def __getitem__(self, index):
+        return iter(self.data)
+    
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, index): # pseudo-random access
+        self.counter += 1
+        if self.counter >= self.num_samples:
+            self.counter = 0
+            self.iterator = iter(self.data)
         return next(self.iterator)
 
 
-class PretrainEvalDataset(PretrainDataset):
-    def __init__(self, *args, **kwargs):
-        num_samples = kwargs.pop('num_samples', 256)
-        super().__init__(*args, **kwargs)
-        self.dataset = [sample for _, sample in zip(range(num_samples), self.dataset)]
-    
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __iter__(self):
-        return iter(self.dataset)
-    
-    def __getitem__(self, index):
-        return self.dataset[index]
-
-
-class SFTDataset:
+class SFTDataset(GistDataset):
     def __init__(
         self,
         path: str,
@@ -131,8 +141,6 @@ class SFTDataset:
             batched=True, batch_size=32, num_proc=32,
             remove_columns=data.column_names,
         ).shuffle(seed=shuffle_seed)
-        if num_samples is not None:
-            self.data = self.data.select(range(num_samples))
 
     @staticmethod
     def _preprocess_sft_data(
@@ -154,18 +162,9 @@ class SFTDataset:
             label.extend(-100 for _ in range(max_length - len(label))) # pad here
             outputs['labels'].append(label)
         return outputs
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, index):
-        return self.data[index]
-    
-    def __iter__(self):
-        return iter(self.data)
 
 
-class MultiDocDataset:
+class MultiDocDataset(GistDataset):
     def __init__(
         self,
         path: str,
@@ -229,15 +228,6 @@ class MultiDocDataset:
             'labels': labels,
             'attention_mask': attention_mask
         }
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, index):
-        return self.data[index]
-    
-    def __iter__(self):
-        return iter(self.data)
 
 
 def get_dataset(dataset_type: str, path: str, tokenizer: AutoTokenizer, **kwargs):
@@ -247,7 +237,8 @@ def get_dataset(dataset_type: str, path: str, tokenizer: AutoTokenizer, **kwargs
     if dataset_type == "pretrain":
         return PretrainDataset(path, tokenizer, **kwargs)
     elif dataset_type == "pretrain_eval":
-        return PretrainEvalDataset(path, tokenizer, **kwargs)
+        kwargs['num_samples'] = kwargs.pop('num_samples', 512)
+        return PretrainDataset(path, tokenizer, **kwargs)
     elif dataset_type == "sft":
         return SFTDataset(path, tokenizer, **kwargs)
     elif dataset_type == "sft_eval":
