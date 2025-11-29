@@ -66,6 +66,10 @@ class ModelArgs:
         default="1024-16",
         metadata={'help': 'Gist Chunk Size and Max Chunk Number.'}
     )
+    gist_regularization: Optional[float] = field(
+        default=None,
+        metadata={'help': 'Gist regularization coefficient.'}
+    )
     max_new_tokens: Optional[int] = field(
         default=None,
         metadata={'help': 'How many tokens at maximum to return?'},

@@ -51,7 +51,7 @@ class PretrainDataset(GistDataset):
         shuffle_seed: int = 42,
         min_length: int = 1024,
         max_length: int = 4096,
-        num_samples: int = 16384,
+        num_samples: int = 32768,
         cut_long_seq: bool = False,
     ):
         shuffle_seed += int(os.environ.get("LOCAL_RANK", 0))
@@ -74,7 +74,7 @@ class PretrainDataset(GistDataset):
         ).shuffle(seed=shuffle_seed)
         self.iterator = iter(self.data)
         self.num_samples = num_samples
-        self.counter = 0
+        self.cached_data: Dict[int, Dict[str, List[Any]]] = {}
 
     @staticmethod
     def _preprocess_pretrain_data(
@@ -106,12 +106,12 @@ class PretrainDataset(GistDataset):
     def __len__(self):
         return self.num_samples
     
-    def __getitem__(self, index): # pseudo-random access
-        self.counter += 1
-        if self.counter >= self.num_samples:
-            self.counter = 0
-            self.iterator = iter(self.data)
-        return next(self.iterator)
+    def __getitem__(self, index):
+        if index in self.cached_data:
+            return self.cached_data[index]
+        sample = next(self.iterator)
+        self.cached_data[index] = sample
+        return sample
 
 
 class SFTDataset(GistDataset):

@@ -88,6 +88,8 @@ def _concat_gist_key_values(
     prefix_length: int,
     pad_length: int,
 ):
+    assert gist_mask.shape == gist_position_ids.shape, \
+        f"gist_mask {gist_mask.shape} != gist_position_ids {gist_position_ids.shape}"
     seq_lens = gist_mask.sum(dim=1).tolist()
     # first accumulate the positional embeddings
     for i, seq_len in enumerate(seq_lens):
@@ -127,7 +129,7 @@ def blend_gist_key_values(
     for batch_i in range(batch_size):
         key_values.append(_concat_gist_key_values(
             model_config, 
-            gist_key_values[batch_i], gist_mask[batch_i], gist_position_ids[batch_i], 
+            gist_key_values[batch_i], gist_mask[batch_i].bool(), gist_position_ids[batch_i], 
             rotary_emb, prefix_length[batch_i], batch_length
         ))
         attention_mask[batch_i, :merged_gist_length[batch_i]] = 1

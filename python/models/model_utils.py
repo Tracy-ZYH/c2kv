@@ -1,7 +1,7 @@
 import torch
 from packaging import version
 from logging import getLogger
-from typing import Tuple, Type
+from typing import Tuple, Type, Optional
 from dataclasses import asdict
 import transformers
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
@@ -12,6 +12,40 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 from gist_args import ModelArgs
 
 logger = getLogger(__name__)
+
+
+class GistLossFunctionWithRegularization:
+    def __init__(self, model: PreTrainedModel, regularization_strength: float):
+        super().__init__()
+        self.model = model
+        self.label_loss_function = model.loss_function
+        self.regularization_strength = regularization_strength
+    
+    @staticmethod
+    def _compute_weight_loss(gist_weight: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        return (gist_weight - weight).pow(2).mean()
+    
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        vocab_size: int,
+        num_items_in_batch: Optional[torch.Tensor] = None,
+        ignore_index: int = -100,
+        shift_labels: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        label_loss = self.label_loss_function(logits, labels, vocab_size, num_items_in_batch, ignore_index, shift_labels, **kwargs)
+        regularization_losses = []
+        for layer in self.model.model.layers:
+            attn = layer.self_attn
+            regularization_losses.extend([
+                self._compute_weight_loss(attn.gist_q_proj.weight, attn.q_proj.weight),
+                self._compute_weight_loss(attn.gist_k_proj.weight, attn.k_proj.weight),
+                self._compute_weight_loss(attn.gist_v_proj.weight, attn.v_proj.weight),
+            ])
+        loss = label_loss + torch.stack(regularization_losses).mean() * self.regularization_strength
+        return loss
 
 
 def get_model_class(model_name_or_path: str) -> Tuple[Type[PretrainedConfig], Type[PreTrainedModel]]:
@@ -136,6 +170,11 @@ def get_model_and_tokenizer(
             # token=access_token,
             local_files_only=True,
         )
+
+        if model_args_dict["gist_regularization"] is not None:
+            model.loss_function = GistLossFunctionWithRegularization(
+                model, model_args_dict["gist_regularization"]
+            )
 
     else:
         model = AutoModelForCausalLM.from_pretrained(
