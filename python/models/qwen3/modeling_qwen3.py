@@ -184,11 +184,13 @@ class Qwen3Attention(nn.Module):
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
         
-        if 'q' in config.gist_param:
+        self.gist_param = '' if config.gist_param is None else config.gist_param
+        init_gist_param = self.gist_param.lower()
+        if 'q' in init_gist_param:
             self.gist_q_proj = gen_gist_proj(config.num_attention_heads * self.head_dim, config)
-        if 'k' in config.gist_param:
+        if 'k' in init_gist_param:
             self.gist_k_proj = gen_gist_proj(config.num_key_value_heads * self.head_dim, config)
-        if 'v' in config.gist_param:
+        if 'v' in init_gist_param:
             self.gist_v_proj = gen_gist_proj(config.num_key_value_heads * self.head_dim, config)
 
     def forward(
@@ -203,9 +205,14 @@ class Qwen3Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        use_gist = kwargs.get("use_gist", False)
+        q_proj = self.gist_q_proj if use_gist and 'Q' in self.gist_param else self.q_proj
+        k_proj = self.gist_k_proj if use_gist and 'K' in self.gist_param else self.k_proj
+        v_proj = self.gist_v_proj if use_gist and 'V' in self.gist_param else self.v_proj
+
+        query_states = self.q_norm(q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        key_states = self.k_norm(k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -660,6 +667,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             # concat gist_attn_mask to attention_mask
             if attention_mask is not None:
                 attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
+            kwargs['use_gist'] = True
 
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,

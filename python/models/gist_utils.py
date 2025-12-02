@@ -150,7 +150,7 @@ def init_gist_proj(model, missing_keys):
     if is_deepspeed_zero3_enabled():
         import deepspeed
         def init_proj_deepspeed(gist_proj, proj, gist_name):
-            if gist_name not in model.config.gist_param:
+            if gist_name not in model.config.gist_param.lower():
                 return
             params = [gist_proj.weight, proj.weight]
             if proj.bias is not None:
@@ -166,7 +166,7 @@ def init_gist_proj(model, missing_keys):
         return
     def init_proj(gist_proj, proj, gist_name):
         module_name = f'gist_{gist_name}_proj'
-        if gist_name not in model.config.gist_param:
+        if gist_name not in model.config.gist_param.lower():
             return
         if not any(module_name in missing_key for missing_key in missing_keys):
             return

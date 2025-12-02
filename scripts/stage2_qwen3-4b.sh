@@ -12,10 +12,13 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage2 
     --gradient_accumulation_steps 4 \
     --lr_scheduler_type cosine \
     --enable_gist True \
+    --gist_regularization q \
+    --gist_regularization_factor 1e-3 \
+    --gist_param Qkv \
     --gist_type interleave-16 \
     --gist_mode 512,768,1024,1280-24 \
-    --output_dir $OUTPUT_DIR/sft-16x-sink-cosine \
-    --logging_dir ./logs/qwen3-4b-inst/sft-16x-sink-cosine \
+    --output_dir $OUTPUT_DIR/sft-16x-replace_q-reg_q3 \
+    --logging_dir ./logs/qwen3-4b-inst/sft-16x-replace_q-reg_q3 \
     --logging_steps 1 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \
@@ -25,6 +28,6 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage2 
     --train_data Yukang/LongAlpaca-16k-length \
     --bf16 True \
     --save_strategy epoch \
-    --dataset_shuffle_seed 3746
+    --dataset_shuffle_seed 2837
     # --gradient_checkpointing True
     # --device_map auto \

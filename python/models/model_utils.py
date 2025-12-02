@@ -15,15 +15,16 @@ logger = getLogger(__name__)
 
 
 class GistLossFunctionWithRegularization:
-    def __init__(self, model: PreTrainedModel, regularization_strength: float):
+    def __init__(self, model: PreTrainedModel, param: str, regularization_strength: float):
         super().__init__()
         self.model = model
+        self.param = param
         self.label_loss_function = model.loss_function
         self.regularization_strength = regularization_strength
     
     @staticmethod
-    def _compute_weight_loss(gist_weight: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        return (gist_weight - weight).pow(2).mean()
+    def _weight_loss(gist_module: torch.nn.Module, module: torch.nn.Module) -> torch.Tensor:
+        return (gist_module.weight - module.weight).pow(2).mean()
     
     def __call__(
         self,
@@ -36,15 +37,14 @@ class GistLossFunctionWithRegularization:
         **kwargs,
     ) -> torch.Tensor:
         label_loss = self.label_loss_function(logits, labels, vocab_size, num_items_in_batch, ignore_index, shift_labels, **kwargs)
-        regularization_losses = []
-        for layer in self.model.model.layers:
-            attn = layer.self_attn
-            regularization_losses.extend([
-                self._compute_weight_loss(attn.gist_q_proj.weight, attn.q_proj.weight),
-                self._compute_weight_loss(attn.gist_k_proj.weight, attn.k_proj.weight),
-                self._compute_weight_loss(attn.gist_v_proj.weight, attn.v_proj.weight),
-            ])
-        loss = label_loss + torch.stack(regularization_losses).mean() * self.regularization_strength
+        losses = []
+        if 'q' in self.param:
+            losses.extend(self._weight_loss(layer.self_attn.q_proj, layer.self_attn.gist_q_proj) for layer in self.model.model.layers)
+        if 'k' in self.param:
+            losses.extend(self._weight_loss(layer.self_attn.k_proj, layer.self_attn.gist_k_proj) for layer in self.model.model.layers)
+        if 'v' in self.param:
+            losses.extend(self._weight_loss(layer.self_attn.v_proj, layer.self_attn.gist_v_proj) for layer in self.model.model.layers)
+        loss = label_loss + torch.stack(losses).mean() * self.regularization_strength
         return loss
 
 
@@ -159,8 +159,22 @@ def get_model_and_tokenizer(
             **rope_kwargs,
             **attn_kwargs,
         )
-        config.gist_token_id = tokenizer.eos_token_id
-        config.gist_type = model_args_dict["gist_type"]
+
+        if gist_type := model_args_dict["gist_type"]:
+            if config.gist_type is None:
+                config.gist_type = gist_type
+            elif config.gist_type != gist_type:
+                raise ValueError(f"gist_type in config is {config.gist_type}, but {gist_type} is specified in model_args")
+        if gist_param := model_args_dict["gist_param"]:
+            if config.gist_param is None:
+                config.gist_param = gist_param
+            elif config.gist_param != gist_param:
+                raise ValueError(f"gist_param in config is {config.gist_param}, but {gist_param} is specified in model_args")
+        if config.gist_token_id is None:
+            config.gist_token_id = tokenizer.eos_token_id
+        elif config.gist_token_id != tokenizer.eos_token_id:
+            raise ValueError(f"gist_token_id in config is {config.gist_token_id}, but {tokenizer.eos_token_id} is specified in tokenizer")
+
         model = model_class.from_pretrained(
             model_name_or_path, 
             config=config,
@@ -173,7 +187,7 @@ def get_model_and_tokenizer(
 
         if model_args_dict["gist_regularization"] is not None:
             model.loss_function = GistLossFunctionWithRegularization(
-                model, model_args_dict["gist_regularization"]
+                model, model_args_dict["gist_regularization"], model_args_dict["gist_regularization_factor"]
             )
 
     else:

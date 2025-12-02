@@ -159,7 +159,7 @@ class SFTDataset(GistDataset):
                 continue
             outputs['input_ids'].append(prompt_input_ids + response_input_ids)
             label = [-100] * len(prompt_input_ids) + response_input_ids
-            label.extend(-100 for _ in range(max_length - len(label))) # pad here
+            label.extend([-100] * (max_length - req_length)) # pad here with -100
             outputs['labels'].append(label)
         return outputs
 

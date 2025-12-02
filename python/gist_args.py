@@ -58,15 +58,23 @@ class ModelArgs:
         default=False,
         metadata={'help': 'Use Gist?'}
     )
-    gist_type: str = field(
+    gist_type: Optional[str] = field(
         default="interleave-4",
         metadata={'help': 'Gist type.'}
+    )
+    gist_param: Optional[str] = field(
+        default="qkv",
+        metadata={'help': 'Gist parameters.'}
     )
     gist_mode: str = field(
         default="1024-16",
         metadata={'help': 'Gist Chunk Size and Max Chunk Number.'}
     )
-    gist_regularization: Optional[float] = field(
+    gist_regularization: Optional[str] = field(
+        default=None,
+        metadata={'help': 'Gist regularization parameters.'}
+    )
+    gist_regularization_factor: Optional[float] = field(
         default=None,
         metadata={'help': 'Gist regularization coefficient.'}
     )
