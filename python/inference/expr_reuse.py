@@ -4,8 +4,6 @@ from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from tqdm import tqdm
-import numpy as np
-from itertools import batched
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
 from reuse_pipeline import LLMInference, BatchedKVInstance, gen_recompute_mask
@@ -120,6 +118,8 @@ def main():
                        help="Device to use (cuda, cpu, mps)")
     parser.add_argument("--recompute_type", type=str, default=None,
                        help="Type of mask for selective recompute (e.g. \"leading-5\")")
+    parser.add_argument("--cot", action="store_true", default=False,
+                       help="Use cot prompt")
     
     args = parser.parse_args()
 
@@ -128,6 +128,7 @@ def main():
         args.dataset, 
         args.dataset_path, 
         only_supporting=args.only_supporting,
+        enable_cot=args.cot,
     )
     
     print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")

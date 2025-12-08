@@ -104,6 +104,8 @@ def main():
                        help="For Musique dataset, use only supporting paragraphs")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use (cuda, cpu, mps)")
+    parser.add_argument("--cot", action="store_true", default=False,
+                       help="Use cot prompt")
 
     args = parser.parse_args()
 
@@ -127,6 +129,7 @@ def main():
         args.dataset, 
         args.dataset_path, 
         only_supporting=args.only_supporting,
+        enable_cot=args.cot,
     )
     
     print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")

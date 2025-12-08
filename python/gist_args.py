@@ -6,11 +6,11 @@ from typing import Optional, List, Tuple, Union, Dict
 
 @dataclass
 class ModelArgs:
-    model_cache_dir: str = field(
+    model_cache_dir: str | None = field(
         default=None,
         metadata={'help': 'Default path to save language models.'}
     )
-    model_name_or_path: str = field(
+    model_name_or_path: str | None = field(
         default=None,
         metadata={'help': 'Path to pretrained model or model identifier from huggingface.co/models'}
     )
@@ -143,7 +143,7 @@ class TrainingArgs(TrainingArguments):
         default=True,
         metadata={'help': 'Only train gist?'}
     )
-    train_data: str = field(
+    train_data: str | None = field(
         default=None,
         metadata={'help': 'Path to training data'}
     )

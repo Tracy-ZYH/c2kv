@@ -646,7 +646,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 for i in range(batch_size):
                     for j in range(chunk_num - 1):
                         pos_ids[i, j+1] += cu_gist_len[i, j]
-                pos_ids += past_length
+            pos_ids += past_length
             pos_ids = pos_ids.reshape(batch_size * chunk_num, max_gist_len)
             cos, sin = self.model.rotary_emb(outputs.last_hidden_state, pos_ids)
             # apply rotary pos emb to gist key/value and store in past_key_values

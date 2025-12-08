@@ -129,6 +129,9 @@ def parse_args():
     parser.add_argument(
         "--output_file", type=str, required=True,
     )
+    parser.add_argument(
+        "--cot", action="store_true", default=False, help="Use cot prompt"
+    )
     return parser.parse_args()
 
 
@@ -145,7 +148,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
 
-    dataset = load_mdoc_dataset(args.dataset)
+    dataset = load_mdoc_dataset(args.dataset, enable_cot=args.cot)
 
     scores = []
     results = []

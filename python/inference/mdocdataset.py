@@ -14,6 +14,25 @@ def max_f1_score(pred: str, gt_list: List[str]) -> float:
     pred = pred.split('. ')[0]
     return max([qa_f1_score(pred, gt) for gt in gt_list])
 
+def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
+    """
+    从带有推理过程的预测字符串中提取最终答案，并计算与基准答案列表的最大F1分数。
+    
+    Args:
+        pred (str): LLM的完整输出，应包含 "[Reasoning]... [Answer]..." 格式。
+        gt_list (List[str]): 基准答案（Ground Truth）的列表。
+
+    Returns:
+        float: 计算出的最大F1分数。
+    """
+    parts = pred.split('[Answer]')
+    if len(parts) > 1: # 1. 如果成功分割，答案在第二部分
+        extracted_answer = parts[-1].split('\n\n')[0].split('.')[0].strip()
+    else: # 2. 如果模型没有遵循格式（例如没有输出 [Answer] 标签）
+        return 0.0
+    return max([qa_f1_score(extracted_answer, gt) for gt in gt_list])
+
+
 def max_rouge_score(pred: str, gt_list: List[str]) -> float:
     pred = pred.split('\n')[0]
     return max([rouge_score(pred, gt) for gt in gt_list])
@@ -27,6 +46,21 @@ QA_QUERY_PROMPT: str = ("Answer the question directly based on the given passage
     "Do NOT repeat the question. The answer should be within 5 words.\n\nQuestion: ")
 
 QA_MAX_NEW_TOKENS: int = 8
+
+QA_SYSTEM_PROMPT_COT: str = (
+    "You are a helpful QA assistant. After reading the provided passages, you will be asked a question. "
+    "Your task is to first provide a step-by-step reasoning process on how to answer the question based on the passages. "
+    "After your reasoning, provide the final, concise answer in a specific format."
+)
+
+QA_QUERY_PROMPT_COT: str = (
+    "Based on the given passages, answer the question. Please follow the format below:\n\n"
+    "[Reasoning] (Your step-by-step reasoning on how to arrive at the answer based on the provided text)\n\n"
+    "[Answer] (The final, concise answer, typically within 5 words)\n\n"
+    "Question: "
+)
+
+QA_MAX_NEW_TOKENS_COT: int = 512
 
 
 class AbstractMDQADataset(ABC):
@@ -54,17 +88,17 @@ class AbstractMDQADataset(ABC):
 
 
 class WikiMQADataset(AbstractMDQADataset):
-    def __init__(self, data_path: str) -> None:
+    def __init__(self, data_path: str, enable_cot: bool) -> None:
         self.data = datasets.load_dataset("json", data_files=data_path)['train']
-        self.system_prompt: str = QA_SYSTEM_PROMPT
-        self.max_new_tokens: int = QA_MAX_NEW_TOKENS
-        self.query_prompt: str = QA_QUERY_PROMPT
+        self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
+        self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
+        self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
         print(f"Loading dataset from {data_path}...")
         self.context = self.data['context']
         self.qid = self.data['_id']
         self.question = self.data['question']
         self.answer = self.data['answer']
-        self.metric = max_f1_score
+        self.metric = max_f1_score_with_reasoning if enable_cot else max_f1_score
         print(f"Done loading {data_path}")
     
     def __len__(self) -> int:
@@ -84,19 +118,15 @@ class WikiMQADataset(AbstractMDQADataset):
 
 
 class MusiqueDataset(AbstractMDQADataset):
-    def __init__(self, data_path: str, only_supporting: bool=False) -> None:
+    def __init__(self, data_path: str, only_supporting: bool=False, enable_cot: bool=False) -> None:
         self.data = datasets.load_dataset("json", data_files=data_path)['train']
         # self.data = datasets.load_dataset(data_path)['train']
         print(f"Loading dataset from {data_path}...")
-        self.system_prompt: str = QA_SYSTEM_PROMPT
-        self.max_new_tokens: int = QA_MAX_NEW_TOKENS
-        self.query_prompt: str = QA_QUERY_PROMPT
+        self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
+        self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
+        self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
         self.only_supporting = only_supporting
-        self.paragraphs = self.data['paragraphs']
-        self.qid = self.data['id']
-        self.question = self.data['question']
-        self.answer = [[answer] + answer_aliases for answer, answer_aliases in zip(self.data['answer'], self.data['answer_aliases'])]
-        self.metric = max_f1_score
+        self.metric = max_f1_score_with_reasoning if enable_cot else max_f1_score
         print(f"Done loading {data_path}")
     
     @staticmethod
@@ -108,7 +138,7 @@ class MusiqueDataset(AbstractMDQADataset):
             'qid': sample['id'],
             'question': QA_QUERY_PROMPT + sample['question'] + '\n\nAnswer: ',
             'documents': context_list,
-            'answer': sample['answer'],
+            'answer': [sample['answer']] + sample['answer_aliases'],
         }
     
     def __len__(self) -> int:
@@ -119,17 +149,17 @@ class MusiqueDataset(AbstractMDQADataset):
 
 
 class HotpotQADataset(AbstractMDQADataset):
-    def __init__(self) -> None:
+    def __init__(self, enable_cot: bool=False) -> None:
         print(f"Loading dataset from zai-org/LongBench hotpotqa...")
         self.data = datasets.load_dataset('zai-org/LongBench', 'hotpotqa')['test']
-        self.system_prompt: str = QA_SYSTEM_PROMPT
-        self.max_new_tokens: int = QA_MAX_NEW_TOKENS
-        self.query_prompt: str = QA_QUERY_PROMPT
+        self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
+        self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
+        self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
         self.paragraphs = self.data['context']
         self.qid = self.data['_id']
         self.answer = self.data['answers']
         self.question = self.data['input']
-        self.metric = max_f1_score
+        self.metric = max_f1_score_with_reasoning if enable_cot else max_f1_score
         print(f"Done loading zai-org/LongBench hotpotq")
     
     def __len__(self) -> int:
@@ -308,18 +338,19 @@ class LongAlpacaDataset(AbstractMDQADataset):
 
 
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
+    enable_cot = kwargs.get('enable_cot', False)
     if name == "musique":
         if path is None:
             print('Defaulting musique dataset path to "../datasets/musique.jsonl"')
             path = "../datasets/musique.jsonl"
-        return MusiqueDataset(path, only_supporting=kwargs.get('only_supporting', False))
+        return MusiqueDataset(path, only_supporting=kwargs.get('only_supporting', False), enable_cot=enable_cot)
     elif name == "wikimqa":
         if path is None:
             print('Defaulting wikimqa dataset path to "../datasets/wikimqa.json"')
             path = "../datasets/wikimqa.json"
-        return WikiMQADataset(path)
+        return WikiMQADataset(path, enable_cot=enable_cot)
     elif name == "hotpotqa":
-        return HotpotQADataset()
+        return HotpotQADataset(enable_cot=enable_cot)
     elif name == "multinews":
         return MultiNewsDataset()
     elif name == "samsum":

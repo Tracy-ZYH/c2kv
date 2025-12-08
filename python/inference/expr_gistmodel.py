@@ -6,7 +6,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from transformers.cache_utils import DynamicCache
 from tqdm import tqdm
 import numpy as np
-from itertools import batched
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
 from models import get_model_class, blend_gist_key_values
@@ -62,6 +61,7 @@ def evaluate_model_on_dataset(
         # Pre-compute context
         context_inputs = tokenize_for_reuse(tokenizer, example['documents'], keep_bos=False).to(device)
         outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
+        pos_ids = pos_ids[:, -gist_mask.shape[1]:]
         context_cache, _ = blend_gist_key_values(
             model.config, [outputs.past_key_values], [gist_mask], [pos_ids],
             model.model.rotary_emb, system_length
