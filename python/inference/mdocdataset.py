@@ -25,9 +25,14 @@ def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
     Returns:
         float: 计算出的最大F1分数。
     """
-    parts = pred.split('[Answer]')
+    if "[Answer]" in pred:
+        parts = pred.split('[Answer]')
+    elif "Answer:" in pred:
+        parts = pred.split('Answer:')
+    else:
+        return 0.0
     if len(parts) > 1: # 1. 如果成功分割，答案在第二部分
-        extracted_answer = parts[-1].split('\n\n')[0].split('.')[0].strip()
+        extracted_answer = parts[-1].split('\n\n')[0].split('.')[0].split('[')[0].strip()
     else: # 2. 如果模型没有遵循格式（例如没有输出 [Answer] 标签）
         return 0.0
     return max([qa_f1_score(extracted_answer, gt) for gt in gt_list])
@@ -56,7 +61,7 @@ QA_SYSTEM_PROMPT_COT: str = (
 QA_QUERY_PROMPT_COT: str = (
     "Based on the given passages, answer the question. Please follow the format below:\n\n"
     "[Reasoning] (Your step-by-step reasoning on how to arrive at the answer based on the provided text)\n\n"
-    "[Answer] (The final, concise answer, typically within 5 words)\n\n"
+    "[Answer] (The final, concise answer, typically within 5 words).\n\n"
     "Question: "
 )
 
@@ -130,13 +135,14 @@ class MusiqueDataset(AbstractMDQADataset):
         print(f"Done loading {data_path}")
     
     @staticmethod
-    def extract_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
+    def extract_documents(sample: Dict[str, Any], query_prompt: str | None = None) -> Dict[str, Any]:
         context_list = []
+        query_prompt = QA_QUERY_PROMPT if query_prompt is None else query_prompt
         for item in sample['paragraphs']:
             context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
         return {
             'qid': sample['id'],
-            'question': QA_QUERY_PROMPT + sample['question'] + '\n\nAnswer: ',
+            'question': query_prompt + sample['question'] + '\n\nAnswer: ',
             'documents': context_list,
             'answer': [sample['answer']] + sample['answer_aliases'],
         }
@@ -145,7 +151,7 @@ class MusiqueDataset(AbstractMDQADataset):
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        return self.extract_documents(self.data[idx])
+        return self.extract_documents(self.data[idx], query_prompt=self.query_prompt)
 
 
 class HotpotQADataset(AbstractMDQADataset):

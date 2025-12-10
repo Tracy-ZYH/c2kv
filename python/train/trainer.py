@@ -175,6 +175,14 @@ class GistMultiDocTrainer(Trainer):
         batch_size, doc_total_len = inputs['context_input_ids'].shape
         inputs['context_input_ids'] = inputs['context_input_ids'].reshape((batch_size, -1, self.max_doc_length))
         inputs['past_key_values'] = self._get_system_kv(model, batch_size)
+        # prepare position_ids
+        past_length = inputs['past_key_values'].get_seq_length()
+        input_length = inputs['input_ids'].shape[1]
+        position_ids = torch.arange(input_length, dtype=torch.long, device=inputs["input_ids"].device)
+        position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
+        for i in range(batch_size):
+            position_ids[i] += past_length + (inputs['context_input_ids'][i] != -100).sum()
+        inputs["position_ids"] = position_ids
         return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
     
     def prediction_step(

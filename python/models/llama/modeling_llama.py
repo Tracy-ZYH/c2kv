@@ -612,6 +612,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         ```"""
         # Generate gist (only used in training)
         if context_input_ids is not None:
+            assert position_ids is not None, "position_ids is required when context_input_ids is given"
             if past_key_values is None:
                 past_key_values = DynamicCache(config=self.config)
             past_length = past_key_values.get_seq_length()
@@ -626,28 +627,31 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
             if gist_mask.all(): # context input_ids is full
                 for j in range(chunk_num):
-                    pos_ids[:, j] += chunk_num * max_gist_len
+                    pos_ids[:, j] += j * seq_len
             else:
-                cu_gist_len = gist_mask.reshape(batch_size, chunk_num, max_gist_len).sum(dim=2).cumsum(dim=1)
+                assert attention_mask is not None, "attention_mask is required when context_input_ids is given"
+                gist_lens = gist_mask.reshape((batch_size, chunk_num, max_gist_len)).sum(dim=2)
                 for i in range(batch_size):
-                    for j in range(chunk_num - 1):
-                        pos_ids[i, j+1] += cu_gist_len[i, j]
-            pos_ids += past_length
+                    prefix_length = past_length
+                    for j in range(chunk_num):
+                        gist_len = gist_lens[i, j]
+                        original_len = pos_ids[i, j, gist_len-1].item() + 1
+                        pos_ids[i, j, :gist_len] += prefix_length
+                        prefix_length += original_len
+            # print(f"{past_length=}, {pos_ids.amax(dim=2)=}, {position_ids=}")
             pos_ids = pos_ids.reshape(batch_size * chunk_num, max_gist_len)
             cos, sin = self.model.rotary_emb(outputs.last_hidden_state, pos_ids)
             # apply rotary pos emb to gist key/value and store in past_key_values
-            gist_key_values = []
             head_num = outputs.past_key_values[0][0].shape[1]
-            for key, value in outputs.past_key_values:
+            for layer_idx, (key, value) in enumerate(outputs.past_key_values):
                 key = apply_rotary_pos_emb_single(key, cos, sin)
                 key = key.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
                 value = value.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
-                gist_key_values.append((
-                    key.reshape(batch_size, head_num, chunk_num * max_gist_len, -1),
-                    value.reshape(batch_size, head_num, chunk_num * max_gist_len, -1)
-                ))
-            for layer_idx, (keys, values) in enumerate(gist_key_values):
-                past_key_values.update(keys, values, layer_idx)
+                past_key_values.update(
+                    key.reshape(batch_size, head_num, chunk_num * max_gist_len, -1), 
+                    value.reshape(batch_size, head_num, chunk_num * max_gist_len, -1), 
+                    layer_idx
+                )
             gist_mask = gist_mask.reshape(batch_size, chunk_num * max_gist_len)
             past_mask = gist_mask.new_ones((batch_size, past_length))
             # concat gist_attn_mask to attention_mask

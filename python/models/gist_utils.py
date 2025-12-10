@@ -8,13 +8,13 @@ from transformers.cache_utils import DynamicCache
 from transformers.integrations import is_deepspeed_zero3_enabled
 
 
-def rotate_half(x):
+def rotate_half(x) -> torch.Tensor:
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1):
+def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1) -> torch.Tensor:
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     x_embed = (x * cos) + (rotate_half(x) * sin)
