@@ -6,6 +6,7 @@ from typing import Tuple, Optional, Callable, List, Union
 from transformers import PretrainedConfig
 from transformers.cache_utils import DynamicCache
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.modeling_utils import PreTrainedModel
 
 
 def rotate_half(x) -> torch.Tensor:
@@ -78,6 +79,60 @@ def prepare_gist_input(
         return new_attn_mask, gist_mask, position_ids
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
+
+def process_context_input_ids(
+    model: PreTrainedModel,
+    context_input_ids: torch.LongTensor,
+    past_key_values: DynamicCache | None,
+    attention_mask: torch.Tensor,
+    position_ids: torch.LongTensor,
+) -> Tuple[DynamicCache, torch.Tensor]:
+    assert position_ids is not None, "position_ids is required when context_input_ids is given"
+    if past_key_values is None:
+        past_key_values = DynamicCache(config=model.config)
+    past_length = past_key_values.get_seq_length()
+    # reshape context_input_ids and generate gist
+    batch_size, chunk_num, seq_len = context_input_ids.shape
+    context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
+    gist_attn_mask = context_input_ids != -100
+    context_input_ids[~gist_attn_mask] = model.gist_token_id
+    outputs, gist_mask, pos_ids = model.generate_gist(context_input_ids, gist_attn_mask)
+    # prepare pos_ids and generate positional embeddings
+    max_gist_len = gist_mask.shape[1]
+    pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
+    if gist_mask.all(): # context input_ids is full
+        for j in range(chunk_num):
+            pos_ids[:, j] += j * seq_len
+    else:
+        assert attention_mask is not None, "attention_mask is required when context_input_ids is given"
+        gist_lens = gist_mask.reshape((batch_size, chunk_num, max_gist_len)).sum(dim=2)
+        for i in range(batch_size):
+            prefix_length = past_length
+            for j in range(chunk_num):
+                gist_len = gist_lens[i, j]
+                original_len = pos_ids[i, j, gist_len-1].item() + 1
+                pos_ids[i, j, :gist_len] += prefix_length
+                prefix_length += original_len
+    # print(f"{past_length=}, {pos_ids.amax(dim=2)=}, {position_ids=}")
+    pos_ids = pos_ids.reshape(batch_size * chunk_num, max_gist_len)
+    cos, sin = model.rotary_emb(outputs.last_hidden_state, pos_ids)
+    # apply rotary pos emb to gist key/value and store in past_key_values
+    head_num = outputs.past_key_values[0][0].shape[1]
+    for layer_idx, (key, value) in enumerate(outputs.past_key_values):
+        key = apply_rotary_pos_emb(key, cos, sin)
+        key = key.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
+        value = value.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
+        past_key_values.update(
+            key.reshape(batch_size, head_num, chunk_num * max_gist_len, -1), 
+            value.reshape(batch_size, head_num, chunk_num * max_gist_len, -1), 
+            layer_idx
+        )
+    gist_mask = gist_mask.reshape(batch_size, chunk_num * max_gist_len)
+    past_mask = gist_mask.new_ones((batch_size, past_length))
+    # concat gist_attn_mask to attention_mask
+    if attention_mask is not None:
+        attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
+    return past_key_values, attention_mask
 
 def _concat_gist_key_values(
     model_config: PretrainedConfig,

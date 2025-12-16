@@ -28,6 +28,20 @@ def add_eos(inputs: Mapping, eos_token_id: int):
             inputs[k] = v
     return inputs
 
+def get_data_files(path: str, split: str) -> List[str]:
+    filename = os.path.basename(path) + '_cached_data_files.txt'
+    cached_data_files = os.path.join('/tmp', filename)
+    if os.path.exists(cached_data_files):
+        with open(cached_data_files, 'r') as f:
+            return f.readlines()
+    data_files = []
+    with open(cached_data_files, 'w') as f:
+        for file in glob.iglob(os.path.join(path, split, '**'), recursive=True):
+            if '.' in file:
+                data_files.append(file)
+                f.write(file + '\n')
+    return data_files
+
 
 class GistDataset:
     def __init__(self, data: datasets.Dataset):

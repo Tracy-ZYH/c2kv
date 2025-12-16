@@ -39,11 +39,8 @@ from transformers.utils import TransformersKwargs, auto_docstring, can_return_tu
 from transformers.utils.generic import check_model_inputs
 from .configuration_qwen3 import Qwen3Config
 
-from ..gist_utils import (
-    prepare_gist_input, process_context_input_ids,
-    gen_gist_proj, init_gist_proj, init_gist_embed
-)
-from ..gist_utils import apply_rotary_pos_emb as apply_rotary_pos_emb_single
+from ..gist_utils import prepare_gist_input, init_gist_embed, process_context_input_ids
+from ..lora_utils import get_linear_cls
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -73,13 +70,17 @@ class Qwen3MLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        linear_cls = get_linear_cls(config.gist_lora_config, "mlp")
+        self.gate_proj = linear_cls(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = linear_cls(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = linear_cls(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+    def forward(self, x, with_gist: bool = False):
+        down_proj = self.down_proj(
+            self.act_fn(self.gate_proj(x, with_gist)) * self.up_proj(x, with_gist),
+            with_gist,
+        )
         return down_proj
 
 
@@ -168,30 +169,21 @@ class Qwen3Attention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        self.q_proj = nn.Linear(
+        self.q_proj = get_linear_cls(config.gist_lora_config, "q_proj")(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
         )
-        self.k_proj = nn.Linear(
+        self.k_proj = get_linear_cls(config.gist_lora_config, "k_proj")(
             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
         )
-        self.v_proj = nn.Linear(
+        self.v_proj = get_linear_cls(config.gist_lora_config, "v_proj")(
             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
         )
-        self.o_proj = nn.Linear(
+        self.o_proj = get_linear_cls(config.gist_lora_config, "o_proj")(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
-        
-        self.gist_param = '' if config.gist_param is None else config.gist_param
-        init_gist_param = self.gist_param.lower()
-        if 'q' in init_gist_param:
-            self.gist_q_proj = gen_gist_proj(config.num_attention_heads * self.head_dim, config)
-        if 'k' in init_gist_param:
-            self.gist_k_proj = gen_gist_proj(config.num_key_value_heads * self.head_dim, config)
-        if 'v' in init_gist_param:
-            self.gist_v_proj = gen_gist_proj(config.num_key_value_heads * self.head_dim, config)
 
     def forward(
         self,
@@ -206,13 +198,9 @@ class Qwen3Attention(nn.Module):
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         use_gist = kwargs.get("use_gist", False)
-        q_proj = self.gist_q_proj if use_gist and 'Q' in self.gist_param else self.q_proj
-        k_proj = self.gist_k_proj if use_gist and 'K' in self.gist_param else self.k_proj
-        v_proj = self.gist_v_proj if use_gist and 'V' in self.gist_param else self.v_proj
-
-        query_states = self.q_norm(q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_norm(self.q_proj(hidden_states, use_gist).view(hidden_shape)).transpose(1, 2)
+        key_states = self.k_norm(self.k_proj(hidden_states, use_gist).view(hidden_shape)).transpose(1, 2)
+        value_states = self.v_proj(hidden_states, use_gist).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -269,9 +257,9 @@ class Qwen3Attention(nn.Module):
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        gist_query_states = self.q_norm(self.gist_q_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
-        gist_key_states = self.k_norm(self.gist_k_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
-        gist_value_states = self.gist_v_proj(gist_hidden_states).view(gist_hidden_shape).transpose(1, 2)
+        gist_query_states = self.q_norm(self.q_proj(gist_hidden_states, True).view(gist_hidden_shape)).transpose(1, 2)
+        gist_key_states = self.k_norm(self.k_proj(gist_hidden_states, True).view(gist_hidden_shape)).transpose(1, 2)
+        gist_value_states = self.v_proj(gist_hidden_states, True).view(gist_hidden_shape).transpose(1, 2)
 
         # copy gist states to query, key, value
         query_states = torch.cat([query_states, gist_query_states], dim=2)
@@ -346,7 +334,7 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, with_gist=kwargs.get("use_gist", False))
         hidden_states = residual + hidden_states
         return hidden_states
 
@@ -373,8 +361,15 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        # hidden_states = self.mlp(hidden_states)
+        # Separate MLP for gist
+        gist_num = gist_mask.shape[1]
+        hidden_states = torch.cat([
+            self.mlp(hidden_states[:, :-gist_num]),
+            self.mlp(hidden_states[:, -gist_num:], with_gist=True)
+        ], dim=1)
         hidden_states = residual + hidden_states
+
         return hidden_states, gist_key_values
 
 
@@ -596,8 +591,8 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        use_gist: bool = False,
         context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
-        use_gist: Optional[bool] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         r"""
@@ -609,7 +604,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         context_input_ids (`torch.LongTensor` of shape `(batch_size, chunk_num, sequence_length)`, *optional*):
             List of input ids for generating gist.
 
-        use_gist (`bool`, *optional*):
+        use_gist (`bool`, *optional*, defaults to `False`):
             Whether to use gist.
 
         Example:
@@ -629,12 +624,11 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         # Generate gist (only used in training)
-        kwargs['use_gist'] = False if use_gist is None else use_gist
         if context_input_ids is not None:
             past_key_values, attention_mask = process_context_input_ids(
                 self.model, context_input_ids, past_key_values, attention_mask, position_ids
             )
-            kwargs['use_gist'] = True
+            kwargs["use_gist"] = True
 
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -674,9 +668,6 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         # NOTE: the gist parameters may or may not be loaded from the checkpoint
         # if it is loaded from the checkpoint, we should not re-initilize it
         init_gist_embed(model.model, missing_keys)
-        # initialize weights of possible q,k,v,o,mlp
-        for layer in model.model.layers:
-            init_gist_proj(layer.self_attn, missing_keys)
 
         return model
 

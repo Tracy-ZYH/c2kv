@@ -78,6 +78,10 @@ class ModelArgs:
         default=None,
         metadata={'help': 'Gist regularization coefficient.'}
     )
+    gist_lora_config: Optional[str] = field(
+        default=None,
+        metadata={'help': 'Gist LoRA config.'},
+    )
     max_new_tokens: Optional[int] = field(
         default=None,
         metadata={'help': 'How many tokens at maximum to return?'},

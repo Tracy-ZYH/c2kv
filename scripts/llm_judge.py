@@ -178,6 +178,7 @@ def main():
     parser = argparse.ArgumentParser(description='LLM Judge script for evaluating predictions')
     parser.add_argument('--model', type=str, default="gpt-4", help='LLM model to use (default: gpt-4)')
     parser.add_argument('--dataset', type=str, required=True, help='Dataset name')
+    parser.add_argument('--dataset_cot', action='store_true', help='Use cot prompt')
     parser.add_argument('--prediction', type=str, required=True, help='Prediction JSON file path')
     parser.add_argument('--api_url', type=str, required=True, help='OpenAI API URL')
     parser.add_argument('--prompt_file', type=str, required=True, help='LLM Judge Prompt JSON file path')
@@ -198,7 +199,7 @@ def main():
     predictions = load_prediction_json(args.prediction)
     
     # Load dataset
-    dataset = load_mdoc_dataset(args.dataset)
+    dataset = load_mdoc_dataset(args.dataset, enable_cot=args.dataset_cot)
     
     # Run async main function
     asyncio.run(main_async(

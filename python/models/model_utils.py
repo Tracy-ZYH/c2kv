@@ -1,3 +1,4 @@
+import json
 import torch
 from packaging import version
 from logging import getLogger
@@ -48,9 +49,18 @@ class GistLossFunctionWithRegularization:
         return loss
 
 
-def get_model_class(model_name_or_path: str) -> Tuple[Type[PretrainedConfig], Type[PreTrainedModel]]:
-    from .llama import LlamaForCausalLM, LlamaConfig
-    from .qwen3 import Qwen3ForCausalLM, Qwen3Config
+def get_model_class(
+    model_name_or_path: str,
+    gist_param_type: str,
+) -> Tuple[Type[PretrainedConfig], Type[PreTrainedModel]]:
+    if gist_param_type == "qkv":
+        from .llama import LlamaForCausalLM, LlamaConfig
+        from .qwen3 import Qwen3ForCausalLM, Qwen3Config
+    elif gist_param_type == "lora":
+        from .llama_lora import LlamaForCausalLM, LlamaConfig
+        from .qwen3_lora import Qwen3ForCausalLM, Qwen3Config
+    else:
+        raise ValueError(f"Unsupported gist_param_type: {gist_param_type}")
     ARCHITECTURE_TO_CLASS = {
         'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
         'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
@@ -134,31 +144,29 @@ def get_model_and_tokenizer(
     for k, v in model_args_dict.items():
         if k.startswith("gist") and v is not None:
             gist_kwargs[k] = v
-    
-    # use architecture attribute to distinguish different models
-    probe_config = AutoConfig.from_pretrained(
-        model_name_or_path, 
-        cache_dir=cache_dir, 
-        # token=access_token, 
-        trust_remote_code=True,
-        local_files_only=True,
-    )
-    architecture = probe_config.architectures[0]
 
     if model_args_dict["enable_gist"]:
-        config_class, model_class = get_model_class(model_name_or_path)
+        gist_lora = model_args_dict["gist_param"] == 'lora'
+        config_class, model_class = get_model_class(model_name_or_path, "lora" if gist_lora else "qkv")
 
         config = config_class.from_pretrained(
             model_name_or_path, 
-            # cache_dir=cache_dir,
-            # token=access_token,
-            # NOTE: keep the torch_dtype in config consistent with that in model
             dtype=dtype,
             local_files_only=True,
             **gist_kwargs,
             **rope_kwargs,
             **attn_kwargs,
         )
+
+        if gist_lora and (gist_lora_config_str := model_args_dict["gist_lora_config"]):
+            if isinstance(config.gist_lora_config, str):
+                config.gist_lora_config = json.loads(config.gist_lora_config)
+            gist_lora_config = json.loads(gist_lora_config_str)
+            if config.gist_lora_config is None:
+                config.gist_lora_config = gist_lora_config
+            elif config.gist_lora_config != gist_lora_config:
+                raise ValueError(f"gist_lora_config in config is {config.gist_lora_config}, "
+                    f"but {gist_lora_config} is specified in model_args")
 
         if gist_type := model_args_dict["gist_type"]:
             if config.gist_type is None:
@@ -186,6 +194,7 @@ def get_model_and_tokenizer(
         )
 
         if model_args_dict["gist_regularization"] is not None:
+            assert not gist_lora, "lora and gist regularization are mutually exclusive"
             model.loss_function = GistLossFunctionWithRegularization(
                 model, model_args_dict["gist_regularization"], model_args_dict["gist_regularization_factor"]
             )

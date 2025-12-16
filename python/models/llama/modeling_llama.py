@@ -46,7 +46,7 @@ from transformers.utils.generic import check_model_inputs
 from .configuration_llama import LlamaConfig
 
 from ..gist_utils import (
-    prepare_gist_input, blend_gist_key_values,
+    prepare_gist_input, process_context_input_ids,
     gen_gist_proj, init_gist_proj, init_gist_embed
 )
 from ..gist_utils import apply_rotary_pos_emb as apply_rotary_pos_emb_single
@@ -588,11 +588,15 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
+        use_gist: Optional[bool] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         r"""
         context_input_ids (`torch.LongTensor` of shape `(batch_size, chunk_num, sequence_length)`, *optional*):
             List of input ids for generating gist.
+
+        use_gist (`bool`, *optional*):
+            Whether to use gist.
 
         Example:
 
@@ -611,52 +615,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         # Generate gist (only used in training)
+        kwargs['use_gist'] = False if use_gist is None else use_gist
         if context_input_ids is not None:
-            assert position_ids is not None, "position_ids is required when context_input_ids is given"
-            if past_key_values is None:
-                past_key_values = DynamicCache(config=self.config)
-            past_length = past_key_values.get_seq_length()
-            # reshape context_input_ids and generate gist
-            batch_size, chunk_num, seq_len = context_input_ids.shape
-            context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
-            gist_attn_mask = context_input_ids != -100
-            context_input_ids[~gist_attn_mask] = self.model.gist_token_id
-            outputs, gist_mask, pos_ids = self.model.generate_gist(context_input_ids, gist_attn_mask, **kwargs)
-            # prepare pos_ids and generate positional embeddings
-            max_gist_len = gist_mask.shape[1]
-            pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
-            if gist_mask.all(): # context input_ids is full
-                for j in range(chunk_num):
-                    pos_ids[:, j] += j * seq_len
-            else:
-                assert attention_mask is not None, "attention_mask is required when context_input_ids is given"
-                gist_lens = gist_mask.reshape((batch_size, chunk_num, max_gist_len)).sum(dim=2)
-                for i in range(batch_size):
-                    prefix_length = past_length
-                    for j in range(chunk_num):
-                        gist_len = gist_lens[i, j]
-                        original_len = pos_ids[i, j, gist_len-1].item() + 1
-                        pos_ids[i, j, :gist_len] += prefix_length
-                        prefix_length += original_len
-            # print(f"{past_length=}, {pos_ids.amax(dim=2)=}, {position_ids=}")
-            pos_ids = pos_ids.reshape(batch_size * chunk_num, max_gist_len)
-            cos, sin = self.model.rotary_emb(outputs.last_hidden_state, pos_ids)
-            # apply rotary pos emb to gist key/value and store in past_key_values
-            head_num = outputs.past_key_values[0][0].shape[1]
-            for layer_idx, (key, value) in enumerate(outputs.past_key_values):
-                key = apply_rotary_pos_emb_single(key, cos, sin)
-                key = key.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
-                value = value.reshape(batch_size, chunk_num, head_num, max_gist_len, -1).transpose(1, 2)
-                past_key_values.update(
-                    key.reshape(batch_size, head_num, chunk_num * max_gist_len, -1), 
-                    value.reshape(batch_size, head_num, chunk_num * max_gist_len, -1), 
-                    layer_idx
-                )
-            gist_mask = gist_mask.reshape(batch_size, chunk_num * max_gist_len)
-            past_mask = gist_mask.new_ones((batch_size, past_length))
-            # concat gist_attn_mask to attention_mask
-            if attention_mask is not None:
-                attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
+            past_key_values, attention_mask = process_context_input_ids(
+                self.model, context_input_ids, past_key_values, attention_mask, position_ids
+            )
             kwargs['use_gist'] = True
 
         outputs: BaseModelOutputWithPast = self.model(
