@@ -24,7 +24,7 @@ def tokenize_for_reuse(
         texts = [text.encode("utf-8", errors="ignore").decode("utf-8") for text in texts]
         inputs = tokenizer(texts, **kwargs)
     # 去除begin_of_sentence特殊Token
-    if not keep_bos and int(inputs.input_ids[0, 0]) == tokenizer.bos_token_id:
+    if not keep_bos and inputs.input_ids.shape[1] > 1 and int(inputs.input_ids[0, 0]) == tokenizer.bos_token_id:
         inputs["input_ids"] = inputs.input_ids[:, 1:]
         inputs["attention_mask"] = inputs.attention_mask[:, 1:]
     return inputs

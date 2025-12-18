@@ -182,6 +182,10 @@ def get_model_and_tokenizer(
             config.gist_token_id = tokenizer.eos_token_id
         elif config.gist_token_id != tokenizer.eos_token_id:
             raise ValueError(f"gist_token_id in config is {config.gist_token_id}, but {tokenizer.eos_token_id} is specified in tokenizer")
+        if model_args_dict["gist_reconstruct_loss_coef"] is not None:
+            # this configuration takes effect only when the gist model is trained from base model
+            # when loading gist model from gist checkpoint, this configuration may cause error
+            config.gist_extra_embed_num = 2
 
         model = model_class.from_pretrained(
             model_name_or_path, 

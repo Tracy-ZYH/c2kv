@@ -7,6 +7,12 @@ from transformers import PretrainedConfig
 from transformers.cache_utils import DynamicCache
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+
+
+@dataclass
+class GistModelOutputWithPast(CausalLMOutputWithPast):
+    reconstruct_loss: Optional[torch.Tensor] = None
 
 
 def rotate_half(x) -> torch.Tensor:
@@ -133,6 +139,43 @@ def process_context_input_ids(
     if attention_mask is not None:
         attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
     return past_key_values, attention_mask
+
+def get_reconstruction_loss(
+    model: PreTrainedModel,
+    lm_head: torch.nn.Linear,
+    loss_function: Callable[..., torch.Tensor],
+    context_input_ids: torch.LongTensor,
+    position_ids: torch.LongTensor,
+    attention_mask: torch.Tensor,
+    past_key_values: DynamicCache,
+    **kwargs
+) -> torch.Tensor:
+    # check and reshape inputs
+    assert attention_mask[:, :past_key_values.get_seq_length()].all(), \
+        f"Make sure context input_ids is full {attention_mask[:, :past_key_values.get_seq_length()].sum(dim=1)}"
+    assert model.gist_embed_tokens.num_embeddings == 2, "Make sure gist_embed_tokens.num_embeddings is 2"
+    batch_size, chunk_num, seq_len = context_input_ids.shape
+    input_ids = context_input_ids.reshape(batch_size, chunk_num * seq_len)
+    # prepare embeddings
+    inputs_embeds = model.embed_tokens(input_ids)
+    reconstruct_embeds = model.gist_embed_tokens(context_input_ids.new_ones(batch_size, 1))
+    inputs_embeds = torch.cat([reconstruct_embeds, inputs_embeds], dim=1)
+    # prepare position ids
+    pos_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0).repeat(batch_size, 1)
+    pos_ids += position_ids.min(dim=1, keepdim=True).values
+    if not model.training: # when in inference mode, we need to make a copy of past_key_values
+        past_key_values = DynamicCache(past_key_values, config=model.config)
+    reconstruct_outputs: BaseModelOutputWithPast = model(
+        inputs_embeds=inputs_embeds,
+        position_ids=pos_ids,
+        past_key_values=past_key_values,
+        **kwargs,
+    )
+    reconstruct_logits = lm_head(reconstruct_outputs.last_hidden_state[:, 1:, :]) # remove the first token
+    reconstruct_loss = loss_function(
+        logits=reconstruct_logits, labels=input_ids, vocab_size=model.config.vocab_size, **kwargs
+    )
+    return reconstruct_loss
 
 def _concat_gist_key_values(
     model_config: PretrainedConfig,

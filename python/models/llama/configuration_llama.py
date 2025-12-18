@@ -188,6 +188,7 @@ class LlamaConfig(PretrainedConfig):
         head_dim=None,
         gist_type="interleave-4",
         gist_param="qkv", # which param in attention would be altered for gist tokens
+        gist_extra_embed_num=1, # extra embed num for gist tokens
         gist_token_id=None, # gist token id (default to be eos token)
         **kwargs,
     ):
@@ -223,6 +224,7 @@ class LlamaConfig(PretrainedConfig):
         # Gist parameters
         self.gist_type = gist_type
         self.gist_param = gist_param
+        self.gist_extra_embed_num = gist_extra_embed_num
         self.gist_token_id = gist_token_id
 
         super().__init__(

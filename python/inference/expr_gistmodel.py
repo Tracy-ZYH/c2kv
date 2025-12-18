@@ -11,6 +11,13 @@ from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
 from models import get_model_class, blend_gist_key_values
 from reuse_pipeline import tokenize_for_reuse, prefill_kv_cache
 
+MODEL_GENERATE_API_WARNING_STRING = """==== PLEASE READ ====
+With transformers==4.57.1 (which is required by this project), model.generate() API is buggy:
+It is not compatible with custom position_ids, and it will cause incorrect results.
+See https://github.com/huggingface/transformers/issues/36510 for how to fix it.
+==== PLEASE READ ====
+"""
+
 
 @torch.inference_mode()
 def evaluate_model_on_dataset(
@@ -23,7 +30,7 @@ def evaluate_model_on_dataset(
     
     # Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-    _, model_class = get_model_class(model_name)
+    _, model_class = get_model_class(model_name, "qkv")
     model = model_class.from_pretrained(
         model_name, 
         device_map="auto",
@@ -95,6 +102,7 @@ def evaluate_model_on_dataset(
             max_new_tokens=max_new_tokens,
             pad_token_id=tokenizer.eos_token_id,
             use_cache=True,
+            use_gist=True,
         )
         del context_cache
         
@@ -158,14 +166,19 @@ def main():
                        help="Output file to save results")
     parser.add_argument("--only_supporting", action="store_true",
                        help="For Musique dataset, use only supporting paragraphs")
+    parser.add_argument("--cot", action="store_true", default=False,
+                       help="Use cot prompt")
     
     args = parser.parse_args()
+
+    print(MODEL_GENERATE_API_WARNING_STRING)
 
     # Load dataset
     dataset = load_mdoc_dataset(
         args.dataset, 
         args.dataset_path, 
         only_supporting=args.only_supporting,
+        enable_cot=args.cot,
     )
     
     print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")

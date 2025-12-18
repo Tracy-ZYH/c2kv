@@ -40,10 +40,9 @@ from transformers.utils.generic import check_model_inputs
 from .configuration_qwen3 import Qwen3Config
 
 from ..gist_utils import (
-    prepare_gist_input, process_context_input_ids,
-    gen_gist_proj, init_gist_proj, init_gist_embed
+    prepare_gist_input, process_context_input_ids, get_reconstruction_loss,
+    gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast
 )
-from ..gist_utils import apply_rotary_pos_emb as apply_rotary_pos_emb_single
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -451,7 +450,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         # gist token embedding
         self.gist_type = config.gist_type
-        self.gist_embed_tokens = nn.Embedding(1, config.hidden_size, self.padding_idx)
+        self.gist_embed_tokens = nn.Embedding(config.gist_extra_embed_num, config.hidden_size, self.padding_idx)
         self.gist_embed_tokens._is_hf_initialized = True
         assert config.gist_token_id is not None, "Make sure gist_token_id is set in the config"
         self.gist_token_id = config.gist_token_id
@@ -598,6 +597,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         logits_to_keep: Union[int, torch.Tensor] = 0,
         context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
         use_gist: Optional[bool] = None,
+        reconstruct_loss_coef: Optional[float] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         r"""
@@ -611,6 +611,9 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
         use_gist (`bool`, *optional*):
             Whether to use gist.
+        
+        reconstruct_loss_coef (`float`, *optional*):
+            The coefficient of reconstruction loss.
 
         Example:
 
@@ -635,6 +638,14 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 self.model, context_input_ids, past_key_values, attention_mask, position_ids
             )
             kwargs['use_gist'] = True
+        
+        reconstruct_loss = None
+        if labels is not None and reconstruct_loss_coef is not None:
+            reconstruct_loss = get_reconstruction_loss(
+                self.model, self.lm_head, self.loss_function,
+                context_input_ids, position_ids, attention_mask, past_key_values,
+                use_cache=use_cache, **kwargs
+            )
 
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -655,13 +666,16 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            if reconstruct_loss_coef is not None:
+                loss = loss + reconstruct_loss * reconstruct_loss_coef
 
-        return CausalLMOutputWithPast(
+        return GistModelOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            reconstruct_loss=reconstruct_loss,
         )
     
     @classmethod

@@ -82,6 +82,10 @@ class ModelArgs:
         default=None,
         metadata={'help': 'Gist LoRA config.'},
     )
+    gist_reconstruct_loss_coef: Optional[float] = field(
+        default=None,
+        metadata={'help': 'Gist reconstruction loss coefficient.'},
+    )
     max_new_tokens: Optional[int] = field(
         default=None,
         metadata={'help': 'How many tokens at maximum to return?'},

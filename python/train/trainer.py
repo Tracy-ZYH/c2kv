@@ -16,6 +16,12 @@ class GistPretrainTrainer(Trainer):
         self.gist_chunk_size = list(map(int, gist_mode_args[0].split(",")))
         self.gist_max_chunk_num = int(gist_mode_args[1])
         self.gist_max_chunk_size = max(self.gist_chunk_size)
+        self.compress_loss: float | None = None
+
+    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
+        if self.compress_loss is not None:
+            logs["compress_loss"] = self.compress_loss
+        super().log(logs, start_time)
 
     def compute_loss(
         self,
@@ -54,7 +60,11 @@ class GistPretrainTrainer(Trainer):
         labels = inputs["input_ids"].clone()
         labels[~inputs["attention_mask"]] = -100
         inputs["labels"] = labels
-        return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+        inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
+        loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
+        if self.model_args.gist_reconstruct_loss_coef is not None:
+            self.compress_loss = outputs["reconstruct_loss"].detach().mean().item()
+        return (loss, outputs) if return_outputs else loss
     
     def prediction_step(
         self,
