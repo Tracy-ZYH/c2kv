@@ -156,6 +156,7 @@ def get_reconstruction_loss(
     assert model.gist_embed_tokens.num_embeddings == 2, "Make sure gist_embed_tokens.num_embeddings is 2"
     batch_size, chunk_num, seq_len = context_input_ids.shape
     input_ids = context_input_ids.reshape(batch_size, chunk_num * seq_len)
+    input_ids = input_ids[:, :-1] # drop the last token to make the input sequence length a multiple of chunk size
     # prepare embeddings
     inputs_embeds = model.embed_tokens(input_ids)
     reconstruct_embeds = model.gist_embed_tokens(context_input_ids.new_ones(batch_size, 1))

@@ -5,7 +5,6 @@ import argparse
 import tempfile
 import threading
 import time
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 全局锁用于线程安全的日志记录
@@ -16,10 +15,9 @@ def log_message(message):
     with print_lock:
         print(message)
 
-def find_checkpoints(checkpoints_roots):
+def find_checkpoints(roots):
     """从多个根路径查找所有以 checkpoint- 开头的子目录"""
     ckpt_dirs = []
-    roots = checkpoints_roots.split(':')
     
     for root in roots:
         root = root.strip()
@@ -35,7 +33,7 @@ def find_checkpoints(checkpoints_roots):
     
     return sorted(ckpt_dirs)
 
-def run_evaluation(gpu_id, model_path, dataset, max_examples, output_dir, results_list, lock):
+def run_evaluation(gpu_id, model_path, dataset, max_examples, output_dir, results_list, lock, progress_counter, total_checkpoints):
     """在指定GPU上运行单个评估任务"""
     
     # 创建唯一临时文件名
@@ -90,14 +88,15 @@ def run_evaluation(gpu_id, model_path, dataset, max_examples, output_dir, result
                 "model": model_path,
                 "dataset": dataset,
                 "num_examples": num_examples,
-                "exact_match": exact_match,
-                "gpu_id": gpu_id
+                "score": exact_match,
             }
             
             with lock:
                 results_list.append(result_entry)
+                progress_counter[0] += 1
+                completed = progress_counter[0]
                 
-            log_message(f"[GPU {gpu_id}] Completed {model_path} | EM: {exact_match:.4f}")
+            log_message(f"[GPU {gpu_id}] Completed {model_path} | EM: {exact_match:.4f} | Progress: {completed}/{total_checkpoints} ({completed/total_checkpoints*100:.1f}%)")
             
         except Exception as e:
             log_message(f"[ERROR][GPU {gpu_id}] Failed to parse summary file {summary_file}: {e}")
@@ -109,7 +108,7 @@ def run_evaluation(gpu_id, model_path, dataset, max_examples, output_dir, result
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate multiple checkpoints on multiple GPUs.")
-    parser.add_argument('--checkpoints_roots', required=True, help='Root paths containing checkpoints, separated by :')
+    parser.add_argument('--add_ckpt', action='append', required=True, dest='checkpoints_roots', help='Additional checkpoint directory to evaluate')
     parser.add_argument('--dataset', required=True, help='Dataset name (e.g., musique)')
     parser.add_argument('--max_examples', type=int, default=100, help='Max number of examples to test.')
     parser.add_argument('--gpus', required=True, help='GPU IDs to use, separated by commas (e.g., 0,1,2,3)')
@@ -138,6 +137,10 @@ def main():
     # 结果收集
     results = []
     results_lock = threading.Lock()
+    
+    # 进度计数器（使用列表以便在闭包中修改）
+    progress_counter = [0]
+    total_checkpoints = len(checkpoints)
     
     # 创建GPU任务队列
     gpu_queue = gpu_ids.copy()
@@ -169,7 +172,9 @@ def main():
                 max_examples=args.max_examples,
                 output_dir=temp_output_dir,
                 results_list=results,
-                lock=results_lock
+                lock=results_lock,
+                progress_counter=progress_counter,
+                total_checkpoints=total_checkpoints
             )
         finally:
             release_gpu(gpu_id)
@@ -193,20 +198,22 @@ def main():
     # 保存结果到文件
     try:
         with open(args.output_file, 'w') as f:
-            json.dump(results, f, indent=2)
+            for result in results:
+                f.write(json.dumps(result) + '\n')
         log_message(f"\nAll evaluations completed. Results saved to {args.output_file}")
     except Exception as e:
         log_message(f"[ERROR] Failed to save results to {args.output_file}: {e}")
         # 作为备选，保存到当前目录
         backup_file = "evaluation_results_backup.json"
         with open(backup_file, 'w') as f:
-            json.dump(results, f, indent=2)
+            for result in results:
+                f.write(json.dumps(result) + '\n')
         log_message(f"Results saved to backup file: {backup_file}")
     
     # 打印汇总结果
     log_message("\n=== EVALUATION RESULTS ===")
     for r in results:
-        log_message(f"{r['model']} | GPU:{r['gpu_id']} | EM: {r['exact_match']:.4f}")
+        log_message(f"{r['model']} | EM: {r['score']:.4f}")
 
 if __name__ == '__main__':
     main()

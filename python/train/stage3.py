@@ -29,9 +29,24 @@ def main():
     logger.info(f"Trainable Model params: {format_numel_str(sum(p.numel() for p in model.parameters() if p.requires_grad))}")
 
     with training_args.main_process_first(desc="Get dataset"):
-        dataset_args = {'tokenizer': tokenizer}
-        train_dataset = get_dataset('mdoc', training_args.train_data, **dataset_args)
-        eval_dataset = get_dataset('mdoc_eval', training_args.train_data, **dataset_args)
+        dataset_args = {'tokenizer': tokenizer, 'shuffle_seed': training_args.dataset_shuffle_seed}
+        # train_dataset = get_dataset('mdoc', training_args.train_data, **dataset_args)
+        # eval_dataset = get_dataset('mdoc_eval', training_args.train_data, **dataset_args)
+        train_dataset = get_dataset('mdoc', "../datasets/hotpotqa_train.jsonl", **dataset_args)
+        eval_dataset = get_dataset('mdoc_eval', "../datasets/hotpotqa_train.jsonl", **dataset_args)
+        musique_train = get_dataset('mdoc', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
+        musique_eval = get_dataset('mdoc_eval', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
+        dataset_args.update({
+            'max_length': train_dataset.max_length + train_dataset.max_doc_length * train_dataset.max_doc_num, 
+            'min_length': train_dataset.max_doc_length * 2,
+            'num_samples': len(musique_train),
+            'streaming': False,
+        })
+        slimpajamas_train = get_dataset('pretrain', training_args.train_data, **dataset_args).to_mdoc_format(tokenizer, train_dataset)
+        # print the lengths of all training datasets
+        logger.info(f"Train dataset lengths: musique: {len(musique_train)}, slimpajamas: {len(slimpajamas_train)}, hotpotqa: {len(train_dataset)}")
+        train_dataset.merge([musique_train, slimpajamas_train])
+        eval_dataset.merge([musique_eval])
 
     system_ids = tokenizer(train_dataset.system_prompt_ids, return_tensors='pt')["input_ids"]
 
