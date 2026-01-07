@@ -3,38 +3,22 @@ import numpy as np
 from typing import Tuple, List
 from itertools import batched
 
-from reuse_pipeline import LLMInference, gen_recompute_mask
-from mdocdataset import load_mdoc_dataset
-
-
-def save_kv_cache(
-    kv_cache: Tuple[Tuple[torch.Tensor, ...], ...],
-    filepath: str
-):
-    layer_num = len(kv_cache)
-    batch_size, head_num, seq_len, head_size = kv_cache[0][0].shape
-    # cache_np = np.zeros((layer_num, 2, batch_size, head_num, seq_len, head_size))
-    cache_np = np.zeros((layer_num, 2, batch_size, 1, seq_len, head_size))
-    for layer_i, layer_kv in enumerate(kv_cache):
-        for kv_i, korv in enumerate(layer_kv):
-            # cache_np[layer_i][kv_i] = korv.cpu().float().numpy()
-            cache_np[layer_i][kv_i] = korv[:, 0].view((batch_size, 1, seq_len, head_size)).cpu().float().numpy()
-    np.save(filepath, cache_np)
+from inference.reuse_pipeline import LLMInference, gen_recompute_mask
+from .mdocdataset import load_mdoc_dataset
 
 # ============ 1. Load Dataset and Model ==============
 
-musique = load_mdoc_dataset('wikimqa', only_supporting=False)
+musique = load_mdoc_dataset('wikimqa')
+# musique = load_mdoc_dataset('hotpotqa')
+# musique = load_mdoc_dataset('samsum')
+# musique = load_mdoc_dataset('multinews')
 # musique.system_prompt = ("You will be asked a question after reading several passages. "
 #     "Please answer the question based on the given passages. Think step by step before answering.\n\n")
 # musique.query_prompt = ("Answer the question based on the given passages. "
 #     "Think step by step before answering.\n\nQuestion: ")
-# musique = load_mdoc_dataset('hotpotqa')
-# musique = load_mdoc_dataset('samsum')
-# musique = load_mdoc_dataset('multinews')
 sample = musique[102]
     
-# max_new_tokens = musique.max_new_tokens
-max_new_tokens = 16
+max_new_tokens = musique.max_new_tokens
 
 print(len(sample["documents"]))
 # sample["documents"] = sample["documents"][:10]
@@ -81,11 +65,11 @@ output_text, kv_cache = inference.decode_with_past_kv(
     return_kv=True,
 )
 
-print("Reuse output:", output_text)
-print(len(kv_cache), len(kv_cache[0]), kv_cache[0][0].shape)
+# print("Reuse output:", output_text)
+# print(len(kv_cache), len(kv_cache[0]), kv_cache[0][0].shape)
 
-save_kv_cache(kv_cache, './saved_kv/reuse.npy')
-del kv_cache
+# save_kv_cache(kv_cache, './saved_kv/reuse.npy')
+# del kv_cache
 
 # ============ 4. Full Recompute ==============
 

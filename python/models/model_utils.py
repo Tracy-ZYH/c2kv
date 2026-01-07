@@ -56,6 +56,7 @@ def get_model_class(
     if gist_param_type == "qkv":
         from .llama import LlamaForCausalLM, LlamaConfig
         from .qwen3 import Qwen3ForCausalLM, Qwen3Config
+        from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeConfig
     elif gist_param_type == "lora":
         from .llama_lora import LlamaForCausalLM, LlamaConfig
         from .qwen3_lora import Qwen3ForCausalLM, Qwen3Config
@@ -64,6 +65,7 @@ def get_model_class(
     ARCHITECTURE_TO_CLASS = {
         'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
         'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
+        'Qwen3MoeForCausalLM': (Qwen3MoeConfig, Qwen3MoeForCausalLM),
     }
     probe_config = AutoConfig.from_pretrained(
         model_name_or_path, 
@@ -71,6 +73,8 @@ def get_model_class(
         local_files_only=True,
     )
     architecture = probe_config.architectures[0]
+    if architecture not in ARCHITECTURE_TO_CLASS:
+        raise ValueError(f"Unsupported architecture: {architecture}")
     config_class, model_class = ARCHITECTURE_TO_CLASS[architecture]
     return config_class, model_class
 

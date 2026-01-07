@@ -196,7 +196,7 @@ class LLMInference:
         generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         
         if return_kv:
-            return generated_text, past_key_values.to_legacy_cache()
+            return generated_text, past_key_values
         return generated_text
 
     def _merge_kv_caches(

@@ -212,7 +212,10 @@ def main():
     avg_score = sum(scores) / len(scores) if scores else 0
 
     with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        with open(output_file, 'w') as f:
+            for result in results:
+                if result:  # 只写入非空结果
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
     
     # Also save a summary
     summary = {
@@ -222,7 +225,7 @@ def main():
         'exact_match': avg_score,
     }
     
-    summary_file = output_file.replace('.json', '_summary.json')
+    summary_file = output_file.replace('.jsonl', '_summary.json')
     with open(summary_file, 'w') as f:
         json.dump(summary, f, indent=2)
     

@@ -151,23 +151,68 @@ class GistMultiDocTrainer(Trainer):
         self.system_ids = system_ids
         self.system_kv: Optional[DynamicCache] = None
         self.max_doc_length = max_doc_length
+        self.distill_coef: float | None = self.args.gist_self_distill_coef
+        if self.distill_coef is not None:
+            assert 0. < self.distill_coef <= 1., "The self_distill_coef should be in (0, 1]!"
+            self.kl_loss = torch.nn.KLDivLoss(reduction="batchmean")
+            self.distill_temperature = self.args.gist_self_distill_temperature
+        self.log_data: dict[str, list[torch.Tensor]] = {"distill_loss": [], "label_loss": []}
+
+    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
+        if self.distill_coef is not None and len(self.log_data["distill_loss"]) > 0:
+            distill_loss = self._nested_gather(torch.stack(self.log_data["distill_loss"])).mean().item()
+            label_loss = self._nested_gather(torch.stack(self.log_data["label_loss"])).mean().item()
+            logs.update({"distill_loss": round(distill_loss, 4), "label_loss": round(label_loss, 4)})
+            self.log_data = {"distill_loss": [], "label_loss": []}
+        super().log(logs, start_time)
     
     @torch.no_grad()
     def _get_system_kv(self, model, batch_size: int):
         if self.system_kv == None: # if not initialized
-            self.system_kv = DynamicCache(config=model.model.config)
             attn_impl = model.model.config._attn_implementation
             model.model.config._attn_implementation = "sdpa"
             model.eval()
-            outputs = model(self.system_ids.to(model.device), past_key_values=self.system_kv, use_cache=True,)
+            outputs = model(self.system_ids.to(model.device), use_cache=True)
             model.model.config._attn_implementation = attn_impl
             model.train()
             self.system_kv = outputs.past_key_values
+            self.past_length = self.system_kv.get_seq_length()
         # make a copy of the system_kv, repeated to batch_size
         system_kv = []
         for keys, values in self.system_kv:
-            system_kv.append((keys.repeat(batch_size, 1, 1, 1), values.repeat(batch_size, 1, 1, 1)))
+            system_kv.append((keys.expand(batch_size, -1, -1, -1), values.expand(batch_size, -1, -1, -1)))
         return DynamicCache(system_kv, config=model.model.config)
+
+    def prepare_vanilla_inputs(
+        self,
+        inputs: dict[str, torch.Tensor],
+        context_masks: torch.Tensor,
+        past_key_values: DynamicCache,
+    ) -> dict[str, torch.Tensor]:
+        context_input_ids, query_ids = inputs["context_input_ids"], inputs["input_ids"]
+        batch_size, context_length = context_input_ids.shape
+        past_length = past_key_values.get_seq_length()
+        context_position_ids = torch.arange(
+            past_length, past_length + context_length, dtype=torch.long, device=context_input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1)
+        query_position_ids = torch.arange(
+            query_ids.shape[1], dtype=torch.long, device=context_input_ids.device
+        ).unsqueeze(0).repeat(batch_size, 1)
+        context_ids = context_input_ids.new_zeros(context_input_ids.shape)
+        context_attention_mask = inputs["attention_mask"].new_zeros(context_input_ids.shape)
+        past_attention_mask = inputs["attention_mask"].new_ones((1, 1)).expand(batch_size, past_length)
+        for i, mask in enumerate(context_masks):
+            seq_len = mask.sum().item()
+            context_ids[i, :seq_len] = context_input_ids[i, mask]
+            context_attention_mask[i, :seq_len] = 1
+            query_position_ids[i] += seq_len + past_length
+        return {
+            "input_ids": torch.cat([context_ids, query_ids], dim=1),
+            "attention_mask": torch.cat([past_attention_mask, context_attention_mask, inputs["attention_mask"]], dim=1),
+            "position_ids": torch.cat([context_position_ids, query_position_ids], dim=1),
+            "past_key_values": past_key_values,
+            "logits_to_keep": query_ids.shape[1],
+        }
 
     def compute_loss(
         self,
@@ -179,31 +224,43 @@ class GistMultiDocTrainer(Trainer):
         """
         Override the default compute_loss to process inputs 
         """
-        if not self.model_args.enable_gist:
-            raise NotImplementedError("GistMultiDocTrainer does not support training without gist!")
-            return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
         batch_size, doc_total_len = inputs['context_input_ids'].shape
+        context_masks = inputs['context_input_ids'] != -100
+        # trim the context_input_ids if the last half is empty
+        # half_doc_total_len = doc_total_len // 2
+        # if not context_masks[:, half_doc_total_len:].any():
+        #     inputs['context_input_ids'] = inputs['context_input_ids'][:, :half_doc_total_len]
+        #     context_masks = context_masks[:, :half_doc_total_len]
+        # special cases: no gist inference
+        system_kv: DynamicCache = self._get_system_kv(model, batch_size)
+        if not self.model_args.enable_gist:
+            vanilla_inputs = self.prepare_vanilla_inputs(inputs, context_masks, system_kv)
+            vanilla_inputs['labels'] = inputs['labels']
+            return super().compute_loss(model, vanilla_inputs, return_outputs, num_items_in_batch)
+        if model.training and self.distill_coef is not None:
+            vanilla_inputs = self.prepare_vanilla_inputs(inputs, context_masks, system_kv)
+            # vanilla_inputs['labels'] = inputs['labels']
+            # return super().compute_loss(model, vanilla_inputs, return_outputs, num_items_in_batch)
+            with torch.no_grad():
+                self_distill_logits = model(**vanilla_inputs).logits
+        # prepare inputs for gist inference
         inputs['context_input_ids'] = inputs['context_input_ids'].reshape((batch_size, -1, self.max_doc_length))
-        inputs['past_key_values'] = self._get_system_kv(model, batch_size)
-        # prepare position_ids
-        past_length = inputs['past_key_values'].get_seq_length()
+        inputs['past_key_values'] = system_kv
         input_length = inputs['input_ids'].shape[1]
         position_ids = torch.arange(input_length, dtype=torch.long, device=inputs["input_ids"].device)
         position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
-        for i in range(batch_size):
-            position_ids[i] += past_length + (inputs['context_input_ids'][i] != -100).sum()
+        for i, seqlen in enumerate(context_masks.sum(dim=1).tolist()):
+            position_ids[i] += self.past_length + seqlen
         inputs["position_ids"] = position_ids
+        if model.training and self.distill_coef is not None:
+            label_mask = inputs['labels'] != -100
+            label_loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
+            distill_loss: torch.Tensor = self.kl_loss(
+                torch.log_softmax(outputs.logits[label_mask] / self.distill_temperature, dim=-1), 
+                torch.softmax(self_distill_logits[label_mask] / self.distill_temperature, dim=-1)
+            ) * (self.distill_temperature ** 2)
+            self.log_data["distill_loss"].append(distill_loss.detach())
+            self.log_data["label_loss"].append(label_loss.detach())
+            loss = (1 - self.distill_coef) * label_loss + self.distill_coef * distill_loss
+            return (loss, outputs) if return_outputs else loss
         return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
-    
-    def prediction_step(
-        self,
-        model: torch.nn.Module,
-        inputs: dict[str, Union[torch.Tensor, Any]],
-        prediction_loss_only: bool,
-        ignore_keys: Optional[list[str]] = None,
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        attn_impl = model.model.config._attn_implementation
-        model.model.config._attn_implementation = "sdpa"
-        pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
-        model.model.config._attn_implementation = attn_impl
-        return pred

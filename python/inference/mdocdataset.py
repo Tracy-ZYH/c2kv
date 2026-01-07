@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import datasets
 import string
+from numpy import isin
 import regex
 
 try:
@@ -11,7 +12,7 @@ except ImportError:
 
 
 def max_f1_score(pred: str, gt_list: List[str]) -> float:
-    pred = pred.split('. ')[0]
+    pred = pred.split('. ')[0].split('\n')[0]
     return max([qa_f1_score(pred, gt) for gt in gt_list])
 
 def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
@@ -93,16 +94,20 @@ class AbstractMDQADataset(ABC):
 
 
 class WikiMQADataset(AbstractMDQADataset):
-    def __init__(self, data_path: str, enable_cot: bool) -> None:
-        self.data = datasets.load_dataset("json", data_files=data_path)['train']
+    def __init__(self, data_path: str | None, enable_cot: bool) -> None:
+        self.data_path = data_path
+        if data_path is None:
+            self.data = datasets.load_dataset('zai-org/LongBench', '2wikimqa')['test']
+        else:
+            self.data = datasets.load_dataset("json", data_files=data_path)['train']
         self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
         self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
         print(f"Loading dataset from {data_path}...")
         self.context = self.data['context']
         self.qid = self.data['_id']
-        self.question = self.data['question']
-        self.answer = self.data['answer']
+        self.question = self.data['input' if data_path is None else 'question']
+        self.answer = self.data['answers' if data_path is None else 'answer']
         self.metric = max_f1_score_with_reasoning if enable_cot else max_f1_score
         print(f"Done loading {data_path}")
     
@@ -111,14 +116,20 @@ class WikiMQADataset(AbstractMDQADataset):
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         context_list = []
-        for i, item in enumerate(eval(self.context[idx])):
-            context_str = f"Document {i+1} (title: {item[0]}) " + " ".join(item[1]) + '\n\n'
-            context_list.append(context_str)
+        if self.data_path is None:
+            for item in self.context[idx].split('Passage'):
+                if len(item) > 10:
+                    context_list.append('Passage' + item + '\n\n')
+        else:
+            for i, item in enumerate(eval(self.context[idx])):
+                context_str = f"Document {i+1} (title: {item[0]}) " + " ".join(item[1]) + '\n\n'
+                context_list.append(context_str)
+        answer = self.answer[idx]
         return {
             'qid': self.qid[idx],
             'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
             'documents': context_list,
-            'answer': [self.answer[idx]],
+            'answer': answer if isinstance(answer, list) else [answer]
         }
 
 
@@ -351,9 +362,9 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
             path = "../datasets/musique.jsonl"
         return MusiqueDataset(path, only_supporting=kwargs.get('only_supporting', False), enable_cot=enable_cot)
     elif name == "wikimqa":
-        if path is None:
-            print('Defaulting wikimqa dataset path to "../datasets/wikimqa.json"')
-            path = "../datasets/wikimqa.json"
+        # if path is None:
+        #     print('Defaulting wikimqa dataset path to "../datasets/wikimqa.json"')
+        #     path = "../datasets/wikimqa.json"
         return WikiMQADataset(path, enable_cot=enable_cot)
     elif name == "hotpotqa":
         return HotpotQADataset(enable_cot=enable_cot)

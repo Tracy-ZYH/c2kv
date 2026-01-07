@@ -56,14 +56,19 @@ class GistDataset:
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         return iter(self.data)
     
-    def merge(self, others: List["GistDataset"]) -> None:
+    def merge(self, others: List["GistDataset"], method: str = 'interleave') -> None:
         data_list: List[datasets.Dataset] = [self.data] + [other.data for other in others]
-        weights = [len(data) for data in data_list]
-        probabilities = [weight / sum(weights) for weight in weights]
-        self.data = datasets.interleave_datasets(
-            data_list, probabilities=probabilities,
-            stopping_strategy="all_exhausted_without_replacement",
-        )
+        if method == 'interleave':
+            weights = [len(data) for data in data_list]
+            probabilities = [weight / sum(weights) for weight in weights]
+            self.data = datasets.interleave_datasets(
+                data_list, probabilities=probabilities,
+                stopping_strategy="all_exhausted_without_replacement",
+            )
+        elif method == 'concat':
+            self.data = datasets.concatenate_datasets(data_list)
+        else:
+            raise NotImplementedError(f"Method {method} not implemented!")
 
 
 class PretrainDataset(GistDataset):
@@ -168,7 +173,7 @@ class PretrainDataset(GistDataset):
                 'labels': labels,
                 'attention_mask': attention_mask
             }
-        return GistDataset(self.data.map(_mdoc_formatter, batched=False, num_proc=32))
+        return GistDataset(self.data.map(_mdoc_formatter, batched=False, num_proc=32).select(range(self.num_samples)))
 
 
 class SFTDataset(GistDataset):
@@ -184,6 +189,7 @@ class SFTDataset(GistDataset):
     ):
         self.path = path
         data = datasets.load_dataset(path, split=split)
+        data = data.shuffle(seed=shuffle_seed)
         if num_samples is not None:
             data = data.select(range(num_samples))
         else:
@@ -197,7 +203,7 @@ class SFTDataset(GistDataset):
             },
             batched=True, batch_size=32, num_proc=32,
             remove_columns=data.column_names,
-        ).shuffle(seed=shuffle_seed)
+        )
 
     @staticmethod
     def _preprocess_sft_data(
@@ -305,11 +311,10 @@ class MultiDocDataset(GistDataset):
 
 def get_dataset(dataset_type: str, path: str, tokenizer: AutoTokenizer, **kwargs) -> GistDataset:
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    if '_eval' in dataset_type:
-        kwargs['shuffle_seed'] = 42 # fix seed for evaluation
     if dataset_type == "pretrain":
         return PretrainDataset(path, tokenizer, **kwargs)
     elif dataset_type == "pretrain_eval":
+        kwargs['shuffle_seed'] = 42 # fix seed for evaluation
         kwargs['num_samples'] = kwargs.pop('num_samples', 512)
         return PretrainDataset(path, tokenizer, **kwargs)
     elif dataset_type == "sft":

@@ -75,7 +75,8 @@ def prepare_gist_input(
                 sink_end = min(seqlen, ratio)
                 new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
                 # attention sink at end of chunk
-                begin = max(0, (j - 1) * ratio) # overlap with previous gist token
+                # begin = max(0, (j - 1) * ratio) # overlap with previous gist token
+                begin = j * ratio
                 end = min((j + 1) * ratio, seqlen)
                 gist_position_ids[i, j] = end - 1
                 new_attn_mask[i, max_seqlen + j, begin + padlen:end + padlen] = 1

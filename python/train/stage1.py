@@ -34,6 +34,7 @@ def main():
             'max_length': training_args.dataset_max_length,
             'min_length': training_args.dataset_min_length,
             'shuffle_seed': training_args.dataset_shuffle_seed,
+            'cut_long_seq': True,
         }
         train_dataset = get_dataset('pretrain', training_args.train_data, **dataset_args)
         eval_dataset = get_dataset('pretrain_eval', training_args.train_data, **dataset_args)

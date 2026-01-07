@@ -62,7 +62,9 @@ def evaluate_model_on_dataset(
     # Save results if output file is specified
     if output_file:
         with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+            for result in results:
+                if result:  # 只写入非空结果
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
         
         # Also save a summary
         summary = {
@@ -72,7 +74,7 @@ def evaluate_model_on_dataset(
             'exact_match': exact_match,
         }
         
-        summary_file = output_file.replace('.json', '_summary.json')
+        summary_file = output_file.replace('.jsonl', '_summary.json')
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
     

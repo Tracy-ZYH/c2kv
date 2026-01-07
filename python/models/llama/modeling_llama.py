@@ -531,7 +531,7 @@ class LlamaModel(LlamaPreTrainedModel):
         attention_mask, gist_mask, position_ids = prepare_gist_input(
             self.vocab_size, input_ids, attention_mask, self.gist_type
         )
-        gist_embed = self.gist_embed_tokens(torch.zeros_like(gist_mask, dtype=torch.long))
+        gist_embed = self.gist_embed_tokens(input_ids.new_zeros((1, 1)).expand(gist_mask.shape))
         inputs_embeds = self.embed_tokens(input_ids)
         inputs_embeds = torch.cat([inputs_embeds, gist_embed], dim=1)
 

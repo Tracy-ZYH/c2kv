@@ -159,3 +159,11 @@ class TrainingArgs(TrainingArguments):
         default=42,
         metadata={'help': 'Seed for dataset shuffling'}
     )
+    gist_self_distill_coef: float | None = field(
+        default=None,
+        metadata={'help': 'Gist self distillation coefficient'}
+    )
+    gist_self_distill_temperature: float = field(
+        default=1.,
+        metadata={'help': 'Gist self distillation temperature'}
+    )

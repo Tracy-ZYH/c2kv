@@ -33,20 +33,22 @@ def main():
         # train_dataset = get_dataset('mdoc', training_args.train_data, **dataset_args)
         # eval_dataset = get_dataset('mdoc_eval', training_args.train_data, **dataset_args)
         train_dataset = get_dataset('mdoc', "../datasets/hotpotqa_train.jsonl", **dataset_args)
+        train_dataset.data = train_dataset.data.select(range(30000))
         eval_dataset = get_dataset('mdoc_eval', "../datasets/hotpotqa_train.jsonl", **dataset_args)
         musique_train = get_dataset('mdoc', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
         musique_eval = get_dataset('mdoc_eval', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
         dataset_args.update({
             'max_length': train_dataset.max_length + train_dataset.max_doc_length * train_dataset.max_doc_num, 
             'min_length': train_dataset.max_doc_length * 2,
-            'num_samples': len(musique_train),
+            'num_samples': 10000,
             'streaming': False,
+            'cut_long_seq': True,
         })
         slimpajamas_train = get_dataset('pretrain', training_args.train_data, **dataset_args).to_mdoc_format(tokenizer, train_dataset)
         # print the lengths of all training datasets
         logger.info(f"Train dataset lengths: musique: {len(musique_train)}, slimpajamas: {len(slimpajamas_train)}, hotpotqa: {len(train_dataset)}")
         train_dataset.merge([musique_train, slimpajamas_train])
-        eval_dataset.merge([musique_eval])
+        eval_dataset.merge([musique_eval], method='concat')
 
     system_ids = tokenizer(train_dataset.system_prompt_ids, return_tensors='pt')["input_ids"]
 
