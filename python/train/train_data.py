@@ -249,12 +249,11 @@ class MultiDocDataset(GistDataset):
             max_doc_num = 20
         else:
             raise NotImplementedError(f"Unsupported dataset {path}")
-        data = data.shuffle(seed=shuffle_seed)
         if num_samples is None:
             data = data.select(range(512, len(data)))
         else:
             data = data.select(range(num_samples))
-        self.data = data.map(
+        self.data = data.shuffle(seed=shuffle_seed).map(
             self._preprocess_mdoc_sample,
             fn_kwargs={
                 'tokenizer': tokenizer,

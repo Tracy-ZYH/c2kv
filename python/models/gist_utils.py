@@ -15,6 +15,15 @@ class GistModelOutputWithPast(CausalLMOutputWithPast):
     reconstruct_loss: Optional[torch.Tensor] = None
 
 
+@dataclass
+class GistConfigMixin:
+    gist_type: str = "interleave-4"
+    gist_param: str = "qkv"
+    gist_extra_embed_num: int = 1
+    gist_token_id: int | None = None
+    gist_residual_type: str = "none"
+
+
 def rotate_half(x) -> torch.Tensor:
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -27,65 +36,76 @@ def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1) -> torch.Tensor:
     x_embed = (x * cos) + (rotate_half(x) * sin)
     return x_embed
 
-def prepare_gist_input(
-    gist_id: int,
-    input_ids: torch.LongTensor,
-    attention_mask: torch.Tensor,
-    gist_type: str,
-    padding_side: str = "right",
-) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
-    """
-    Insert gist tokens to the input embeddings.
-    Return the attention mask, gist mask and position ids.
-    """
-    if gist_type == "":
-        return (
-            attention_mask, None,
-            torch.arange(input_ids.shape[1], dtype=torch.long, device=input_ids.device).unsqueeze(0)
-        )
+def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "right") -> Callable:
+    gist_type = config.gist_type
+    assert gist_type, "gist_type must be specified"
     padding_check_idx = 0 if padding_side == "right" else -1
-    for mask in attention_mask:
-        if mask.any(): # only check non-empty sequences
-            assert mask[padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
-        batch_size = input_ids.shape[0]
-        max_seqlen = input_ids.shape[1]
-        max_gist_num = math.ceil(max_seqlen / ratio)
-        new_attn_mask = torch.zeros( # (batch_size, query_len, kv_length)
-            (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num), 
-            dtype=torch.bool, device=input_ids.device
-        )
-        position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
-        gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
-        gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
-        seq_lens = attention_mask.sum(dim=1).tolist()
-        for i, seqlen in enumerate(seq_lens):
-            if seqlen == 0:
-                continue
-            padlen = 0 if padding_side == "right" else max_seqlen - seqlen
-            new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
-                torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
+        def _prepare_gist_input_interleave(
+            input_ids: torch.LongTensor, attention_mask: torch.Tensor,
+        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+            for mask in attention_mask:
+                if mask.any(): # only check non-empty sequences
+                    assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
+            batch_size, max_seqlen = input_ids.shape
+            max_gist_num = math.ceil(max_seqlen / ratio)
+            new_attn_mask = torch.zeros( # (batch_size, query_len, kv_length)
+                (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num), 
+                dtype=torch.bool, device=input_ids.device
             )
-            gist_num = math.ceil(seqlen / ratio)
-            gist_mask[i, :gist_num] = 1
-            for j in range(gist_num):
-                # attention sink at beginning of chunk
-                sink_end = min(seqlen, ratio)
-                new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
-                # attention sink at end of chunk
-                # begin = max(0, (j - 1) * ratio) # overlap with previous gist token
-                begin = j * ratio
-                end = min((j + 1) * ratio, seqlen)
-                gist_position_ids[i, j] = end - 1
-                new_attn_mask[i, max_seqlen + j, begin + padlen:end + padlen] = 1
-                new_attn_mask[i, max_seqlen + j, max_seqlen:max_seqlen + j + 1] = 1
-        new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
-        position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
-        return new_attn_mask, gist_mask, position_ids
+            position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
+            gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
+            gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
+            seq_lens = attention_mask.sum(dim=1).tolist()
+            for i, seqlen in enumerate(seq_lens):
+                if seqlen == 0:
+                    continue
+                padlen = 0 if padding_check_idx == 0 else max_seqlen - seqlen
+                new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
+                    torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
+                )
+                gist_num = math.ceil(seqlen / ratio)
+                gist_pad = 0 if padding_check_idx == 0 else max_gist_num - gist_num
+                gist_mask[i, gist_pad:gist_pad + gist_num] = 1
+                for j in range(gist_num):
+                    # attention sink at beginning of chunk
+                    sink_end = min(seqlen, ratio)
+                    new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
+                    # attention sink at end of chunk
+                    # begin = max(0, (j - 1) * ratio) # overlap with previous gist token
+                    begin = j * ratio
+                    end = min((j + 1) * ratio, seqlen)
+                    padded_j = j + gist_pad
+                    new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
+                    new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
+            new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
+            position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
+            return new_attn_mask, gist_mask, position_ids
+        return _prepare_gist_input_interleave
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
+
+def get_apply_gist_residual_func(config: GistConfigMixin) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    if config.gist_residual_type == "mean" and config.gist_type.startswith("interleave-"):
+        ratio = int(config.gist_type.split('-')[1])
+        def _apply_gist_residual_interleave(
+            tokens_tensor: torch.Tensor, gist_tensor: torch.Tensor,
+        ) -> torch.Tensor:
+            # group tokens_tensor into chunks size of ratio (pad if necessary)
+            # tensor shape (batch_size, head_num, seq_len, hidden_size), pooling in seq_len dimension
+            batch_size, head_num, seq_len, hidden_size = tokens_tensor.shape
+            nopad_length = seq_len - seq_len % ratio
+            nopad_mean = tokens_tensor[:, :, :nopad_length, :].view(batch_size, head_num, -1, ratio, hidden_size)
+            residual_mean = nopad_mean.mean(dim=3)
+            if nopad_length != seq_len:
+                pad_mean = tokens_tensor[:, :, nopad_length:, :].mean(dim=2, keepdim=True)
+                residual_mean = torch.cat([residual_mean, pad_mean], dim=2)
+            assert residual_mean.shape == gist_tensor.shape, f"{residual_mean.shape} != {gist_tensor.shape}"
+            return residual_mean + gist_tensor
+        return _apply_gist_residual_interleave
+    return lambda tokens_tensor, gist_tensor: gist_tensor
 
 def process_context_input_ids(
     model: PreTrainedModel,
@@ -257,7 +277,10 @@ def init_gist_proj(model, missing_keys):
                 params.extend[gist_proj.bias, proj.bias]
             with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
                 if (gist_proj.weight.sum(-1) == 0).any() or (gist_proj.weight > 1e29).any():
-                    gist_proj.weight.data.copy_(proj.weight.data)
+                    if model.config.gist_residual_type == "mean":
+                        gist_proj.weight.data.zero_()
+                    else:
+                        gist_proj.weight.data.copy_(proj.weight.data)
                 if proj.bias is not None:
                     gist_proj.bias.data.copy_(proj.bias.data)
         init_proj_deepspeed(model.gist_q_proj, model.q_proj, 'q')
@@ -270,7 +293,10 @@ def init_gist_proj(model, missing_keys):
             return
         if not any(module_name in missing_key for missing_key in missing_keys):
             return
-        gist_proj.weight.data.copy_(proj.weight.data)
+        if model.config.gist_residual_type == "mean":
+            gist_proj.weight.data.zero_()
+        else:
+            gist_proj.weight.data.copy_(proj.weight.data)
         if proj.bias is not None:
             gist_proj.bias.data.copy_(proj.bias.data)
     init_proj(model.gist_q_proj, model.q_proj, 'q')
@@ -284,7 +310,8 @@ def init_gist_embed(model, missing_keys):
         with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
             # deepspeed will initialize the parameters to zero
             # NOTE: with Llama3.1, change the following line to `if True` in order to initialize the parameters
-            if (model.gist_embed_tokens.weight == 0).all():
+            # if (model.gist_embed_tokens.weight == 0).all():
+            if True:
                 model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
                     model.gist_token_id: model.gist_token_id + 1
                 ]

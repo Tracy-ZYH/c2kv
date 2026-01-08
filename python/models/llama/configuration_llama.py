@@ -22,8 +22,10 @@
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 
+from ..gist_utils import GistConfigMixin
 
-class LlamaConfig(PretrainedConfig):
+
+class LlamaConfig(PretrainedConfig, GistConfigMixin):
     r"""
     This is the configuration class to store the configuration of a [`LlamaModel`]. It is used to instantiate an LLaMA
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
@@ -186,10 +188,6 @@ class LlamaConfig(PretrainedConfig):
         attention_dropout=0.0,
         mlp_bias=False,
         head_dim=None,
-        gist_type="interleave-4",
-        gist_param="qkv", # which param in attention would be altered for gist tokens
-        gist_extra_embed_num=1, # extra embed num for gist tokens
-        gist_token_id=None, # gist token id (default to be eos token)
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -220,12 +218,6 @@ class LlamaConfig(PretrainedConfig):
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
-        
-        # Gist parameters
-        self.gist_type = gist_type
-        self.gist_param = gist_param
-        self.gist_extra_embed_num = gist_extra_embed_num
-        self.gist_token_id = gist_token_id
 
         super().__init__(
             pad_token_id=pad_token_id,

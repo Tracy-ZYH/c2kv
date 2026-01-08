@@ -41,8 +41,9 @@ from transformers.utils.generic import OutputRecorder, check_model_inputs
 from .configuration_qwen3_moe import Qwen3MoeConfig
 
 from ..gist_utils import (
-    prepare_gist_input, process_context_input_ids, get_reconstruction_loss,
-    gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast
+    get_prepare_gist_input_func, process_context_input_ids, get_reconstruction_loss,
+    gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast,
+    get_apply_gist_residual_func
 )
 
 
@@ -148,6 +149,7 @@ class Qwen3MoeAttention(nn.Module):
         self.sliding_window = getattr(config, "sliding_window", None)
 
         self.gist_param = '' if config.gist_param is None else config.gist_param
+        self.apply_gist_residual = get_apply_gist_residual_func(config)
         init_gist_param = self.gist_param.lower()
         if 'q' in init_gist_param:
             self.gist_q_proj = gen_gist_proj(config.num_attention_heads * self.head_dim, config)
@@ -231,6 +233,10 @@ class Qwen3MoeAttention(nn.Module):
         gist_query_states = self.q_norm(self.gist_q_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
         gist_key_states = self.k_norm(self.gist_k_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
         gist_value_states = self.gist_v_proj(gist_hidden_states).view(gist_hidden_shape).transpose(1, 2)
+
+        gist_query_states = self.apply_gist_residual(query_states, gist_query_states)
+        gist_key_states = self.apply_gist_residual(key_states, gist_key_states)
+        gist_value_states = self.apply_gist_residual(value_states, gist_value_states)
 
         # copy gist states to query, key, value
         query_states = torch.cat([query_states, gist_query_states], dim=2)
@@ -533,11 +539,11 @@ class Qwen3MoeModel(Qwen3MoePreTrainedModel):
         self.gradient_checkpointing = False
 
         # gist token embedding
-        self.gist_type = config.gist_type
         self.gist_embed_tokens = nn.Embedding(config.gist_extra_embed_num, config.hidden_size, self.padding_idx)
         self.gist_embed_tokens._is_hf_initialized = True
         assert config.gist_token_id is not None, "Make sure gist_token_id is set in the config"
         self.gist_token_id = config.gist_token_id
+        self.prepare_gist_input = get_prepare_gist_input_func(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -612,9 +618,7 @@ class Qwen3MoeModel(Qwen3MoePreTrainedModel):
         attention_mask: torch.BoolTensor,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Tuple[MoeCausalLMOutputWithPast, torch.Tensor, torch.Tensor]:
-        attention_mask, gist_mask, position_ids = prepare_gist_input(
-            self.vocab_size, input_ids, attention_mask, self.gist_type
-        )
+        attention_mask, gist_mask, position_ids = prepare_gist_input(input_ids, attention_mask)
         gist_embed = self.gist_embed_tokens(input_ids.new_zeros((1, 1)).expand(gist_mask.shape))
         inputs_embeds = self.embed_tokens(input_ids)
         inputs_embeds = torch.cat([inputs_embeds, gist_embed], dim=1)

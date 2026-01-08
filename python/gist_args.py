@@ -86,6 +86,10 @@ class ModelArgs:
         default=None,
         metadata={'help': 'Gist reconstruction loss coefficient.'},
     )
+    gist_residual_type: Optional[str] = field(
+        default=None,
+        metadata={'help': 'Gist residual type.'},
+    )
     max_new_tokens: Optional[int] = field(
         default=None,
         metadata={'help': 'How many tokens at maximum to return?'},

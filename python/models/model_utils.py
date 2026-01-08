@@ -57,9 +57,9 @@ def get_model_class(
         from .llama import LlamaForCausalLM, LlamaConfig
         from .qwen3 import Qwen3ForCausalLM, Qwen3Config
         from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeConfig
-    elif gist_param_type == "lora":
-        from .llama_lora import LlamaForCausalLM, LlamaConfig
-        from .qwen3_lora import Qwen3ForCausalLM, Qwen3Config
+    # elif gist_param_type == "lora":
+        # from .llama_lora import LlamaForCausalLM, LlamaConfig
+        # from .qwen3_lora import Qwen3ForCausalLM, Qwen3Config
     else:
         raise ValueError(f"Unsupported gist_param_type: {gist_param_type}")
     ARCHITECTURE_TO_CLASS = {
@@ -182,6 +182,11 @@ def get_model_and_tokenizer(
                 config.gist_param = gist_param
             elif config.gist_param != gist_param:
                 raise ValueError(f"gist_param in config is {config.gist_param}, but {gist_param} is specified in model_args")
+        if gist_residual_type := model_args_dict["gist_residual_type"]:
+            if config.gist_residual_type is None:
+                config.gist_residual_type = gist_residual_type
+            elif config.gist_residual_type != gist_residual_type:
+                raise ValueError(f"gist_residual_type in config is {config.gist_residual_type}, but {gist_residual_type} is specified in model_args")
         if config.gist_token_id is None:
             config.gist_token_id = tokenizer.eos_token_id
         elif config.gist_token_id != tokenizer.eos_token_id:

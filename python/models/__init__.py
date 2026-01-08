@@ -1,6 +1,4 @@
-from .gist_utils import (
-    prepare_gist_input, blend_gist_key_values
-)
+from .gist_utils import blend_gist_key_values
 from .model_utils import (
     get_model_class,
     get_model_and_tokenizer,
@@ -8,6 +6,6 @@ from .model_utils import (
 )
 
 __all__ = [
-    "prepare_gist_input", "blend_gist_key_values", 
+    "blend_gist_key_values", 
     "get_model_class", "get_model_and_tokenizer", "format_numel_str"
 ]

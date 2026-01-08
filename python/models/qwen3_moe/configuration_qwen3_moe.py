@@ -18,11 +18,13 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 
+from ..gist_utils import GistConfigMixin
+
 
 logger = logging.get_logger(__name__)
 
 
-class Qwen3MoeConfig(PretrainedConfig):
+class Qwen3MoeConfig(PretrainedConfig, GistConfigMixin):
     r"""
     This is the configuration class to store the configuration of a [`Qwen3MoeModel`]. It is used to instantiate a
     Qwen3MoE model according to the specified arguments, defining the model architecture. Instantiating a configuration
@@ -199,10 +201,6 @@ class Qwen3MoeConfig(PretrainedConfig):
         output_router_logits=False,
         router_aux_loss_coef=0.001,
         mlp_only_layers=None,
-        gist_type="interleave-4",
-        gist_param="qkv", # which param in attention would be altered for gist tokens
-        gist_extra_embed_num=1, # extra embed num for gist tokens
-        gist_token_id=None, # gist token id (default to be eos token)
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -238,13 +236,7 @@ class Qwen3MoeConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.mlp_only_layers = [] if mlp_only_layers is None else mlp_only_layers
-
-        # Gist parameters
-        self.gist_type = gist_type
-        self.gist_param = gist_param
-        self.gist_extra_embed_num = gist_extra_embed_num
-        self.gist_token_id = gist_token_id
-
+        
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
