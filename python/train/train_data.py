@@ -33,7 +33,7 @@ def get_data_files(path: str, split: str) -> List[str]:
     cached_data_files = os.path.join('/tmp', filename)
     if os.path.exists(cached_data_files):
         with open(cached_data_files, 'r') as f:
-            return f.readlines()
+            return [line.strip() for line in f if line.strip()]
     data_files = []
     with open(cached_data_files, 'w') as f:
         for file in glob.iglob(os.path.join(path, split, '**'), recursive=True):
@@ -79,7 +79,7 @@ class PretrainDataset(GistDataset):
         shuffle_seed: int = 42,
         min_length: int = 1024,
         max_length: int = 4096,
-        num_samples: int = 32768,
+        num_samples: int = 2**15,
         cut_long_seq: bool = False,
         streaming: bool = True,
     ):
@@ -87,26 +87,23 @@ class PretrainDataset(GistDataset):
         shuffle_seed += int(os.environ.get("LOCAL_RANK", 0))
         # dataset = datasets.load_dataset(path, split=split, streaming=True)
         # NOTE: package datasets is modified to avoid globbing on nas, which costs hours
-        if streaming: # pretty hugh to load all data
-            data_files = [ 
-                file for file in glob.iglob(os.path.join(path, split, '**'), recursive=True)
-                if '.' in os.path.basename(file)
-            ]
-            data = datasets.load_dataset(path, data_files=data_files, streaming=True)['train']
-        else: # load a preprocessed subset
-            data = datasets.load_from_disk(path)
-        self.data = data.map(
-            self._preprocess_pretrain_data,
-            fn_kwargs={
+        map_args = {
+            "fn_kwargs": {
                 'tokenizer': tokenizer,
                 'min_length': min_length,
                 'max_length': max_length,
-                'cut_long_seq': cut_long_seq
+                'cut_long_seq': cut_long_seq    
             },
-            batched=True, batch_size=32,
-            num_proc=None if self.streaming else 32,
-            remove_columns=['text', 'meta'],
-        ).shuffle(seed=shuffle_seed)
+            "batched": True, "batch_size": 32,
+            "remove_columns": ["text", "meta"],
+        }
+        if streaming: # pretty hugh to load all data
+            data_files = get_data_files(path, split)
+            data = datasets.load_dataset(path, data_files=data_files, streaming=True)['train']
+        else: # load a preprocessed subset
+            data = datasets.load_from_disk(path)
+            map_args['num_proc'] = 32
+        self.data = data.map(self._preprocess_pretrain_data, **map_args).shuffle(seed=shuffle_seed)
         self.iterator = iter(self.data)
         self.num_samples = num_samples
         self.cached_data: Dict[int, Dict[str, List[Any]]] = {}
@@ -121,7 +118,11 @@ class PretrainDataset(GistDataset):
         cut_long_seq: bool,
     ) -> Dict[str, List[Any]]:
         outputs = {'input_ids': [], "length": []}
-        for encoded in map(tokenizer, data['text']):  # ignore max model input length warning here
+        for text in data['text']:
+            if cut_long_seq:
+                encoded = tokenizer(text, max_length=max_length, truncation=True)
+            else:
+                encoded = tokenizer(text)
             seq_len = len(encoded["input_ids"])
             for start in range(0, seq_len - min_length, max_length):
                 chunk_len = min(max_length, seq_len - start)
@@ -132,8 +133,6 @@ class PretrainDataset(GistDataset):
                     if k in outputs:
                         outputs[k].append(v[start:start + chunk_len])
                 outputs["length"].append(chunk_len)
-                if cut_long_seq:
-                    break
         return outputs
     
     def __iter__(self):

@@ -78,6 +78,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                     begin = j * ratio
                     end = min((j + 1) * ratio, seqlen)
                     padded_j = j + gist_pad
+                    gist_position_ids[i, padded_j] = end - 1
                     new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
                     new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
             new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
@@ -310,8 +311,7 @@ def init_gist_embed(model, missing_keys):
         with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
             # deepspeed will initialize the parameters to zero
             # NOTE: with Llama3.1, change the following line to `if True` in order to initialize the parameters
-            # if (model.gist_embed_tokens.weight == 0).all():
-            if True:
+            if (model.gist_embed_tokens.weight == 0).all():
                 model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
                     model.gist_token_id: model.gist_token_id + 1
                 ]

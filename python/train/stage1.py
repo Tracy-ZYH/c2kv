@@ -37,7 +37,7 @@ def main():
             'cut_long_seq': True,
         }
         train_dataset = get_dataset('pretrain', training_args.train_data, **dataset_args)
-        eval_dataset = get_dataset('pretrain_eval', training_args.train_data, **dataset_args)
+        eval_dataset = get_dataset('pretrain_eval', "../datasets/slimpajamas_subset", streaming=False, **dataset_args)
 
     trainer = GistPretrainTrainer(
         model=model,

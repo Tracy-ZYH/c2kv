@@ -30,6 +30,7 @@ def evaluate_model_on_dataset(
     
     # Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     _, model_class = get_model_class(model_name, "qkv")
     model = model_class.from_pretrained(
         model_name, 
