@@ -50,12 +50,10 @@ def main():
         train_dataset.merge([musique_train, slimpajamas_train])
         eval_dataset.merge([musique_eval], method='concat')
 
-    system_ids = tokenizer(train_dataset.system_prompt_ids, return_tensors='pt')["input_ids"]
-
     trainer = GistMultiDocTrainer(
         model=model,
         args=training_args,
-        system_ids=system_ids,
+        system_ids=train_dataset.system_prompt_ids,
         max_doc_length=train_dataset.max_doc_length,
         model_args=model_args,
         train_dataset=train_dataset,

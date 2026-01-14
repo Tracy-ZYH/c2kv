@@ -13,15 +13,26 @@ import concurrent.futures
 from mdocdataset import load_mdoc_dataset, AbstractMDQADataset
 
 
-def prepare_example(example, system_prompt):
-    """处理单个示例的辅助函数"""
+def prepare_example_with_template(example, system_prompt, tokenizer):
+    """处理单个示例的辅助函数，使用chat template"""
     if 'system_prompt' in example:
         system_prompt = example['system_prompt']
-    prompt = system_prompt + "".join(example['documents']) + example['question']
+    
+    # 构建对话格式的消息列表
+    messages = [
+        {"role": "system", "content": system_prompt},
+    ]
+    for document in example['documents']:
+        messages.append({"role": "user", "content": document})
+    messages.append({"role": "user", "content": example['question']})
+    
+    # 使用chat template处理消息
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
     return prompt, example['answer'], example['qid']
 
-def prepare_prompts_parallel(dataset, max_examples=None, max_workers=None):
-    """使用多线程准备prompts"""
+def prepare_prompts_parallel(dataset, max_examples=None, max_workers=None, tokenizer=None):
+    """使用多线程准备prompts，使用chat template"""
     prompts = []
     ground_truths = []
     qids = []
@@ -35,7 +46,7 @@ def prepare_prompts_parallel(dataset, max_examples=None, max_workers=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # 提交所有任务
         future_to_index = {
-            executor.submit(prepare_example, dataset[i], system_prompt): i 
+            executor.submit(prepare_example_with_template, dataset[i], system_prompt, tokenizer): i 
             for i in range(num_examples)
         }
         
@@ -112,7 +123,7 @@ class MDQAEvaluator:
         for i in tqdm(range(0, len(prompts), batch_size), desc="Generating answers"):
             batch_prompts = prompts[i:i+batch_size]
             
-            # Tokenize batch
+            # Tokenize batch - now using the properly formatted prompts
             try:
                 inputs = self.tokenizer(
                     batch_prompts,
@@ -158,7 +169,7 @@ def evaluate_model_on_dataset(
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
     
-    # Initialize evaluator
+    # Initialize evaluator to get tokenizer
     evaluator = MDQAEvaluator(model_name)
     
     # Prepare generation config
@@ -170,8 +181,10 @@ def evaluate_model_on_dataset(
         pad_token_id=evaluator.tokenizer.pad_token_id
     )
     
-    # Prepare prompts
-    prompts, ground_truths, qids = prepare_prompts_parallel(dataset, max_examples, max_workers=8)
+    # Prepare prompts using chat template
+    prompts, ground_truths, qids = prepare_prompts_parallel(
+        dataset, max_examples, max_workers=8, tokenizer=evaluator.tokenizer
+    )
     
     # Generate answers
     predictions = evaluator.batch_generate_answers(prompts, batch_size, generation_config)

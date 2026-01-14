@@ -127,7 +127,7 @@ class WikiMQADataset(AbstractMDQADataset):
         answer = self.answer[idx]
         return {
             'qid': self.qid[idx],
-            'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
+            'question': self.query_prompt + self.question[idx],
             'documents': context_list,
             'answer': answer if isinstance(answer, list) else [answer]
         }
@@ -153,7 +153,7 @@ class MusiqueDataset(AbstractMDQADataset):
             context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
         return {
             'qid': sample['id'],
-            'question': query_prompt + sample['question'] + '\n\nAnswer: ',
+            'question': query_prompt + sample['question'],
             'documents': context_list,
             'answer': [sample['answer']] + sample['answer_aliases'],
         }
@@ -189,7 +189,7 @@ class HotpotQADataset(AbstractMDQADataset):
                 context_list.append('Passage' + item + '\n\n')
         return {
             'qid': self.qid[idx],
-            'question': self.query_prompt + self.question[idx] + "\n\nAnswer: ",
+            'question': self.query_prompt + self.question[idx],
             'documents': context_list,
             'answer': self.answer[idx],
         }
@@ -305,9 +305,7 @@ class LongAlpacaDataset(AbstractMDQADataset):
     CONTEXT_END: str = "Now the paper ends."
 
     def __init__(self, prompts_path: str) -> None:
-        self.system_prompt = None
-        with open(prompts_path, 'r') as f:
-            self.system_prompts = f.readlines()
+        self.system_prompt = "You are a helpful assistant."
         data = datasets.load_dataset("Yukang/LongAlpaca-16k-length")['train']
         data = data.filter(
             lambda sample: (
@@ -338,10 +336,8 @@ class LongAlpacaDataset(AbstractMDQADataset):
             last_document.append(line)
         if len(last_document) > 0:
             documents.append('\n'.join(last_document))
-        system_prompt = self.system_prompts[idx % len(self.system_prompts)] + self.CONTEXT_BEGIN
         return {
             'qid': str(idx),
-            'system_prompt': system_prompt,
             'question': question,
             'documents': documents,
             'answer': [self.CONTEXT_END + sample['output']],

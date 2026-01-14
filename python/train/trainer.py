@@ -100,18 +100,18 @@ class GistPretrainTrainer(TrainerDistillMixin, Trainer):
             loss = self.apply_distill_loss(labels, loss, self_distill_logits, outputs["logits"])
         return (loss, outputs) if return_outputs else loss
     
-    # def prediction_step(
-    #     self,
-    #     model: torch.nn.Module,
-    #     inputs: dict[str, Union[torch.Tensor, Any]],
-    #     prediction_loss_only: bool,
-    #     ignore_keys: Optional[list[str]] = None,
-    # ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-    #     attn_impl = model.model.config._attn_implementation
-    #     model.model.config._attn_implementation = "sdpa"
-    #     pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
-    #     model.model.config._attn_implementation = attn_impl
-    #     return pred
+    def prediction_step(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[list[str]] = None,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        attn_impl = model.model.config._attn_implementation
+        model.model.config._attn_implementation = "sdpa"
+        pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        model.model.config._attn_implementation = attn_impl
+        return pred
 
 
 class GistSFTTrainer(Trainer):
@@ -174,15 +174,14 @@ class GistSFTTrainer(Trainer):
 class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
     def __init__(
         self, *args, 
-        system_ids: torch.Tensor,
+        system_ids: List[int],
         max_doc_length: int,
         model_args: ModelArgs, 
         **kwargs
     ):
         super().__init__(*args, **kwargs)
-        super(TrainerDistillMixin, self).__init__(*args, **kwargs)
         self.model_args = model_args
-        self.system_ids = system_ids
+        self.system_ids = torch.tensor(system_ids, dtype=torch.long).unsqueeze(0)
         self.system_kv: Optional[DynamicCache] = None
         self.max_doc_length = max_doc_length
     

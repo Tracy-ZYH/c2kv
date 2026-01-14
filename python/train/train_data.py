@@ -42,6 +42,26 @@ def get_data_files(path: str, split: str) -> List[str]:
                 f.write(file + '\n')
     return data_files
 
+def tokenize(
+    tokenizer: AutoTokenizer, 
+    text: str, 
+    role: str, 
+    max_length: int | None = None,
+    keep_bos: bool = False,
+    add_generation_prompt: bool = False,
+):
+    if not keep_bos and tokenizer.bos_token is not None and max_length is not None:
+        # the bos token is not counted in max_length
+        max_length = max_length + 1
+    input_ids = tokenizer.apply_chat_template(
+        [{"role": role, "content": text}], tokenize=True, 
+        max_length=max_length, truncation=max_length is not None,
+        add_generation_prompt=add_generation_prompt,
+    )
+    if not keep_bos and input_ids[0] == tokenizer.bos_token_id:
+        input_ids = input_ids[1:]
+    return input_ids
+
 
 class GistDataset:
     def __init__(self, data: datasets.Dataset):
@@ -174,6 +194,129 @@ class PretrainDataset(GistDataset):
             }
         return GistDataset(self.data.map(_mdoc_formatter, batched=False, num_proc=32).select(range(self.num_samples)))
 
+    def to_mdoc_format2(self, tokenizer: AutoTokenizer, mdoc_dataset: "MultiDocDataset") -> GistDataset:
+        assert not self.streaming, "Streaming is not supported when to_mdoc_format!"
+        doc_length = mdoc_dataset.max_doc_length
+        if self.min_length <= doc_length:
+            raise ValueError(f"min_length {self.min_length} <= doc_length {doc_length}")
+        # 多样化的提示问题列表
+        continuation_prompts = [
+            "Continue this passage", "Please continue", "What comes next?", "Continue the text",
+            "Keep going", "Please proceed with the continuation", "What follows?",
+            "Continue this passage", "Please continue the following text",
+            "Continue writing from where it left off", "What comes next in this passage?",
+            "Continue this document", "Extend this content further",
+        ]
+        # 获取换行符的token id
+        newline_ids = tokenizer.encode("\n", add_special_tokens=False)
+        newline_id = newline_ids[0] if newline_ids else None
+        def split_by_sentences(input_ids: List[int], max_length: int) -> List[List[int]]:
+            """按照换行符分割，并将句子尽可能多地放入文档中"""
+            if newline_id is None:
+                # 如果没有换行符，直接按长度分割
+                return [input_ids[i:i+max_length] for i in range(0, len(input_ids), max_length)]
+            documents = []
+            current_doc = []
+            current_length = 0
+            # 找到所有换行符位置
+            sentence_boundaries = [0]
+            for i, token_id in enumerate(input_ids):
+                if token_id == newline_id:
+                    sentence_boundaries.append(i + 1)
+            sentence_boundaries.append(len(input_ids))
+            # 按句子分组到文档中
+            for i in range(len(sentence_boundaries) - 1):
+                sentence = input_ids[sentence_boundaries[i]:sentence_boundaries[i+1]]
+                sentence_length = len(sentence)
+                # 如果单个句子超过最大长度，需要分割
+                if sentence_length > max_length:
+                    if current_doc:
+                        documents.append(current_doc)
+                        current_doc = []
+                        current_length = 0
+                    # 分割长句子
+                    for j in range(0, sentence_length, max_length):
+                        documents.append(sentence[j:j+max_length])
+                elif current_length + sentence_length <= max_length:
+                    # 可以放入当前文档
+                    current_doc.extend(sentence)
+                    current_length += sentence_length
+                else:
+                    # 当前文档已满，开始新文档
+                    if current_doc:
+                        documents.append(current_doc)
+                    current_doc = sentence
+                    current_length = sentence_length
+            # 添加最后一个文档
+            if current_doc:
+                documents.append(current_doc)
+            return documents
+        
+        def _mdoc_formatter(sample: Dict[str, Any]) -> Dict[str, Any]:
+            input_ids: List[int] = sample['input_ids']
+            # 使用伪随机数选择提示（基于样本内容确保可复现）
+            seed = sum(input_ids[:min(10, len(input_ids))]) % len(continuation_prompts)
+            prompt_text = continuation_prompts[seed]
+            # 将文本分割成文档
+            documents = split_by_sentences(input_ids, doc_length)
+            if len(documents) <= 1:
+                # 文本太短，无法分割
+                return None
+            # 限制文档数量
+            if len(documents) > mdoc_dataset.max_doc_num + 1:
+                documents = documents[:mdoc_dataset.max_doc_num + 1]
+            # 准备context documents (所有文档除了最后一个用于回答)
+            context_docs = documents[:-1]
+            answer_doc = documents[-1]
+            # 将每个context document转换为user message
+            context_input_ids = []
+            for doc in context_docs:
+                # 解码文档内容
+                doc_text = tokenizer.decode(doc, skip_special_tokens=True)
+                # 使用tokenize函数转换为user message
+                doc_ids = tokenize(tokenizer, doc_text, "user", max_length=doc_length)
+                context_input_ids.extend(doc_ids)
+                assert len(doc_ids) <= doc_length, \
+                    f"Context document length {len(context_input_ids)} > doc_length {doc_length}"
+                context_input_ids.extend([-100] * (doc_length - len(doc_ids)))
+                
+            prompt_ids = tokenize(tokenizer, prompt_text, "user")
+            
+            answer_text = tokenizer.decode(answer_doc, skip_special_tokens=True)
+            answer_ids = tokenize(tokenizer, answer_text, "assistant",
+                max_length=mdoc_dataset.max_length - len(prompt_ids))
+            
+            # 拼接 prompt 和 answer
+            input_ids = prompt_ids + answer_ids
+            labels = ([-100] * len(prompt_ids)) + answer_ids
+            attention_mask = [0] * len(prompt_ids) + [1] * len(answer_ids)
+            # 填充
+            input_pad_length = mdoc_dataset.max_length - len(input_ids)
+            if input_pad_length > 0:
+                labels.extend([-100] * input_pad_length)
+                attention_mask.extend([0] * input_pad_length)
+                input_ids.extend([tokenizer.pad_token_id] * input_pad_length)
+            else:
+                labels = labels[:mdoc_dataset.max_length]
+                attention_mask = attention_mask[:mdoc_dataset.max_length]
+                input_ids = input_ids[:mdoc_dataset.max_length]
+        
+            return {
+                'context_input_ids': context_input_ids,
+                'input_ids': input_ids,
+                'labels': labels,
+                'attention_mask': attention_mask
+            }
+        
+        # 过滤掉None结果
+        mapped_data = self.data.map(
+            _mdoc_formatter, 
+            batched=False, 
+            num_proc=32,
+            remove_columns=self.data.column_names
+        ).filter(lambda x: x is not None)
+        
+        return GistDataset(mapped_data.select(range(min(self.num_samples, len(mapped_data)))))
 
 class SFTDataset(GistDataset):
     def __init__(
@@ -266,7 +409,9 @@ class MultiDocDataset(GistDataset):
             remove_columns=data.column_names
         )
         self.max_doc_length = max_doc_length
-        self.system_prompt_ids = QA_SYSTEM_PROMPT
+        self.system_prompt_ids = tokenize(
+            tokenizer, "You are a helpful assistant.", "system", keep_bos=True,
+        )
         self.max_doc_num = max_doc_num
         self.max_length = max_length
 
@@ -280,18 +425,16 @@ class MultiDocDataset(GistDataset):
         extract_docs: Callable
     ) -> Dict[str, Any]:
         sample = extract_docs(sample)
-        documents_ids = tokenizer(sample['documents'], add_special_tokens=False)["input_ids"]
         concat_doc_ids = []
-        for doc_ids in documents_ids:
-            if len(doc_ids) > max_doc_length:
-                doc_ids = doc_ids[:max_doc_length]
+        for doc in sample['documents']:
+            doc_ids = tokenize(tokenizer, doc, "user", max_doc_length)
             pad_length = max_doc_length - len(doc_ids)
+            assert pad_length >= 0, f"pad_length {pad_length} < 0"
             concat_doc_ids.extend(doc_ids)
             concat_doc_ids.extend([-100] * pad_length)
-        concat_doc_ids.extend([-100] * (max_doc_length * (max_doc_num - len(documents_ids))))
-        question_ids = tokenizer(sample['question'], add_special_tokens=False)["input_ids"]
-        answer_ids = tokenizer(sample['answer'][0], add_special_tokens=False)["input_ids"]
-        answer_ids.append(tokenizer.eos_token_id)
+        concat_doc_ids.extend([-100] * (max_doc_length * (max_doc_num - len(sample['documents']))))
+        question_ids = tokenize(tokenizer, sample['question'], "user")
+        answer_ids = tokenize(tokenizer, sample['answer'][0], "assistant")
         input_ids = question_ids + answer_ids
         labels = [-100] * len(question_ids) + answer_ids
         pad_length = max_length - len(input_ids)

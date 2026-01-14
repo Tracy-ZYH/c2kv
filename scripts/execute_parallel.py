@@ -171,7 +171,7 @@ def main():
         return
     
     with open(args.commands_file, 'r') as f:
-        commands = [line.strip() for line in f if line.strip()]
+        commands = [line.strip() for line in f if line.strip() and not line.startswith('#')]
     
     if not commands:
         log_message("[WARNING] No commands found in the file.")
@@ -222,7 +222,7 @@ def main():
     
     # 保存结果到文件
     try:
-        with open(args.output_file, 'w') as f:
+        with open(args.output_file, 'a') as f:
             for result in results:
                 if result:  # 只写入非空结果
                     f.write(json.dumps(result) + '\n')

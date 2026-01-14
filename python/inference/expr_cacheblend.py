@@ -160,10 +160,14 @@ def main():
         tokenizer_has_bos = (warmup_prompt[0] == tokenizer.bos_token_id)
         print(f"Tokenizer has begin_of_sentence special token: {tokenizer_has_bos}.")
 
+        # Prepare system prompt for chat template
         if dataset.system_prompt is None:
             sys_prompt = None
         else:
-            sys_prompt = tokenizer.encode(dataset.system_prompt)
+            # Use chat template for system prompt
+            sys_messages = [{"role": "system", "content": dataset.system_prompt}]
+            sys_prompt = tokenizer.apply_chat_template(sys_messages, tokenize=False)
+            sys_prompt = tokenizer.encode(sys_prompt)
         
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))
         if tokenizer_has_bos:
@@ -176,21 +180,39 @@ def main():
         for i in tqdm(range(num_examples), file=sys.stdout):
             example = dataset[i]
 
-            example_input = []
+            # Build chat messages
+            messages = []
+            
+            # Add system prompt if exists
             if 'system_prompt' in example:
-                example_input.extend(tokenizer.encode(example['system_prompt']))
-            else:
-                example_input.extend(sys_prompt)
+                messages.append({"role": "system", "content": example['system_prompt']})
+            elif sys_prompt is not None:
+                # If example doesn't have system prompt but dataset has one, add it
+                messages.append({"role": "system", "content": dataset.system_prompt})
 
+            # Add each document as a separate user message
             for doc in example['documents']:
-                example_input.extend(blend_special_str)
                 try:
-                    example_input.extend(tokenizer.encode(doc))
+                    doc_content = doc
                 except TypeError as e:
-                    example_input.extend(tokenizer.encode(doc.encode("utf-8", errors="ignore").decode("utf-8")))
+                    doc_content = doc.encode("utf-8", errors="ignore").decode("utf-8")
+                messages.append({"role": "user", "content": doc_content})
 
-            example_input.extend(blend_special_str)
-            example_input.extend(tokenizer.encode(example['question']))
+            # Add the question as a separate user message
+            messages.append({"role": "user", "content": example['question']})
+
+            # Apply chat template to get the full prompt
+            try:
+                example_input = tokenizer.apply_chat_template(messages, tokenize=False)
+            except Exception as e:
+                # Handle any encoding issues
+                processed_messages = []
+                for msg in messages:
+                    processed_content = msg['content'].encode("utf-8", errors="ignore").decode("utf-8")
+                    processed_messages.append({"role": msg['role'], "content": processed_content})
+                example_input = tokenizer.apply_chat_template(processed_messages, tokenize=False)
+            
+            example_input = tokenizer.encode(example_input)
 
             _ = llm.generate(
                 prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
@@ -211,11 +233,10 @@ def main():
     
     avg_score = sum(scores) / len(scores) if scores else 0
 
-    with open(output_file, 'w') as f:
-        with open(output_file, 'w') as f:
-            for result in results:
-                if result:  # 只写入非空结果
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for result in results:
+            if result:  # Only write non-empty results
+                f.write(json.dumps(result, ensure_ascii=False) + '\n')
     
     # Also save a summary
     summary = {
@@ -226,7 +247,7 @@ def main():
     }
     
     summary_file = output_file.replace('.jsonl', '_summary.json')
-    with open(summary_file, 'w') as f:
+    with open(summary_file, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
     
     print(f"\nEvaluation Results:")

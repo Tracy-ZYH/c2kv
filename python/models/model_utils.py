@@ -105,6 +105,9 @@ def get_model_and_tokenizer(
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    if "llama" in model_name_or_path.lower():
+        # there is a bug in llama tokenizer
+        tokenizer.chat_template = r"{% set loop_messages = messages %}{% for message in loop_messages %}{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' %}{% if loop.index0 == 0 %}{% set content = bos_token + content %}{% endif %}{{ content }}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
     
     if return_tokenizer_only:
         return tokenizer

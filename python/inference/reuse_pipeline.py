@@ -1,6 +1,6 @@
 import torch
 import string
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 from transformers.cache_utils import DynamicCache, StaticCache
 from typing import List, Tuple, Dict, Any, Optional, Union
 from dataclasses import dataclass
@@ -13,17 +13,28 @@ logger = logging.getLogger(__name__)
 
 
 def tokenize_for_reuse(
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AutoTokenizer,
     texts: List[str],
     keep_bos: bool = False,
+    role: str | None = None,
+    add_generation_prompt: bool = False
 ) -> Dict[str, torch.Tensor]:
+    if role is not None: # 使用chat template进行tokenize
+        texts = [
+            tokenizer.apply_chat_template(
+                [{"role": role, "content": text}], tokenize=False, add_generation_prompt=add_generation_prompt
+            ) for text in texts
+        ]
+        if tokenizer.bos_token is not None:
+            texts = [text[len(tokenizer.bos_token):] for text in texts]
+    # tokenize
     kwargs = {"padding": True, "return_tensors": "pt", "return_attention_mask": True}
     try:
         inputs = tokenizer(texts, **kwargs)
     except Exception as e:
         texts = [text.encode("utf-8", errors="ignore").decode("utf-8") for text in texts]
         inputs = tokenizer(texts, **kwargs)
-    # 去除begin_of_sentence特殊Token
+    # 去除 begin_of_sentence 特殊 Token
     if not keep_bos and inputs.input_ids.shape[1] > 1 and int(inputs.input_ids[0, 0]) == tokenizer.bos_token_id:
         inputs["input_ids"] = inputs.input_ids[:, 1:]
         inputs["attention_mask"] = inputs.attention_mask[:, 1:]
@@ -100,6 +111,7 @@ class LLMInference:
     def get_prefill_kv_cache(self, 
         texts: List[str],
         keep_bos: bool,
+        role: str | None = None
     ) -> BatchedKVInstance:
         """
         获取一批文本prefill后的键值缓存
@@ -111,7 +123,7 @@ class LLMInference:
         Returns:
             past_key_values: 包含所有层键值缓存的元组
         """
-        inputs = tokenize_for_reuse(self.tokenizer, texts, keep_bos=keep_bos).to(self.device)
+        inputs = tokenize_for_reuse(self.tokenizer, texts, keep_bos=keep_bos, role=role).to(self.device)
         past_key_values = prefill_kv_cache(self.model, inputs)
 
         seq_len = [sum(seq_attn.tolist()) for seq_attn in inputs.attention_mask]
@@ -158,10 +170,8 @@ class LLMInference:
             past_key_values = DynamicCache.from_legacy_cache(past_key_values)
         
         # 编码查询文本
-        query_inputs = self.tokenizer(
-            query_text, 
-            return_tensors="pt", 
-            return_attention_mask=True
+        query_inputs = tokenize_for_reuse(
+            self.tokenizer, [query_text], keep_bos=False, role="user", add_generation_prompt=True
         ).to(self.device)
 
         if past_key_values is not None:

@@ -52,7 +52,7 @@ def evaluate_model_on_dataset(
     if dataset.system_prompt is None:
         sys_cache = None
     else:
-        system_inputs = tokenize_for_reuse(tokenizer, [dataset.system_prompt], keep_bos=True).to(device)
+        system_inputs = tokenize_for_reuse(tokenizer, [dataset.system_prompt], keep_bos=True, role='system').to(device)
         sys_cache = prefill_kv_cache(model, system_inputs)
     
     for i in tqdm(range(num_examples)):
@@ -61,13 +61,13 @@ def evaluate_model_on_dataset(
         # Pre-compute system prompt
         system_cache = sys_cache
         if 'system_prompt' in example:
-            system_inputs = tokenize_for_reuse(tokenizer, [example['system_prompt']], keep_bos=True).to(device)
+            system_inputs = tokenize_for_reuse(tokenizer, [example['system_prompt']], keep_bos=True, role='system').to(device)
             system_cache = prefill_kv_cache(model, system_inputs)
         assert system_cache is not None, "System prompt has not been pre-computed"
         system_length = system_cache.get_seq_length()
 
         # Pre-compute context
-        context_inputs = tokenize_for_reuse(tokenizer, example['documents'], keep_bos=False).to(device)
+        context_inputs = tokenize_for_reuse(tokenizer, example['documents'], keep_bos=False, role='user').to(device)
         outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
         context_cache, _ = blend_gist_key_values(
@@ -86,7 +86,9 @@ def evaluate_model_on_dataset(
         cache_length = context_cache.get_seq_length()
         del system_cache
 
-        input_ids = tokenize_for_reuse(tokenizer, [example['question']], keep_bos=False).input_ids.to(device)
+        input_ids = tokenize_for_reuse(
+            tokenizer, [example['question']], keep_bos=False, role='user', add_generation_prompt=True
+        ).input_ids.to(device)
         query_length = input_ids.shape[1]
         original_length = query_length + precompute_length
         position_ids = torch.arange(precompute_length, original_length, dtype=torch.long, device=device)
@@ -94,7 +96,7 @@ def evaluate_model_on_dataset(
         input_ids = torch.cat([mock_gist_ids, input_ids], dim=1)
         attention_mask = torch.ones_like(input_ids)
 
-        # 生成文本
+        # Generate text
         generated_outputs = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -107,7 +109,7 @@ def evaluate_model_on_dataset(
         )
         del context_cache
         
-        # 解码生成的文本（跳过查询部分）
+        # Decode generated text (skip query part)
         generated_tokens = generated_outputs[0][input_ids.shape[1]:]
         generated_tokens = generated_tokens[:max_new_tokens] # force limited output
         pred = tokenizer.decode(generated_tokens, skip_special_tokens=True)
@@ -128,9 +130,9 @@ def evaluate_model_on_dataset(
     
     # Save results if output file is specified
     if output_file:
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             for result in results:
-                if result:  # 只写入非空结果
+                if result:  # Only write non-empty results
                     f.write(json.dumps(result, ensure_ascii=False) + '\n')
         
         # Also save a summary
@@ -142,7 +144,7 @@ def evaluate_model_on_dataset(
         }
         
         summary_file = output_file.replace('.jsonl', '_summary.json')
-        with open(summary_file, 'w') as f:
+        with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2)
     
     return {

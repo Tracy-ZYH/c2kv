@@ -31,16 +31,16 @@ def evaluate_model_on_dataset(
     if dataset.system_prompt is None:
         sys_cache = None
     else:
-        sys_cache = evaluator.get_prefill_kv_cache(dataset.system_prompt, True)
+        sys_cache = evaluator.get_prefill_kv_cache([dataset.system_prompt], True, role='system')
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
 
         system_cache = sys_cache
         if 'system_prompt' in example:
-            system_cache = evaluator.get_prefill_kv_cache(example['system_prompt'], True)
+            system_cache = evaluator.get_prefill_kv_cache([example['system_prompt']], True, role='system')
         assert system_cache is not None, "System prompt is not pre-computed"
-        context_cache = evaluator.get_prefill_kv_cache(example['documents'], False)
+        context_cache = evaluator.get_prefill_kv_cache(example['documents'], False, role='user')
 
         if recompute_type is not None:
             system_cache = evaluator.selective_recompute(
@@ -75,9 +75,9 @@ def evaluate_model_on_dataset(
     
     # Save results if output file is specified
     if output_file:
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             for result in results:
-                if result:  # 只写入非空结果
+                if result:  # Only write non-empty results
                     f.write(json.dumps(result, ensure_ascii=False) + '\n')
         
         # Also save a summary
@@ -89,7 +89,7 @@ def evaluate_model_on_dataset(
         }
         
         summary_file = output_file.replace('.jsonl', '_summary.json')
-        with open(summary_file, 'w') as f:
+        with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary, f, indent=2)
     
     return {
