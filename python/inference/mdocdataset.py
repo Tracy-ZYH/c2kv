@@ -12,7 +12,6 @@ except ImportError:
 
 
 def max_f1_score(pred: str, gt_list: List[str]) -> float:
-    pred = pred.split('. ')[0].split('\n')[0]
     return max([qa_f1_score(pred, gt) for gt in gt_list])
 
 def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
@@ -40,7 +39,6 @@ def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
 
 
 def max_rouge_score(pred: str, gt_list: List[str]) -> float:
-    pred = pred.split('\n')[0]
     return max([rouge_score(pred, gt) for gt in gt_list])
     
 
@@ -146,14 +144,16 @@ class MusiqueDataset(AbstractMDQADataset):
         print(f"Done loading {data_path}")
     
     @staticmethod
-    def extract_documents(sample: Dict[str, Any], query_prompt: str | None = None) -> Dict[str, Any]:
+    def extract_documents(sample: Dict[str, Any], query_prompt: str | None=None, only_supporting: bool=False) -> Dict[str, Any]:
         context_list = []
-        query_prompt = QA_QUERY_PROMPT if query_prompt is None else query_prompt
+        query_prompt = sample['question'] if query_prompt is None else query_prompt + sample['question']
         for item in sample['paragraphs']:
+            if not item['is_supporting'] and only_supporting:
+                continue
             context_list.append(f"Document {item['idx']} (title: {item['title']}) " + item['paragraph_text'] + '\n\n')
         return {
             'qid': sample['id'],
-            'question': query_prompt + sample['question'],
+            'question': query_prompt,
             'documents': context_list,
             'answer': [sample['answer']] + sample['answer_aliases'],
         }
@@ -162,7 +162,7 @@ class MusiqueDataset(AbstractMDQADataset):
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        return self.extract_documents(self.data[idx], query_prompt=self.query_prompt)
+        return self.extract_documents(self.data[idx], query_prompt=self.query_prompt, only_supporting=self.only_supporting)
 
 
 class HotpotQADataset(AbstractMDQADataset):
@@ -199,12 +199,12 @@ class MultiNewsDataset(AbstractMDQADataset):
     def __init__(self) -> None:
         print(f"Loading dataset from zai-org/LongBench multi_news...")
         self.data = datasets.load_dataset('zai-org/LongBench', 'multi_news')['test']
-        self.system_prompt: str = "You are given several news passages. Write a one-page summary of all news. \n\nNews:"
+        self.system_prompt: str = "You are given several news passages. Write a one-page summary of all news."
         self.max_new_tokens: int = 512
         self.paragraphs = self.data['context']
         self.qid = self.data['_id']
         self.answer = self.data['answers']
-        self.question = '\n\nNow, write a one-page summary of all the news.\n\nSummary: '
+        self.question = '\n\nNow, write a one-page summary of all the news.'
         self.metric = max_rouge_score
         print(f"Done loading zai-org/LongBench multi_news")
     
@@ -229,6 +229,7 @@ class SAMSumDataset(AbstractMDQADataset):
         print(f"Loading dataset from zai-org/LongBench samsum...")
         self.data = datasets.load_dataset('zai-org/LongBench', 'samsum')['test']
         self.system_prompt: str = "Summarize the dialogue into a few short sentences. The following are some examples.\n\n"
+        self.question_prompt: str = "As the above examples, please summarize the dialogue into a few short sentences."
         self.max_new_tokens: int = 128
         self.paragraphs = self.data['context']
         self.qid = self.data['_id']
@@ -247,7 +248,7 @@ class SAMSumDataset(AbstractMDQADataset):
                 context_list.append('Dialogue' + item + '\n')
         return {
             'qid': self.qid[idx],
-            'question': self.question[idx],
+            'question': self.question[idx] + self.question_prompt,
             'documents': context_list,
             'answer': self.answer[idx],
         }

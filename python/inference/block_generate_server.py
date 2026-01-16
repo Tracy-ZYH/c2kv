@@ -210,7 +210,7 @@ if __name__ == '__main__':
 
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=args.model,
-        use_fast=False
+        use_fast=False, local_files_only=True
     )
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
@@ -222,10 +222,11 @@ if __name__ == '__main__':
         pretrained_model_name_or_path=args.model,
         torch_dtype=torch.bfloat16,
         device_map="cuda:0",
-        attn_implementation="flash_attention_2"
+        attn_implementation="flash_attention_2",
+        local_files_only=True,
     )
     model.eval()
-    config: LlamaConfig = AutoConfig.from_pretrained(pretrained_model_name_or_path=args.model)
+    config: LlamaConfig = AutoConfig.from_pretrained(pretrained_model_name_or_path=args.model, local_files_only=True)
     emb: LlamaRotaryEmbedding = LlamaRotaryEmbedding(config=config).to(device=model.device, dtype=torch.float32)
     emb.eval()
 

@@ -27,7 +27,7 @@ def prepare_example_with_template(example, system_prompt, tokenizer):
     messages.append({"role": "user", "content": example['question']})
     
     # 使用chat template处理消息
-    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
     
     return prompt, example['answer'], example['qid']
 

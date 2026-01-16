@@ -30,25 +30,18 @@ def main():
 
     with training_args.main_process_first(desc="Get dataset"):
         dataset_args = {'tokenizer': tokenizer, 'shuffle_seed': training_args.dataset_shuffle_seed}
-        # train_dataset = get_dataset('mdoc', training_args.train_data, **dataset_args)
-        # eval_dataset = get_dataset('mdoc_eval', training_args.train_data, **dataset_args)
         train_dataset = get_dataset('mdoc', "../datasets/hotpotqa_train.jsonl", **dataset_args)
-        train_dataset.data = train_dataset.data.select(range(30000))
         eval_dataset = get_dataset('mdoc_eval', "../datasets/hotpotqa_train.jsonl", **dataset_args)
         musique_train = get_dataset('mdoc', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
         musique_eval = get_dataset('mdoc_eval', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
-        dataset_args.update({
-            'max_length': train_dataset.max_length + train_dataset.max_doc_length * train_dataset.max_doc_num, 
-            'min_length': train_dataset.max_doc_length * 2,
-            'num_samples': 10000,
-            'streaming': False,
-            'cut_long_seq': True,
-        })
-        slimpajamas_train = get_dataset('pretrain', training_args.train_data, **dataset_args).to_mdoc_format(tokenizer, train_dataset)
+        longmagpie_train = get_dataset('mdoc', training_args.train_data, **dataset_args)
+        longmagpie_eval = get_dataset('mdoc_eval', training_args.train_data, **dataset_args)
+        train_dataset.data = train_dataset.data.select(range(40000))
+        longmagpie_train.data = longmagpie_train.data.select(range(20000))
         # print the lengths of all training datasets
-        logger.info(f"Train dataset lengths: musique: {len(musique_train)}, slimpajamas: {len(slimpajamas_train)}, hotpotqa: {len(train_dataset)}")
-        train_dataset.merge([musique_train, slimpajamas_train])
-        eval_dataset.merge([musique_eval], method='concat')
+        logger.info(f"Train dataset lengths: musique: {len(musique_train)}, longmagpie: {len(longmagpie_train)}, hotpotqa: {len(train_dataset)}")
+        train_dataset.merge([musique_train, longmagpie_train])
+        eval_dataset.merge([musique_eval, longmagpie_eval], method='concat')
 
     trainer = GistMultiDocTrainer(
         model=model,

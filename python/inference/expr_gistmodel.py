@@ -68,6 +68,7 @@ def evaluate_model_on_dataset(
 
         # Pre-compute context
         context_inputs = tokenize_for_reuse(tokenizer, example['documents'], keep_bos=False, role='user').to(device)
+        model.model.config._attn_implementation = "sdpa"
         outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
         context_cache, _ = blend_gist_key_values(
@@ -97,6 +98,7 @@ def evaluate_model_on_dataset(
         attention_mask = torch.ones_like(input_ids)
 
         # Generate text
+        model.model.config._attn_implementation = "flash_attention_2"
         generated_outputs = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,

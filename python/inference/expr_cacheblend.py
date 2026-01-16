@@ -100,6 +100,37 @@ def print_output(
     print("-" * 50)
 
 
+def tokenize_example(
+    example: dict, dataset, tokenizer: AutoTokenizer, blend_special_str: str, reverse_order: bool
+) -> list[int]:
+    # Build the prompt with chat template
+    example_input = []
+    
+    # Add system prompt if exists
+    if 'system_prompt' in example:
+        system_prompt = example['system_prompt']
+    else:
+        system_prompt = dataset.system_prompt
+    example_input.extend(tokenizer.apply_chat_template(
+        [{"role": "system", "content": system_prompt}], tokenize=True, add_generation_prompt=False, enable_thinking=False
+    ))
+
+    # Add documents and question with blend special string
+    documents = example['documents'][::-1] if reverse_order else example['documents']
+    for idx, doc in enumerate(documents):
+        example_input.extend(blend_special_str)
+        example_input.extend(tokenizer.apply_chat_template(
+            [{"role": "user", "content": doc}], tokenize=True, add_generation_prompt=False, enable_thinking=False
+        ))
+    
+    example_input.extend(blend_special_str)
+    example_input.extend(tokenizer.apply_chat_template(
+        [{"role": "user", "content": example['question']}], tokenize=True, add_generation_prompt=True, enable_thinking=False
+    ))
+
+    return example_input
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -160,15 +191,6 @@ def main():
         tokenizer_has_bos = (warmup_prompt[0] == tokenizer.bos_token_id)
         print(f"Tokenizer has begin_of_sentence special token: {tokenizer_has_bos}.")
 
-        # Prepare system prompt for chat template
-        if dataset.system_prompt is None:
-            sys_prompt = None
-        else:
-            # Use chat template for system prompt
-            sys_messages = [{"role": "system", "content": dataset.system_prompt}]
-            sys_prompt = tokenizer.apply_chat_template(sys_messages, tokenize=False)
-            sys_prompt = tokenizer.encode(sys_prompt)
-        
         blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))
         if tokenizer_has_bos:
             blend_special_str = blend_special_str[1:]
@@ -180,45 +202,15 @@ def main():
         for i in tqdm(range(num_examples), file=sys.stdout):
             example = dataset[i]
 
-            # Build chat messages
-            messages = []
-            
-            # Add system prompt if exists
-            if 'system_prompt' in example:
-                messages.append({"role": "system", "content": example['system_prompt']})
-            elif sys_prompt is not None:
-                # If example doesn't have system prompt but dataset has one, add it
-                messages.append({"role": "system", "content": dataset.system_prompt})
-
-            # Add each document as a separate user message
-            for doc in example['documents']:
-                try:
-                    doc_content = doc
-                except TypeError as e:
-                    doc_content = doc.encode("utf-8", errors="ignore").decode("utf-8")
-                messages.append({"role": "user", "content": doc_content})
-
-            # Add the question as a separate user message
-            messages.append({"role": "user", "content": example['question']})
-
-            # Apply chat template to get the full prompt
-            try:
-                example_input = tokenizer.apply_chat_template(messages, tokenize=False)
-            except Exception as e:
-                # Handle any encoding issues
-                processed_messages = []
-                for msg in messages:
-                    processed_content = msg['content'].encode("utf-8", errors="ignore").decode("utf-8")
-                    processed_messages.append({"role": msg['role'], "content": processed_content})
-                example_input = tokenizer.apply_chat_template(processed_messages, tokenize=False)
-            
-            example_input = tokenizer.encode(example_input)
+            # Build the prompt with chat template
 
             _ = llm.generate(
-                prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
+                prompts={"prompt_token_ids": tokenize_example(example, dataset, tokenizer, blend_special_str, True)}, 
+                sampling_params=sampling_params
             ) # warmup
             output = llm.generate(
-                prompts={"prompt_token_ids": example_input}, sampling_params=sampling_params
+                prompts={"prompt_token_ids": tokenize_example(example, dataset, tokenizer, blend_special_str, False)}, 
+                sampling_params=sampling_params
             )
             pred = output[0].outputs[0].text
 

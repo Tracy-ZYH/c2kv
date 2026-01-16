@@ -7,6 +7,7 @@ from tqdm import tqdm
 import subprocess
 import signal
 import requests
+from transformers import AutoTokenizer
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
 
@@ -26,6 +27,8 @@ def evaluate_model_on_dataset(
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
     system_prompt = dataset.system_prompt
     url = f"http://localhost:{port}/generate"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
@@ -34,9 +37,14 @@ def evaluate_model_on_dataset(
             system_prompt = example['system_prompt']
         assert system_prompt is not None, "System prompt is not pre-computed"
 
-        blocks = [system_prompt]
-        blocks.extend(example['documents'])
-        blocks.append(example['question'])
+        blocks = [tokenizer.apply_chat_template([{"role": "system", "content": system_prompt}], tokenize=False, add_generation_prompt=False)]
+        blocks.extend([
+            tokenizer.apply_chat_template([{"role": "user", "content": doc}], tokenize=False, add_generation_prompt=False)
+            for doc in example['documents']
+        ])
+        blocks.append(
+            tokenizer.apply_chat_template([{"role": "user", "content": example['question']}], tokenize=False, add_generation_prompt=True)
+        )
 
         r = requests.post(
             url=url,
@@ -122,7 +130,7 @@ def main():
         model_process_args, 
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    wait_secs = 15
+    wait_secs = 120
     print(f"Sleeping for {wait_secs} seconds to wait for model to start")
     time.sleep(wait_secs)
 

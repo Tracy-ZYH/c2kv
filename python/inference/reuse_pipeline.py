@@ -22,7 +22,8 @@ def tokenize_for_reuse(
     if role is not None: # 使用chat template进行tokenize
         texts = [
             tokenizer.apply_chat_template(
-                [{"role": role, "content": text}], tokenize=False, add_generation_prompt=add_generation_prompt
+                [{"role": role, "content": text}], tokenize=False, 
+                add_generation_prompt=add_generation_prompt, enable_thinking=False
             ) for text in texts
         ]
         if tokenizer.bos_token is not None:

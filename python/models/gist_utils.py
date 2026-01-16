@@ -311,7 +311,8 @@ def init_gist_embed(model, missing_keys):
         with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
             # deepspeed will initialize the parameters to zero
             # NOTE: with Llama3.1, change the following line to `if True` in order to initialize the parameters
-            if (model.gist_embed_tokens.weight == 0).all():
+            # if (model.gist_embed_tokens.weight == 0).all():
+            if True:
                 model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
                     model.gist_token_id: model.gist_token_id + 1
                 ]

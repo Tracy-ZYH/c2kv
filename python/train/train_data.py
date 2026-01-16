@@ -5,6 +5,7 @@ from transformers import AutoTokenizer
 from typing import Dict, List, Any, Mapping, Optional, Callable, Iterator
 from logging import getLogger
 
+from .configs import QA_QUERY_PROMPTS
 from inference.mdocdataset import load_mdoc_dataset, QA_SYSTEM_PROMPT
 
 logger = getLogger(__name__)
@@ -57,6 +58,7 @@ def tokenize(
         [{"role": role, "content": text}], tokenize=True, 
         max_length=max_length, truncation=max_length is not None,
         add_generation_prompt=add_generation_prompt,
+        enable_thinking=False,
     )
     if not keep_bos and input_ids[0] == tokenizer.bos_token_id:
         input_ids = input_ids[1:]
@@ -247,9 +249,6 @@ class PretrainDataset(GistDataset):
                         documents.append(current_doc)
                     current_doc = sentence
                     current_length = sentence_length
-            # 添加最后一个文档
-            if current_doc:
-                documents.append(current_doc)
             return documents
         
         def _mdoc_formatter(sample: Dict[str, Any]) -> Dict[str, Any]:
@@ -279,17 +278,17 @@ class PretrainDataset(GistDataset):
                 assert len(doc_ids) <= doc_length, \
                     f"Context document length {len(context_input_ids)} > doc_length {doc_length}"
                 context_input_ids.extend([-100] * (doc_length - len(doc_ids)))
-                
-            prompt_ids = tokenize(tokenizer, prompt_text, "user")
-            
-            answer_text = tokenizer.decode(answer_doc, skip_special_tokens=True)
-            answer_ids = tokenize(tokenizer, answer_text, "assistant",
-                max_length=mdoc_dataset.max_length - len(prompt_ids))
+            empty_doc_num = mdoc_dataset.max_doc_num - len(context_docs)
+            if empty_doc_num > 0:
+                context_input_ids.extend([-100] * (doc_length * empty_doc_num))
+
+            prompt_ids = tokenize(tokenizer, prompt_text, "user", add_generation_prompt=True)
+            answer_ids = answer_doc + [tokenizer.eos_token_id]
             
             # 拼接 prompt 和 answer
             input_ids = prompt_ids + answer_ids
             labels = ([-100] * len(prompt_ids)) + answer_ids
-            attention_mask = [0] * len(prompt_ids) + [1] * len(answer_ids)
+            attention_mask = [1] * len(input_ids)
             # 填充
             input_pad_length = mdoc_dataset.max_length - len(input_ids)
             if input_pad_length > 0:
@@ -314,7 +313,7 @@ class PretrainDataset(GistDataset):
             batched=False, 
             num_proc=32,
             remove_columns=self.data.column_names
-        ).filter(lambda x: x is not None)
+        ).filter(lambda x: x is not None, num_proc=32)
         
         return GistDataset(mapped_data.select(range(min(self.num_samples, len(mapped_data)))))
 
@@ -374,7 +373,7 @@ class MultiDocDataset(GistDataset):
         self,
         path: str,
         tokenizer: AutoTokenizer,
-        max_length: int = 256,
+        max_length: int = 512,
         max_doc_length: int = 512,
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
@@ -388,6 +387,10 @@ class MultiDocDataset(GistDataset):
             data = datasets.load_dataset("jsonl", data_files=path, split="train")
             extract_documents = lambda sample: sample
             # max_doc_num = 10
+            max_doc_num = 20
+        elif "longmagpie" in path:
+            data = datasets.load_from_disk(path)
+            extract_documents = None
             max_doc_num = 20
         else:
             raise NotImplementedError(f"Unsupported dataset {path}")
@@ -405,7 +408,7 @@ class MultiDocDataset(GistDataset):
                 'extract_docs': extract_documents
             },
             batched=False, 
-            num_proc=32,
+            num_proc=64,
             remove_columns=data.column_names
         )
         self.max_doc_length = max_doc_length
@@ -422,9 +425,12 @@ class MultiDocDataset(GistDataset):
         max_length: int,
         max_doc_length: int,
         max_doc_num: int,
-        extract_docs: Callable
+        extract_docs: Callable | None,
     ) -> Dict[str, Any]:
-        sample = extract_docs(sample)
+        if extract_docs is not None:
+            sample = extract_docs(sample)
+            query_prompt_seed = sum(map(len, sample['documents'])) % len(QA_QUERY_PROMPTS)
+            sample['question'] = QA_QUERY_PROMPTS[query_prompt_seed] + '\n' + sample['question']
         concat_doc_ids = []
         for doc in sample['documents']:
             doc_ids = tokenize(tokenizer, doc, "user", max_doc_length)
@@ -433,15 +439,20 @@ class MultiDocDataset(GistDataset):
             concat_doc_ids.extend(doc_ids)
             concat_doc_ids.extend([-100] * pad_length)
         concat_doc_ids.extend([-100] * (max_doc_length * (max_doc_num - len(sample['documents']))))
-        question_ids = tokenize(tokenizer, sample['question'], "user")
-        answer_ids = tokenize(tokenizer, sample['answer'][0], "assistant")
+        question_ids = tokenize(tokenizer, sample['question'], "user", add_generation_prompt=True)
+        answer_ids = tokenizer.encode(sample['answer'][0], add_special_tokens=False)
+        answer_ids.append(tokenizer.eos_token_id)
         input_ids = question_ids + answer_ids
         labels = [-100] * len(question_ids) + answer_ids
         pad_length = max_length - len(input_ids)
-        assert pad_length >= 0, f"pad_length {pad_length} < 0"
-        attention_mask = [1] * len(input_ids) + [0] * pad_length
-        input_ids.extend([tokenizer.pad_token_id] * pad_length)
-        labels.extend([-100] * pad_length)
+        if pad_length > 0:
+            attention_mask = [1] * len(input_ids) + [0] * pad_length
+            input_ids.extend([tokenizer.pad_token_id] * pad_length)
+            labels.extend([-100] * pad_length)
+        else:
+            attention_mask = [1] * max_length
+            input_ids = input_ids[:max_length]
+            labels = labels[:max_length]
         return {
             'context_input_ids': concat_doc_ids,
             'input_ids': input_ids,
