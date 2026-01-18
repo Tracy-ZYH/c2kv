@@ -41,7 +41,7 @@ from transformers.utils.generic import OutputRecorder, check_model_inputs
 from .configuration_qwen3_moe import Qwen3MoeConfig
 
 from ..gist_utils import (
-    get_prepare_gist_input_func, process_context_input_ids, get_reconstruction_loss,
+    get_prepare_gist_input_func, process_context_input_ids,
     gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast,
     get_apply_gist_residual_func
 )
@@ -761,6 +761,8 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
+        use_gist: Optional[bool] = None,
+        reconstruct_loss_coef: Optional[float] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeCausalLMOutputWithPast:
         r"""
@@ -771,6 +773,12 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
 
         context_input_ids (`torch.LongTensor` of shape `(batch_size, chunk_num, sequence_length)`, *optional*):
             List of input ids for generating gist.
+
+        use_gist (`bool`, *optional*):
+            Whether to use gist.
+        
+        reconstruct_loss_coef (`float`, *optional*):
+            The coefficient of reconstruction loss.
 
         Example:
 
@@ -789,10 +797,16 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
         # Generate gist (only used in training)
+        kwargs['use_gist'] = False if use_gist is None else use_gist
+        reconstruct_loss = None
         if context_input_ids is not None:
-            past_key_values, attention_mask = process_context_input_ids(
-                self.model, context_input_ids, past_key_values, attention_mask, position_ids
+            reconstruct_kwargs = None
+            if labels is not None and reconstruct_loss_coef is not None:
+                reconstruct_kwargs = {"lm_head": self.lm_head, "loss_function": self.loss_function}
+            past_key_values, attention_mask, reconstruct_loss = process_context_input_ids(
+                self.model, context_input_ids, past_key_values, attention_mask, position_ids, reconstruct_kwargs
             )
+            kwargs['use_gist'] = True
 
         output_router_logits = (
             output_router_logits if output_router_logits is not None else self.config.output_router_logits
@@ -819,6 +833,8 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+            if reconstruct_loss_coef is not None:
+                loss = loss + reconstruct_loss * reconstruct_loss_coef
 
         aux_loss = None
         if output_router_logits:

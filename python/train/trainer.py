@@ -184,6 +184,8 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         self.system_ids = torch.tensor(system_ids, dtype=torch.long).unsqueeze(0)
         self.system_kv: Optional[DynamicCache] = None
         self.max_doc_length = max_doc_length
+        if self.model_args.gist_reconstruct_loss_coef is not None:
+            self.log_data.update({"compress_loss": []})
     
     @torch.no_grad()
     def _get_system_kv(self, model, batch_size: int) -> DynamicCache | None:
@@ -270,7 +272,10 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         for i, seqlen in enumerate(context_masks.sum(dim=1).tolist()):
             position_ids[i] += self.past_length + seqlen
         inputs["position_ids"] = position_ids
+        inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
+        if self.model_args.gist_reconstruct_loss_coef is not None:
+            self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
         if model.training and self.distill_coef is not None:
             loss = self.apply_distill_loss(inputs["labels"], loss, self_distill_logits, outputs["logits"])
         return (loss, outputs) if return_outputs else loss

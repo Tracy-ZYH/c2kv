@@ -46,7 +46,7 @@ from transformers.utils.generic import check_model_inputs
 from .configuration_llama import LlamaConfig
 
 from ..gist_utils import (
-    get_prepare_gist_input_func, process_context_input_ids, get_reconstruction_loss,
+    get_prepare_gist_input_func, process_context_input_ids,
     gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast,
     get_apply_gist_residual_func
 )
@@ -623,19 +623,15 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         ```"""
         # Generate gist (only used in training)
         kwargs['use_gist'] = False if use_gist is None else use_gist
+        reconstruct_loss = None
         if context_input_ids is not None:
-            past_key_values, attention_mask = process_context_input_ids(
-                self.model, context_input_ids, past_key_values, attention_mask, position_ids
+            reconstruct_kwargs = None
+            if labels is not None and reconstruct_loss_coef is not None:
+                reconstruct_kwargs = {"lm_head": self.lm_head, "loss_function": self.loss_function}
+            past_key_values, attention_mask, reconstruct_loss = process_context_input_ids(
+                self.model, context_input_ids, past_key_values, attention_mask, position_ids, reconstruct_kwargs
             )
             kwargs['use_gist'] = True
-        
-        reconstruct_loss = None
-        if labels is not None and reconstruct_loss_coef is not None:
-            reconstruct_loss = get_reconstruction_loss(
-                self.model, self.lm_head, self.loss_function,
-                context_input_ids, position_ids, attention_mask, past_key_values,
-                use_cache=use_cache, **kwargs
-            )
 
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,

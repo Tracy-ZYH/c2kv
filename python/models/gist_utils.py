@@ -114,7 +114,8 @@ def process_context_input_ids(
     past_key_values: DynamicCache | None,
     attention_mask: torch.Tensor,
     position_ids: torch.LongTensor,
-) -> Tuple[DynamicCache, torch.Tensor]:
+    reconstruct_kwargs: dict[str, ...] | None = None,
+) -> Tuple[DynamicCache, torch.Tensor, Optional[torch.Tensor]]:
     assert position_ids is not None, "position_ids is required when context_input_ids is given"
     if past_key_values is None:
         past_key_values = DynamicCache(config=model.config)
@@ -122,9 +123,18 @@ def process_context_input_ids(
     # reshape context_input_ids and generate gist
     batch_size, chunk_num, seq_len = context_input_ids.shape
     context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
-    gist_attn_mask = context_input_ids != -100
-    context_input_ids[~gist_attn_mask] = model.gist_token_id
-    outputs, gist_mask, pos_ids = model.generate_gist(context_input_ids, gist_attn_mask)
+    input_ids = context_input_ids.clone()
+    gist_attn_mask = input_ids != -100
+    input_ids[~gist_attn_mask] = model.gist_token_id
+    outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask)
+    # do reconstruction if reconstruct_kwargs is given
+    reconstruct_loss = None
+    if reconstruct_kwargs is not None:
+        reconstruct_loss = _get_reconstruction_loss(
+            model=model, input_ids=input_ids, labels=context_input_ids,
+            attention_mask=gist_attn_mask, gist_mask=gist_mask, position_ids=pos_ids,
+            past_key_values=outputs.past_key_values, **reconstruct_kwargs
+        )
     # prepare pos_ids and generate positional embeddings
     max_gist_len = gist_mask.shape[1]
     pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
@@ -160,43 +170,44 @@ def process_context_input_ids(
     # concat gist_attn_mask to attention_mask
     if attention_mask is not None:
         attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
-    return past_key_values, attention_mask
+    return past_key_values, attention_mask, reconstruct_loss
 
-def get_reconstruction_loss(
+def _get_reconstruction_loss(
     model: PreTrainedModel,
-    lm_head: torch.nn.Linear,
-    loss_function: Callable[..., torch.Tensor],
-    context_input_ids: torch.LongTensor,
+    lm_head: torch.nn.Linear, loss_function: Callable[..., torch.Tensor],
+    labels: torch.LongTensor, input_ids: torch.LongTensor,
     position_ids: torch.LongTensor,
-    attention_mask: torch.Tensor,
-    past_key_values: DynamicCache,
+    gist_mask: torch.Tensor, attention_mask: torch.Tensor,
+    past_key_values: Tuple[Tuple[torch.Tensor, torch.Tensor], ...],
     **kwargs
 ) -> torch.Tensor:
-    # check and reshape inputs
-    assert attention_mask[:, :past_key_values.get_seq_length()].all(), \
-        f"Make sure context input_ids is full {attention_mask[:, :past_key_values.get_seq_length()].sum(dim=1)}"
     assert model.gist_embed_tokens.num_embeddings == 2, "Make sure gist_embed_tokens.num_embeddings is 2"
-    batch_size, chunk_num, seq_len = context_input_ids.shape
-    input_ids = context_input_ids.reshape(batch_size, chunk_num * seq_len)
-    input_ids = input_ids[:, :-1] # drop the last token to make the input sequence length a multiple of chunk size
+    sampled_length = 128
+    batch_size = input_ids.shape[0]
+    input_ids = input_ids[:, :sampled_length - 1]
+    labels = labels[:, :sampled_length - 1]
+    attention_mask = torch.cat([gist_mask, gist_mask.new_ones(batch_size, 1), attention_mask[:, :sampled_length - 1]], dim=1)
     # prepare embeddings
     inputs_embeds = model.embed_tokens(input_ids)
-    reconstruct_embeds = model.gist_embed_tokens(context_input_ids.new_ones(batch_size, 1))
+    reconstruct_embeds = model.gist_embed_tokens(input_ids.new_ones(batch_size, 1))
     inputs_embeds = torch.cat([reconstruct_embeds, inputs_embeds], dim=1)
     # prepare position ids
     pos_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0).repeat(batch_size, 1)
-    pos_ids += position_ids.min(dim=1, keepdim=True).values
-    if not model.training: # when in inference mode, we need to make a copy of past_key_values
-        past_key_values = DynamicCache(past_key_values, config=model.config)
+    pos_ids += position_ids.max(dim=1, keepdim=True).values + 1
+    # apply position embeddings to gist KVs
+    cos, sin = model.rotary_emb(inputs_embeds, position_ids)
+    past_key_values = [(apply_rotary_pos_emb(key, cos, sin), value) for (key, value) in past_key_values]
+    # generate reconstruction
     reconstruct_outputs: BaseModelOutputWithPast = model(
         inputs_embeds=inputs_embeds,
         position_ids=pos_ids,
-        past_key_values=past_key_values,
+        attention_mask=attention_mask,
+        past_key_values=DynamicCache(past_key_values, config=model.config),
         **kwargs,
     )
     reconstruct_logits = lm_head(reconstruct_outputs.last_hidden_state[:, 1:, :]) # remove the first token
     reconstruct_loss = loss_function(
-        logits=reconstruct_logits, labels=input_ids, vocab_size=model.config.vocab_size, **kwargs
+        logits=reconstruct_logits, labels=labels, vocab_size=model.config.vocab_size, **kwargs
     )
     return reconstruct_loss
 
