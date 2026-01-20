@@ -274,7 +274,7 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         inputs["position_ids"] = position_ids
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
-        if self.model_args.gist_reconstruct_loss_coef is not None:
+        if self.model_args.gist_reconstruct_loss_coef is not None and model.training:
             self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
         if model.training and self.distill_coef is not None:
             loss = self.apply_distill_loss(inputs["labels"], loss, self_distill_logits, outputs["logits"])

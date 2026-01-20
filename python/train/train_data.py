@@ -373,7 +373,7 @@ class MultiDocDataset(GistDataset):
         self,
         path: str,
         tokenizer: AutoTokenizer,
-        max_length: int = 512,
+        max_length: int = 256,
         max_doc_length: int = 512,
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
@@ -388,7 +388,7 @@ class MultiDocDataset(GistDataset):
             extract_documents = lambda sample: sample
             # max_doc_num = 10
             max_doc_num = 20
-        elif "longmagpie" in path:
+        elif "longmagpie" in path or "longalpaca" in path:
             data = datasets.load_from_disk(path)
             extract_documents = None
             max_doc_num = 20

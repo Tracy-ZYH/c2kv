@@ -129,7 +129,7 @@ def process_context_input_ids(
     outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask)
     # do reconstruction if reconstruct_kwargs is given
     reconstruct_loss = None
-    if reconstruct_kwargs is not None:
+    if reconstruct_kwargs is not None and model.training:
         reconstruct_loss = _get_reconstruction_loss(
             model=model, input_ids=input_ids, labels=context_input_ids,
             attention_mask=gist_attn_mask, gist_mask=gist_mask, position_ids=pos_ids,

@@ -40,12 +40,14 @@ def main():
     # 生成命令并写入文件
     with open(args.output_file, 'a') as f:
         for checkpoint in checkpoints:
+            method = checkpoint.split('/')[-2]
+            model = checkpoint.split('/')[-3]
             cmd = [
                 'python', 'python/inference/expr_gistmodel.py',
                 '--model', checkpoint,
                 '--dataset', args.dataset,
                 # '--max_examples', str(args.max_examples),
-                '--output_file', f'saved_kv/tmp/{args.dataset}/{os.path.basename(checkpoint)}.jsonl'
+                '--output_file', f'results/gist/{model}/{method}/{args.dataset}/{os.path.basename(checkpoint)}.jsonl'
             ]
             f.write(' '.join(cmd) + '\n')
     

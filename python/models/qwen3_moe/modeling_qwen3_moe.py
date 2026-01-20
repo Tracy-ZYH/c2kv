@@ -833,7 +833,7 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
-            if reconstruct_loss_coef is not None:
+            if reconstruct_loss is not None:
                 loss = loss + reconstruct_loss * reconstruct_loss_coef
 
         aux_loss = None

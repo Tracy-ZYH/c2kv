@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
@@ -49,6 +50,7 @@ def evaluate_model_on_dataset(
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
     max_new_tokens = dataset.max_new_tokens
 
+    dataset.system_prompt = "You are a helpful assistant."
     if dataset.system_prompt is None:
         sys_cache = None
     else:
@@ -132,6 +134,9 @@ def evaluate_model_on_dataset(
     
     # Save results if output file is specified
     if output_file:
+        # create output directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
         with open(output_file, 'w', encoding='utf-8') as f:
             for result in results:
                 if result:  # Only write non-empty results
