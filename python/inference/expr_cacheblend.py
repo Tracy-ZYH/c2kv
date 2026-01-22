@@ -146,6 +146,11 @@ def parse_args():
         help="Specify the special separators to separate chunks (default: '# #')",
     )
     parser.add_argument(
+        "--only_supporting", 
+        action="store_true",
+        help="For Musique dataset, use only supporting paragraphs"
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default="mistralai/Mistral-7B-Instruct-v0.2",
@@ -179,7 +184,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
 
-    dataset = load_mdoc_dataset(args.dataset, enable_cot=args.cot)
+    dataset = load_mdoc_dataset(args.dataset, only_supporting=args.only_supporting, enable_cot=args.cot)
 
     scores = []
     results = []

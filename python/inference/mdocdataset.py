@@ -47,9 +47,9 @@ QA_SYSTEM_PROMPT: str = ("You will be asked a question after reading several pas
     "The answer should be within 5 words.\n\n")
 
 QA_QUERY_PROMPT: str = ("Answer the question directly based on the given passages. "
-    "Do NOT repeat the question. The answer should be within 5 words.\n\nQuestion: ")
+    "Do NOT repeat the question. The answer should be within 5 words.\n\n")
 
-QA_MAX_NEW_TOKENS: int = 8
+QA_MAX_NEW_TOKENS: int = 16
 
 QA_SYSTEM_PROMPT_COT: str = (
     "You are a helpful QA assistant. After reading the provided passages, you will be asked a question. "

@@ -1,6 +1,6 @@
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
 export OUTPUT_DIR=/home/admin/workspace/aop_lab/app_data/checkpoints/qwen3-4b-inst/
-HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage2 \
+HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_sft \
     --num_train_epochs 5 \
     --warmup_steps 100 \
     --model_name_or_path Qwen/Qwen3-4B-Instruct-2507 \
@@ -12,13 +12,11 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage2 
     --gradient_accumulation_steps 4 \
     --lr_scheduler_type cosine \
     --enable_gist True \
-    --gist_regularization q \
-    --gist_regularization_factor 1e-3 \
-    --gist_param Qkv \
+    --gist_param QkV \
     --gist_type interleave-16 \
     --gist_mode 512,768,1024,1280-24 \
-    --output_dir $OUTPUT_DIR/sft-16x-replace_q-reg_q3 \
-    --logging_dir ./logs/qwen3-4b-inst/sft-16x-replace_q-reg_q3 \
+    --output_dir $OUTPUT_DIR/sft-16x \
+    --logging_dir ./logs/qwen3-4b-inst/sft-16x \
     --logging_steps 1 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \

@@ -11,14 +11,12 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.stage1 
     --per_device_eval_batch_size 8 \
     --gradient_accumulation_steps 4 \
     --lr_scheduler_type cosine \
-    --gist_regularization qkv \
-    --gist_regularization_factor 1e-3 \
     --enable_gist True \
-    --gist_param QKV \
-    --gist_type interleave-16 \
+    --gist_param QkV \
+    --gist_type interleave-4 \
     --gist_mode 256,512,768,1024-30 \
-    --output_dir $OUTPUT_DIR/16x-pretrain-replace_qkv \
-    --logging_dir ./logs/qwen3-4b-inst/16x-pretrain-replace_qkv \
+    --output_dir $OUTPUT_DIR/4x-pretrain-replace_qv \
+    --logging_dir ./logs/qwen3-4b-inst/4x-pretrain-replace_qv \
     --logging_steps 1 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \

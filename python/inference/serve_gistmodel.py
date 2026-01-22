@@ -195,7 +195,7 @@ def generate_response():
                 attention_mask=attention_mask,
                 position_ids=position_ids.unsqueeze(0),
                 past_key_values=combined_cache,
-                max_new_tokens=64,  # Default max new tokens
+                max_new_tokens=512,  # Default max new tokens
                 pad_token_id=tokenizer.eos_token_id,
                 use_cache=True,
                 use_gist=True,

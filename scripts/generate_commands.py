@@ -24,11 +24,14 @@ def find_checkpoints(roots):
 def main():
     parser = argparse.ArgumentParser(description="Generate evaluation commands for multiple checkpoints.")
     parser.add_argument('--add_ckpt', action='append', required=True, dest='checkpoints_roots', help='Additional checkpoint directory to evaluate')
-    parser.add_argument('--dataset', required=True, help='Dataset name (e.g., musique)')
-    parser.add_argument('--max_examples', type=int, default=100, help='Max number of examples to test.')
+    parser.add_argument('--datasets', default='wikimqa,musique,hotpotqa,multinews,samsum', help='Dataset names separated by comma (e.g., A,B,C,D)')
+    parser.add_argument('--max_examples', type=int, default=None, help='Max number of examples to test.')
     parser.add_argument('--output_file', required=True, help='Output TXT file to save commands')
     args = parser.parse_args()
 
+    # 解析多个dataset
+    datasets = [ds.strip() for ds in args.datasets.split(',')]
+    
     # 查找所有checkpoints
     checkpoints = find_checkpoints(args.checkpoints_roots)
     if not checkpoints:
@@ -36,22 +39,26 @@ def main():
         return
     
     print(f"Found {len(checkpoints)} checkpoints to evaluate")
+    print(f"Will evaluate on {len(datasets)} datasets: {datasets}")
     
     # 生成命令并写入文件
     with open(args.output_file, 'a') as f:
         for checkpoint in checkpoints:
             method = checkpoint.split('/')[-2]
             model = checkpoint.split('/')[-3]
-            cmd = [
-                'python', 'python/inference/expr_gistmodel.py',
-                '--model', checkpoint,
-                '--dataset', args.dataset,
-                # '--max_examples', str(args.max_examples),
-                '--output_file', f'results/gist/{model}/{method}/{args.dataset}/{os.path.basename(checkpoint)}.jsonl'
-            ]
-            f.write(' '.join(cmd) + '\n')
+            for dataset in datasets:
+                cmd = [
+                    'python', 'python/inference/expr_gistmodel.py',
+                    '--model', checkpoint,
+                    '--output_file', f'results/gist/{model}/{method}/{dataset}/{os.path.basename(checkpoint)}.jsonl',
+                    '--dataset', dataset,
+                ]
+                if args.max_examples:
+                    cmd.extend(['--max_examples', str(args.max_examples)])
+                f.write(' '.join(cmd) + '\n')
     
     print(f"Commands saved to {args.output_file}")
+    print(f"Total commands generated: {len(checkpoints) * len(datasets)}")
 
 if __name__ == '__main__':
     main()

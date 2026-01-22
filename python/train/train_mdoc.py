@@ -36,12 +36,14 @@ def main():
         musique_eval = get_dataset('mdoc_eval', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
         longmagpie_train = get_dataset('mdoc', training_args.train_data, **dataset_args)
         longmagpie_eval = get_dataset('mdoc_eval', training_args.train_data, **dataset_args)
-        train_dataset.data = train_dataset.data.select(range(40000))
-        longmagpie_train.data = longmagpie_train.data.select(range(20000))
+        train_dataset.data = train_dataset.data.select(range(80000))
+        longmagpie_train.data = longmagpie_train.data.select(range(40000))
         # print the lengths of all training datasets
         logger.info(f"Train dataset lengths: musique: {len(musique_train)}, longmagpie: {len(longmagpie_train)}, hotpotqa: {len(train_dataset)}")
         train_dataset.merge([musique_train, longmagpie_train])
-        eval_dataset.merge([musique_eval, longmagpie_eval], method='concat')
+        # eval_dataset.merge([musique_eval, longmagpie_eval], method='concat')
+        # train_dataset.merge([musique_train])
+        eval_dataset.merge([musique_eval], method='concat')
 
     trainer = GistMultiDocTrainer(
         model=model,

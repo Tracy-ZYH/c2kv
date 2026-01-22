@@ -78,7 +78,10 @@ class GistDataset:
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         return iter(self.data)
     
-    def merge(self, others: List["GistDataset"], method: str = 'interleave') -> None:
+    def select(self, slicing: slice) -> None:
+        self.data = self.data.select(slicing)
+    
+    def merge(self, others: List["GistDataset"], method: str = 'interleave') -> "GistDataset":
         data_list: List[datasets.Dataset] = [self.data] + [other.data for other in others]
         if method == 'interleave':
             weights = [len(data) for data in data_list]
@@ -91,6 +94,7 @@ class GistDataset:
             self.data = datasets.concatenate_datasets(data_list)
         else:
             raise NotImplementedError(f"Method {method} not implemented!")
+        return self
 
 
 class PretrainDataset(GistDataset):
@@ -373,8 +377,9 @@ class MultiDocDataset(GistDataset):
         self,
         path: str,
         tokenizer: AutoTokenizer,
-        max_length: int = 256,
+        max_length: int = 512,
         max_doc_length: int = 512,
+        max_doc_num: int = 20,
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
     ):
@@ -382,16 +387,12 @@ class MultiDocDataset(GistDataset):
             dataset = load_mdoc_dataset("musique", path)
             extract_documents = dataset.extract_documents
             data = dataset.data
-            max_doc_num = 20
         elif "hotpotqa" in path:
             data = datasets.load_dataset("jsonl", data_files=path, split="train")
             extract_documents = lambda sample: sample
-            # max_doc_num = 10
-            max_doc_num = 20
         elif "longmagpie" in path or "longalpaca" in path:
             data = datasets.load_from_disk(path)
             extract_documents = None
-            max_doc_num = 20
         else:
             raise NotImplementedError(f"Unsupported dataset {path}")
         if num_samples is None:
@@ -430,9 +431,9 @@ class MultiDocDataset(GistDataset):
         if extract_docs is not None:
             sample = extract_docs(sample)
             query_prompt_seed = sum(map(len, sample['documents'])) % len(QA_QUERY_PROMPTS)
-            sample['question'] = QA_QUERY_PROMPTS[query_prompt_seed] + '\n' + sample['question']
+            sample['question'] = QA_QUERY_PROMPTS[query_prompt_seed] + '\n\n' + sample['question']
         concat_doc_ids = []
-        for doc in sample['documents']:
+        for doc in sample['documents'][:max_doc_num]:
             doc_ids = tokenize(tokenizer, doc, "user", max_doc_length)
             pad_length = max_doc_length - len(doc_ids)
             assert pad_length >= 0, f"pad_length {pad_length} < 0"
