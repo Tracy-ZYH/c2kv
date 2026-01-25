@@ -225,14 +225,12 @@ class Qwen3MoeAttention(nn.Module):
         hidden_states = hidden_states[:, :-gist_num]
         hidden_shape = (input_shape[0], input_shape[1] - gist_num, -1, self.head_dim)
 
+        gist_hidden_states = self.apply_gist_residual(hidden_states, gist_hidden_states)
+
         # qkv states
         query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        gist_query_states = self.q_norm(self.gist_q_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
-        gist_key_states = self.k_norm(self.gist_k_proj(gist_hidden_states).view(gist_hidden_shape)).transpose(1, 2)
-        gist_value_states = self.gist_v_proj(gist_hidden_states).view(gist_hidden_shape).transpose(1, 2)
 
         gist_query_states = self.apply_gist_residual(query_states, gist_query_states)
         gist_key_states = self.apply_gist_residual(key_states, gist_key_states)

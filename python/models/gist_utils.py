@@ -36,7 +36,8 @@ def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1) -> torch.Tensor:
     return x_embed
 
 def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "right") -> Callable:
-    gist_type = config.gist_type
+    gist_type: str = config.gist_type
+    gist_residual_type: str = config.gist_residual_type
     assert gist_type, "gist_type must be specified"
     padding_check_idx = 0 if padding_side == "right" else -1
     if gist_type.startswith("interleave-"):
@@ -57,10 +58,13 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
             gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
             gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
-            seq_lens = attention_mask.sum(dim=1).tolist()
-            for i, seqlen in enumerate(seq_lens):
+            for i, seqlen in enumerate(attention_mask.sum(dim=1).tolist()):
                 if seqlen == 0:
                     continue
+                if gist_residual_type == "mean": # need to pad input_ids to multiple of ratio
+                    residual_padlen = seqlen % ratio
+                    if residual_padlen != 0:
+                        seqlen = min(max_seqlen, seqlen + ratio - residual_padlen)
                 padlen = 0 if padding_check_idx == 0 else max_seqlen - seqlen
                 new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
                     torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
@@ -93,17 +97,14 @@ def get_apply_gist_residual_func(config: GistConfigMixin) -> Callable[[torch.Ten
         def _apply_gist_residual_interleave(
             tokens_tensor: torch.Tensor, gist_tensor: torch.Tensor,
         ) -> torch.Tensor:
-            # group tokens_tensor into chunks size of ratio (pad if necessary)
-            # tensor shape (batch_size, head_num, seq_len, hidden_size), pooling in seq_len dimension
-            batch_size, head_num, seq_len, hidden_size = tokens_tensor.shape
-            nopad_length = seq_len - seq_len % ratio
-            nopad_mean = tokens_tensor[:, :, :nopad_length, :].view(batch_size, head_num, -1, ratio, hidden_size)
-            residual_mean = nopad_mean.mean(dim=3)
-            if nopad_length != seq_len:
-                pad_mean = tokens_tensor[:, :, nopad_length:, :].mean(dim=2, keepdim=True)
-                residual_mean = torch.cat([residual_mean, pad_mean], dim=2)
-            assert residual_mean.shape == gist_tensor.shape, f"{residual_mean.shape} != {gist_tensor.shape}"
-            return residual_mean + gist_tensor
+            batch_size, seq_length, hidden_size = tokens_tensor.shape
+            pad_length = seq_length % ratio
+            nopad_length = seq_length - pad_length
+            mean_tensor = tokens_tensor[:, :nopad_length].reshape(batch_size, -1, ratio, hidden_size).mean(dim=2)
+            if pad_length != 0:
+                pad_mean = tokens_tensor[:, nopad_length:].mean(dim=1, keepdim=True)
+                mean_tensor = torch.cat([mean_tensor, pad_mean], dim=1)
+            return mean_tensor + gist_tensor
         return _apply_gist_residual_interleave
     return lambda tokens_tensor, gist_tensor: gist_tensor
 
@@ -288,12 +289,9 @@ def init_gist_proj(model, missing_keys):
                 params.extend[gist_proj.bias, proj.bias]
             with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
                 if (gist_proj.weight.sum(-1) == 0).any() or (gist_proj.weight > 1e29).any():
-                    if model.config.gist_residual_type == "mean":
-                        gist_proj.weight.data.zero_()
-                    else:
-                        gist_proj.weight.data.copy_(proj.weight.data)
-                if proj.bias is not None:
-                    gist_proj.bias.data.copy_(proj.bias.data)
+                    gist_proj.weight.data.copy_(proj.weight.data)
+                    if proj.bias is not None:
+                        gist_proj.bias.data.copy_(proj.bias.data)
         init_proj_deepspeed(model.gist_q_proj, model.q_proj, 'q')
         init_proj_deepspeed(model.gist_k_proj, model.k_proj, 'k')
         init_proj_deepspeed(model.gist_v_proj, model.v_proj, 'v')
@@ -304,10 +302,7 @@ def init_gist_proj(model, missing_keys):
             return
         if not any(module_name in missing_key for missing_key in missing_keys):
             return
-        if model.config.gist_residual_type == "mean":
-            gist_proj.weight.data.zero_()
-        else:
-            gist_proj.weight.data.copy_(proj.weight.data)
+        gist_proj.weight.data.copy_(proj.weight.data)
         if proj.bias is not None:
             gist_proj.bias.data.copy_(proj.bias.data)
     init_proj(model.gist_q_proj, model.q_proj, 'q')
@@ -323,9 +318,12 @@ def init_gist_embed(model, missing_keys):
             # NOTE: with Llama3.1, change the following line to `if True` in order to initialize the parameters
             # if (model.gist_embed_tokens.weight == 0).all():
             if True:
-                model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
-                    model.gist_token_id: model.gist_token_id + 1
-                ]
+                if model.config.gist_residual_type == "mean":
+                    model.gist_embed_tokens.weight.data.zero_()
+                else:
+                    model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[
+                        model.gist_token_id: model.gist_token_id + 1
+                    ]
         return
     if "model.gist_embed_tokens.weight" in missing_keys:
         model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[

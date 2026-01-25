@@ -31,7 +31,7 @@ def main():
     with training_args.main_process_first(desc="Get dataset"):
         dataset_args = {
             'tokenizer': tokenizer, 'shuffle_seed': training_args.dataset_shuffle_seed,
-            'max_doc_num': 10, 'max_doc_length': 1024,
+            'max_doc_num': 10, 'max_doc_length': 1536,
         }
         hotpotqa_train = get_dataset('mdoc', "../datasets/hotpotqa_train.jsonl", **dataset_args)
         hotpotqa_eval = get_dataset('mdoc_eval', "../datasets/hotpotqa_train.jsonl", **dataset_args)

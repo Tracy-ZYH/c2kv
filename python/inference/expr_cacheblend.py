@@ -29,19 +29,16 @@ def setup_environment_variables(
     enable_sparse: bool = False,
 ):
     # LMCache-related environment variables
+    os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 
     # Blending related config# Enable blending in LMCache
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
-
     # Separator string between different chunks
-    os.environ["LMCACHE_BLEND_SPECIAL_STR"] = " # # "
-
+    os.environ["LMCACHE_BLEND_SPECIAL_STR"] = blend_special_str
     # Layerwise must be turned on when blending is enabled
     os.environ["LMCACHE_USE_LAYERWISE"] = "True"
-
     # Determining which tokens to recompute at layer 1
     os.environ["LMCACHE_BLEND_CHECK_LAYERS"] = "1"
-
     # Ratio of tokens to recompute
     os.environ["LMCACHE_BLEND_RECOMPUTE_RATIOS"] = "0.15"
 
@@ -54,8 +51,8 @@ def setup_environment_variables(
     # Enable local CPU backend in LMCache
     os.environ["LMCACHE_LOCAL_CPU"] = "True"
 
-    # Set the maximum size of the local CPU size to 128GB
-    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "128"
+    # Set the maximum size of the local CPU size to 32GB
+    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "32"
 
 
 @contextlib.contextmanager
@@ -142,8 +139,8 @@ def parse_args():
     parser.add_argument(
         "-b",
         "--blend-special-str",
-        default="# #",
-        help="Specify the special separators to separate chunks (default: '# #')",
+        default=" # # ",
+        help="Specify the special separators to separate chunks (default: ' # # ')",
     )
     parser.add_argument(
         "--only_supporting", 

@@ -45,7 +45,8 @@ QA_QUERY_PROMPTS = [
     "Your entire output should be the answer—no exceptions, no extras.",
     "From the passage, what is true? State it directly and stop.",
     "Provide the answer without any supporting rationale or thought process.",
-    "Just the answer—clear, direct, and grounded in the given text."
+    "Just the answer—clear, direct, and grounded in the given text.",
+    "Answer the question directly based on the given passages. Do NOT repeat the question.",
 ]
 
 CONTINUATION_PROMPTS = [

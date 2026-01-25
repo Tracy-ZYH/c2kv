@@ -19,6 +19,24 @@ See https://github.com/huggingface/transformers/issues/36510 for how to fix it.
 ==== PLEASE READ ====
 """
 
+def cut_documents(documents: List[str], max_length: int | None) -> List[str]:
+    if max_length is None:
+        return documents
+    docs = []
+    for document in documents:
+        last_document = ''
+        for passage in document.split('\n\n'):
+            if not passage.strip():
+                continue
+            if len(last_document) + len(passage) > max_length:
+                docs.append(last_document)
+                last_document = passage
+            else:
+                last_document += passage + '\n\n'
+        if last_document:
+            docs.append(last_document)
+    return docs
+
 
 @torch.inference_mode()
 def evaluate_model_on_dataset(
@@ -26,6 +44,7 @@ def evaluate_model_on_dataset(
     dataset: AbstractMDQADataset,
     max_examples: Optional[int] = None,
     output_file: Optional[str] = None,
+    cut_length: Optional[int] = None
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
     
@@ -69,7 +88,9 @@ def evaluate_model_on_dataset(
         system_length = system_cache.get_seq_length()
 
         # Pre-compute context
-        context_inputs = tokenize_for_reuse(tokenizer, example['documents'], keep_bos=False, role='user').to(device)
+        documents = cut_documents(example['documents'], max_length=cut_length)
+
+        context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
         model.model.config._attn_implementation = "sdpa"
         outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
@@ -180,6 +201,8 @@ def main():
                        help="For Musique dataset, use only supporting paragraphs")
     parser.add_argument("--cot", action="store_true", default=False,
                        help="Use cot prompt")
+    parser.add_argument("--cut_length", type=int, default=None,
+                       help="Cut documents to specified length")
     
     args = parser.parse_args()
 
@@ -201,6 +224,7 @@ def main():
         dataset=dataset,
         max_examples=args.max_examples,
         output_file=args.output_file,
+        cut_length=args.cut_length,
     )
     
     print(f"\nEvaluation Results:")

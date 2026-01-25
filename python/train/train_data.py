@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 from typing import Dict, List, Any, Mapping, Optional, Callable, Iterator
 from logging import getLogger
 
-from .configs import QA_QUERY_PROMPTS
+from .configs import QA_QUERY_PROMPTS, CONTINUATION_PROMPTS
 from inference.mdocdataset import load_mdoc_dataset, QA_SYSTEM_PROMPT
 
 logger = getLogger(__name__)
@@ -205,14 +205,6 @@ class PretrainDataset(GistDataset):
         doc_length = mdoc_dataset.max_doc_length
         if self.min_length <= doc_length:
             raise ValueError(f"min_length {self.min_length} <= doc_length {doc_length}")
-        # 多样化的提示问题列表
-        continuation_prompts = [
-            "Continue this passage", "Please continue", "What comes next?", "Continue the text",
-            "Keep going", "Please proceed with the continuation", "What follows?",
-            "Continue this passage", "Please continue the following text",
-            "Continue writing from where it left off", "What comes next in this passage?",
-            "Continue this document", "Extend this content further",
-        ]
         # 获取换行符的token id
         newline_ids = tokenizer.encode("\n", add_special_tokens=False)
         newline_id = newline_ids[0] if newline_ids else None
@@ -258,8 +250,8 @@ class PretrainDataset(GistDataset):
         def _mdoc_formatter(sample: Dict[str, Any]) -> Dict[str, Any]:
             input_ids: List[int] = sample['input_ids']
             # 使用伪随机数选择提示（基于样本内容确保可复现）
-            seed = sum(input_ids[:min(10, len(input_ids))]) % len(continuation_prompts)
-            prompt_text = continuation_prompts[seed]
+            seed = sum(input_ids[:min(10, len(input_ids))]) % len(CONTINUATION_PROMPTS)
+            prompt_text = CONTINUATION_PROMPTS[seed]
             # 将文本分割成文档
             documents = split_by_sentences(input_ids, doc_length)
             if len(documents) <= 1:
