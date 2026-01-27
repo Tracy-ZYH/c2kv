@@ -16,6 +16,7 @@ def evaluate_model_on_dataset(
     max_examples: Optional[int] = None,
     output_file: Optional[str] = None,
     recompute_type: Optional[str] = None,
+    compress_method: Optional[str] = None,
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
     
@@ -40,7 +41,22 @@ def evaluate_model_on_dataset(
         if 'system_prompt' in example:
             system_cache = evaluator.get_prefill_kv_cache([example['system_prompt']], True, role='system')
         assert system_cache is not None, "System prompt is not pre-computed"
-        context_cache = evaluator.get_prefill_kv_cache(example['documents'], False, role='user')
+
+        def append_cache(batch: List[str], cache: BatchedKVInstance | None) -> BatchedKVInstance:
+            if not batch:
+                return cache
+            new_cache = evaluator.get_prefill_kv_cache(batch, False, 'user', compress_method)
+            return cache.stack(new_cache) if cache is not None else new_cache
+        context_cache = None
+        batched_documents = []
+        for doc in example['documents']:
+            if len(doc) > 4096:
+                context_cache = append_cache(batched_documents, context_cache)
+                context_cache = append_cache([doc], context_cache)
+                batched_documents = []
+            else:
+                batched_documents.append(doc)
+        context_cache = append_cache(batched_documents, context_cache)
 
         if recompute_type is not None:
             system_cache = evaluator.selective_recompute(
@@ -55,6 +71,7 @@ def evaluate_model_on_dataset(
             query_text=example['question'],
             max_new_tokens=dataset.max_new_tokens,
         )
+        print(pred)
 
         del context_cache
         del system_cache
@@ -122,6 +139,8 @@ def main():
                        help="Type of mask for selective recompute (e.g. \"leading-5\")")
     parser.add_argument("--cot", action="store_true", default=False,
                        help="Use cot prompt")
+    parser.add_argument("--compress", type=str, default=None,
+                       help="KV Cache compression type (e.g. \"snapkv\")")
     
     args = parser.parse_args()
 
@@ -142,6 +161,7 @@ def main():
         max_examples=args.max_examples,
         output_file=args.output_file,
         recompute_type=args.recompute_type,
+        compress_method=args.compress,
     )
     
     print(f"\nEvaluation Results:")

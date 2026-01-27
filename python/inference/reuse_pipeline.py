@@ -1,3 +1,4 @@
+import math
 import torch
 import string
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
@@ -7,6 +8,7 @@ from dataclasses import dataclass
 import logging
 
 from rope_reposition import rotate_k_cache_rope, rotate_yarn_position_encoding
+from compress_kv import compress_kv, QueryStorage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,7 +77,7 @@ class LLMInference:
         self, 
         model_name_or_path: str, 
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        attn_impl: str = "sdpa",
+        attn_impl: str = "flash_attention_2",
     ):
         """
         初始化模型和分词器
@@ -112,7 +114,8 @@ class LLMInference:
     def get_prefill_kv_cache(self, 
         texts: List[str],
         keep_bos: bool,
-        role: str | None = None
+        role: str | None = None,
+        compress_method: str | None = None,
     ) -> BatchedKVInstance:
         """
         获取一批文本prefill后的键值缓存
@@ -124,19 +127,34 @@ class LLMInference:
         Returns:
             past_key_values: 包含所有层键值缓存的元组
         """
-        inputs = tokenize_for_reuse(self.tokenizer, texts, keep_bos=keep_bos, role=role).to(self.device)
-        past_key_values = prefill_kv_cache(self.model, inputs)
+        enable_compress = compress_method is not None
 
-        seq_len = [sum(seq_attn.tolist()) for seq_attn in inputs.attention_mask]
+        inputs = tokenize_for_reuse(self.tokenizer, texts, keep_bos=keep_bos, role=role).to(self.device)
+        with QueryStorage(self.model, enabled=enable_compress) as query_storage:
+            past_key_values = prefill_kv_cache(self.model, inputs)
+            queries = query_storage.get_all_queries()
+
+        seq_len = inputs.attention_mask.sum(dim=1).tolist()
         input_ids = [ids[:seql] for ids, seql in zip(inputs.input_ids, seq_len)]
 
         full_kv = []
-        for key, value in past_key_values:
+        for layer_i, (key_states, value_states) in enumerate(past_key_values):
             layer_keys, layer_values = [], []
+            batch_indices = []
             for seq_i, seq_l in enumerate(seq_len):
-                layer_keys.append(key[seq_i][:, :seq_l])
-                layer_values.append(value[seq_i][:, :seq_l])
-            full_kv.append((tuple(layer_keys), tuple(layer_values)))
+                key, value = key_states[seq_i, :, :seq_l], value_states[seq_i, :, :seq_l]
+                if enable_compress:
+                    compressed_len = math.ceil(seq_l / 4.0) # compress rate 4:1
+                    key, value, indices = compress_kv(
+                        compress_method, compressed_len,
+                        queries[layer_i][seq_i, :seq_l], key, value,
+                    )
+                    batch_indices.append(indices)
+                layer_keys.append(key)
+                layer_values.append(value)
+            full_kv.append((layer_keys, layer_values))
+        if enable_compress:
+            input_ids = [ids[indices] for ids, indices in zip(input_ids, batch_indices)]
         return BatchedKVInstance(input_ids, tuple(full_kv))
 
     def decode_with_past_kv(
@@ -167,7 +185,8 @@ class LLMInference:
             if precomputed_ids is not None:
                 past_ids.extend(precomputed_ids)
             past_ids = torch.cat(past_ids).unsqueeze(0)
-            assert past_ids.shape[1] == past_key_values[0][0][0].shape[1]
+            # we don't check this for the compressed KV case
+            # assert past_ids.shape[1] == past_key_values[0][0][0].shape[1]
             past_key_values = DynamicCache.from_legacy_cache(past_key_values)
         
         # 编码查询文本
@@ -213,7 +232,7 @@ class LLMInference:
     def _merge_kv_caches(
         self, 
         system_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]],
-        precomputed_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]]
+        precomputed_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]],
     ) -> Optional[Tuple[Tuple[torch.Tensor, ...], ...]]:
         """
         合并多个键值缓存
@@ -352,7 +371,7 @@ class LLMInference:
         prefix_length = len(system_kv.input_ids[0])
         position_counter = prefix_length
         rearranged_index = torch.arange(full_kv_length, dtype=torch.long, device=device)
-        # print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
+        print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
         attention_mask_past = torch.zeros((recompute_length, retained_kv_length), dtype=torch.long, device=device)
         attention_mask_tril = torch.tril(torch.ones((recompute_length, recompute_length), dtype=torch.long, device=device))
         
@@ -382,6 +401,7 @@ class LLMInference:
         position_ids = rearranged_index[-recompute_length:].unsqueeze(0) # (batch_size, query_len)
 
         # 4. 推理
+        self.model.model.config._attn_implementation = "sdpa"
         output = self.model(
             recompute_ids,
             attention_mask=attention_mask,
@@ -389,6 +409,7 @@ class LLMInference:
             past_key_values=retained_kv,
             use_cache=True,
         )
+        self.model.model.config._attn_implementation = self.attn_impl
 
         # 5. 重新排列KV Cache
         assert isinstance(output.past_key_values, DynamicCache)

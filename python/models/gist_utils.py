@@ -61,6 +61,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             for i, seqlen in enumerate(attention_mask.sum(dim=1).tolist()):
                 if seqlen == 0:
                     continue
+                original_seqlen = seqlen
                 if gist_residual_type == "mean": # need to pad input_ids to multiple of ratio
                     residual_padlen = seqlen % ratio
                     if residual_padlen != 0:
@@ -79,7 +80,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                     # attention sink at end of chunk
                     # begin = max(0, (j - 1) * ratio) # overlap with previous gist token
                     begin = j * ratio
-                    end = min((j + 1) * ratio, seqlen)
+                    end = min((j + 1) * ratio, original_seqlen)
                     padded_j = j + gist_pad
                     gist_position_ids[i, padded_j] = end - 1
                     new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
