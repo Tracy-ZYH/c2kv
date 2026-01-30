@@ -61,6 +61,8 @@ class BatchedKVInstance:
     """
     past_key_values: Tuple[Tuple[List[torch.Tensor], List[torch.Tensor]], ...]
 
+    original_lengths: List[int]
+
     def unpack(self):
         return self.input_ids, self.past_key_values
     
@@ -69,6 +71,7 @@ class BatchedKVInstance:
         for layer, other_layer in zip(self.past_key_values, other.past_key_values):
             for korv, other_korv in zip(layer, other_layer):
                 korv.extend(other_korv)
+        self.original_lengths.extend(other.original_lengths)
         return self
 
 
@@ -155,7 +158,7 @@ class LLMInference:
             full_kv.append((layer_keys, layer_values))
         if enable_compress:
             input_ids = [ids[indices] for ids, indices in zip(input_ids, batch_indices)]
-        return BatchedKVInstance(input_ids, tuple(full_kv))
+        return BatchedKVInstance(input_ids, tuple(full_kv), seq_len)
 
     def decode_with_past_kv(
         self,
@@ -172,12 +175,13 @@ class LLMInference:
         system_prompt_ids = None
         if system_prompt_kv is not None:
             system_prompt_ids, system_prompt_kv = system_prompt_kv.unpack()
-        precomputed_ids = None
+        precomputed_ids, original_lengths = None, None
         if precomputed_kv is not None:
+            original_lengths = precomputed_kv.original_lengths
             precomputed_ids, precomputed_kv = precomputed_kv.unpack()
 
         # 合并所有past key values
-        past_key_values = self._merge_kv_caches(system_prompt_kv, precomputed_kv)
+        past_key_values = self._merge_kv_caches(system_prompt_kv, precomputed_kv, original_lengths)
         if past_key_values is not None:
             past_ids = []
             if system_prompt_ids is not None:
@@ -230,9 +234,10 @@ class LLMInference:
         return generated_text
 
     def _merge_kv_caches(
-        self, 
+        self,
         system_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]],
         precomputed_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]],
+        original_lengths: List[int],
     ) -> Optional[Tuple[Tuple[torch.Tensor, ...], ...]]:
         """
         合并多个键值缓存
@@ -260,7 +265,7 @@ class LLMInference:
             for kv_i in range(2):
                 layer_kv = [system_layer[kv_i][0]]
                 cumulative_kv_len = int(system_layer[kv_i][0].shape[1])
-                for recomp_layer_kv in recomp_layer[kv_i]:
+                for seqlen, recomp_layer_kv in zip(original_lengths, recomp_layer[kv_i]):
                     if kv_i == 0: # Rotate key cache to have correct RoPE
                         # print(f"cumulative_kv_len: {cumulative_kv_len}")
                         recomp_layer_kv = rotate_k_cache_rope(
@@ -269,7 +274,7 @@ class LLMInference:
                             self.rope_theta,
                             self.rope_type,
                         )
-                    cumulative_kv_len += int(recomp_layer_kv.shape[1])
+                    cumulative_kv_len += seqlen
                     layer_kv.append(recomp_layer_kv)
                 layer_full_kv.append(torch.cat(layer_kv, dim=1).unsqueeze(0))
             merged_kv.append(tuple(layer_full_kv))
@@ -318,35 +323,73 @@ class LLMInference:
         precomputed_kv_layer: List[torch.Tensor], # [batch_size] * (head_num, seq_len, head_size)
         retained_masks: List[torch.BoolTensor],
         rotate: bool,
+        original_lengths: List[int],
     ) -> torch.Tensor:
         retained_kv_list = [system_kv_layer]
         retained_length = int(system_kv_layer.shape[1])
         prefix_length = retained_length
-        for kv, mask in zip(precomputed_kv_layer, retained_masks):
+        for seqlen, kv, mask in zip(original_lengths, precomputed_kv_layer, retained_masks):
             retained_kv = kv[:, mask]
             if rotate:
                 retained_kv = rotate_k_cache_rope(retained_kv, prefix_length, self.rope_theta, self.rope_type)
             retained_kv_list.append(retained_kv)
             retained_length += int(torch.sum(mask))
-            prefix_length += int(kv.shape[1])
+            prefix_length += seqlen
         merged_kv = torch.cat(retained_kv_list, dim=1)
         assert retained_length == merged_kv.shape[1], f"{retained_length} != merged_kv length {merged_kv.shape[1]}"
         return merged_kv.unsqueeze(0) # (batch_size=1, head_num, seq_len, head_size)
+    
+    def _gen_vdiff_recompute_mask(
+        self,
+        recompute_ratio: float,
+        system_kv: BatchedKVInstance,
+        precomputed_kv: BatchedKVInstance,
+        full_ids: torch.Tensor,
+        compare_layer: int = 1,
+    ) -> List[torch.Tensor]:
+        # values shape (num_heads, seq_len, head_size)
+        system_length: int = len(system_kv.input_ids[0])
+        full_length: int = len(full_ids)
+        context_length = full_length - system_length
+        # get reference and reused values
+        ref_values = self.model.model(
+            full_ids.unsqueeze(0), use_cache=True
+        ).past_key_values[compare_layer][1][0, :, system_length:]
+        reused_values = self._merge_kv_caches(
+            system_kv.past_key_values, precomputed_kv.past_key_values, precomputed_kv.original_lengths
+        )[compare_layer][1][0, :, system_length:]
+        # get values diff and top k indices
+        values_diff = torch.mean((ref_values - reused_values) ** 2, [0, 2])
+        num_selected_tokens = int(recompute_ratio * context_length)
+        top_indices = torch.topk(values_diff, num_selected_tokens).indices
+        # get recompute masks
+        recompute_mask_full = torch.zeros(context_length, dtype=torch.bool, device=ref_values.device)
+        recompute_mask_full[top_indices] = True
+        recompute_masks = []
+        for input_ids in precomputed_kv.input_ids:
+            recompute_masks.append(recompute_mask_full[:len(input_ids)])
+            recompute_mask_full = recompute_mask_full[len(input_ids):]
+        return recompute_masks
     
     def selective_recompute(
         self,
         system_kv: BatchedKVInstance,
         precomputed_kv: BatchedKVInstance,
-        recompute_masks: List[torch.BoolTensor],
+        recompute_method: str,
         discard_kv: bool = False
     ) -> BatchedKVInstance:
         # 0. 检查传入Tensor形状是否匹配
-        device = system_kv.past_key_values[0][0][0].device
-        assert len(precomputed_kv.past_key_values[0][0]) == len(recompute_masks)
-
         full_input_ids = system_kv.input_ids + precomputed_kv.input_ids
         full_input_ids = torch.cat(full_input_ids, dim=0)
         full_kv_length = len(full_input_ids)
+
+        if recompute_method.startswith("vdiff"):
+            recompute_ratio = float(recompute_method.split('-')[1])
+            recompute_masks = self._gen_vdiff_recompute_mask(recompute_ratio, system_kv, precomputed_kv, full_input_ids)
+        else:
+            recompute_masks = gen_recompute_mask(self.tokenizer, precomputed_kv, recompute_method)
+        device = system_kv.past_key_values[0][0][0].device
+        assert len(precomputed_kv.past_key_values[0][0]) == len(recompute_masks)
 
         recompute_masks = [mask.bool() for mask in recompute_masks]
         retained_masks = [~mask for mask in recompute_masks]
@@ -355,8 +398,8 @@ class LLMInference:
         retained_kv = []
         for (sys_key, sys_val), (pre_key, pre_val) in zip(system_kv.past_key_values, precomputed_kv.past_key_values):
             retained_kv.append((
-                self._merge_selected_kv_layer(sys_key[0], pre_key, retained_masks, True),
-                self._merge_selected_kv_layer(sys_val[0], pre_val, retained_masks, False),
+                self._merge_selected_kv_layer(sys_key[0], pre_key, retained_masks, True, precomputed_kv.original_lengths),
+                self._merge_selected_kv_layer(sys_val[0], pre_val, retained_masks, False, precomputed_kv.original_lengths),
             ))
 
         if discard_kv:
@@ -371,7 +414,7 @@ class LLMInference:
         prefix_length = len(system_kv.input_ids[0])
         position_counter = prefix_length
         rearranged_index = torch.arange(full_kv_length, dtype=torch.long, device=device)
-        print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
+        # print(f"prefix_length: {prefix_length}, full_kv_length: {full_kv_length}, recompute_length: {recompute_length}")
         attention_mask_past = torch.zeros((recompute_length, retained_kv_length), dtype=torch.long, device=device)
         attention_mask_tril = torch.tril(torch.ones((recompute_length, recompute_length), dtype=torch.long, device=device))
         
@@ -424,9 +467,11 @@ class LLMInference:
                 [value.index_copy_(1, rearranged_index, output_value)]
             ))
         
+        original_lengths = len(system_kv.original_lengths + precomputed_kv.original_lengths)
         return BatchedKVInstance(
             input_ids=[full_input_ids],
             past_key_values=tuple(ret_kv),
+            original_lengths=[original_lengths]
         )
 
 

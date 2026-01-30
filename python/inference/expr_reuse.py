@@ -60,7 +60,7 @@ def evaluate_model_on_dataset(
 
         if recompute_type is not None:
             system_cache = evaluator.selective_recompute(
-                system_cache, context_cache, gen_recompute_mask(evaluator.tokenizer, context_cache, recompute_type),
+                system_cache, context_cache, recompute_type,
                 discard_kv='system_prompt' in example
             )
             context_cache = None

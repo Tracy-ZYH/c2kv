@@ -8,6 +8,7 @@ import sys
 import time
 import json
 from tqdm import tqdm
+from typing import Tuple
 
 # Third Party
 from transformers import AutoTokenizer
@@ -25,7 +26,7 @@ from mdocdataset import load_mdoc_dataset
 
 def setup_environment_variables(
     use_disk: bool = False,
-    blend_special_str: str = " # # ",
+    blend_special_str: str = "# #",
     enable_sparse: bool = False,
 ):
     # LMCache-related environment variables
@@ -65,7 +66,6 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
     llm_args = EngineArgs(
         model=model,
         kv_transfer_config=ktc,
-        max_model_len=32648,
         gpu_memory_utilization=0.8,
         enable_prefix_caching=False,
         enforce_eager=True,
@@ -98,34 +98,36 @@ def print_output(
 
 
 def tokenize_example(
-    example: dict, dataset, tokenizer: AutoTokenizer, blend_special_str: str, reverse_order: bool
-) -> list[int]:
-    # Build the prompt with chat template
-    example_input = []
-    
+    example: dict, dataset, tokenizer: AutoTokenizer, blend_special_ids: list[int], tokenizer_has_bos: bool
+) -> Tuple[list[int], list[list[int]], list[int]]:
     # Add system prompt if exists
     if 'system_prompt' in example:
         system_prompt = example['system_prompt']
     else:
         system_prompt = dataset.system_prompt
-    example_input.extend(tokenizer.apply_chat_template(
-        [{"role": "system", "content": system_prompt}], tokenize=True, add_generation_prompt=False, enable_thinking=False
-    ))
+    system_input_ids = tokenizer.apply_chat_template(
+        [{"role": "system", "content": system_prompt}], tokenize=True, 
+        add_generation_prompt=False, enable_thinking=False
+    ) + blend_special_ids
 
     # Add documents and question with blend special string
-    documents = example['documents'][::-1] if reverse_order else example['documents']
-    for idx, doc in enumerate(documents):
-        example_input.extend(blend_special_str)
-        example_input.extend(tokenizer.apply_chat_template(
-            [{"role": "user", "content": doc}], tokenize=True, add_generation_prompt=False, enable_thinking=False
-        ))
+    document_input_ids = []
+    for doc in example['documents']:
+        document_input_ids.append(tokenizer.apply_chat_template(
+            [{"role": "user", "content": doc}], tokenize=True, 
+            add_generation_prompt=False, enable_thinking=False
+        ) + blend_special_ids)
+        if tokenizer_has_bos:
+            document_input_ids[-1] = document_input_ids[-1][1:]
     
-    example_input.extend(blend_special_str)
-    example_input.extend(tokenizer.apply_chat_template(
-        [{"role": "user", "content": example['question']}], tokenize=True, add_generation_prompt=True, enable_thinking=False
-    ))
+    query_input_ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": example['question']}], tokenize=True, 
+        add_generation_prompt=True, enable_thinking=False
+    )
+    if tokenizer_has_bos:
+        query_input_ids = query_input_ids[1:]
 
-    return example_input
+    return system_input_ids, document_input_ids, query_input_ids
 
 
 def parse_args():
@@ -139,8 +141,8 @@ def parse_args():
     parser.add_argument(
         "-b",
         "--blend-special-str",
-        default=" # # ",
-        help="Specify the special separators to separate chunks (default: ' # # ')",
+        default="# #",
+        help="Specify the special separators to separate chunks (default: '# #')",
     )
     parser.add_argument(
         "--only_supporting", 
@@ -193,25 +195,35 @@ def main():
         tokenizer_has_bos = (warmup_prompt[0] == tokenizer.bos_token_id)
         print(f"Tokenizer has begin_of_sentence special token: {tokenizer_has_bos}.")
 
-        blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))
+        blend_special_ids = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"))
         if tokenizer_has_bos:
-            blend_special_str = blend_special_str[1:]
+            blend_special_ids = blend_special_ids[1:]
 
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=dataset.max_new_tokens)
 
         print_output(llm, warmup_prompt, sampling_params, "warmup")
+        warmup_prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "Summarize this document."}], tokenize=True, 
+            add_generation_prompt=True, enable_thinking=False
+        )
 
         for i in tqdm(range(num_examples), file=sys.stdout):
             example = dataset[i]
+            system_ids, doc_ids_list, query_ids = tokenize_example(
+                example, dataset, tokenizer, blend_special_ids, tokenizer_has_bos,
+            )
 
-            # Build the prompt with chat template
-
+            # Cache the documents separately
+            cache_prompts = [{"prompt_token_ids": system_ids + doc_ids + warmup_prompt} for doc_ids in doc_ids_list]
             _ = llm.generate(
-                prompts={"prompt_token_ids": tokenize_example(example, dataset, tokenizer, blend_special_str, True)}, 
-                sampling_params=sampling_params
-            ) # warmup
+                prompts=cache_prompts, 
+                sampling_params=SamplingParams(max_tokens=1),
+            )
+
+            # Generate the final output
+            full_prompt = system_ids + [ids for doc_ids in doc_ids_list for ids in doc_ids] + query_ids
             output = llm.generate(
-                prompts={"prompt_token_ids": tokenize_example(example, dataset, tokenizer, blend_special_str, False)}, 
+                prompts={"prompt_token_ids": full_prompt}, 
                 sampling_params=sampling_params
             )
             pred = output[0].outputs[0].text

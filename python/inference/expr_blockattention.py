@@ -73,12 +73,12 @@ def build_block_past_key_values(
             ).past_key_values
             queries = query_storage.get_all_queries()
         if enable_compress:
-            compress_kv = []
+            compressed_kv = []
             capacity = math.ceil(past_key_values.get_seq_length() / 4.0)
             for query, (keys, values) in zip(queries, past_key_values):
                 keys, values, _ = compress_kv(compression_method, capacity, query[0], keys[0], values[0])
-                compress_kv.append((keys.unsqueeze(0), values.unsqueeze(0)))
-            past_key_values = DynamicCache(compress_kv)
+                compressed_kv.append((keys.unsqueeze(0), values.unsqueeze(0)))
+            past_key_values = DynamicCache(compressed_kv)
         caches.append(past_key_values)
 
     response_input_ids = torch.tensor(
@@ -267,6 +267,7 @@ def main():
         tokenizer=tokenizer,
         max_examples=args.max_examples,
         output_file=args.output_file,
+        compression_method=args.compress,
     )
     
     print(f"\nEvaluation Results:")

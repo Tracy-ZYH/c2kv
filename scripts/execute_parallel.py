@@ -50,7 +50,7 @@ def run_evaluation_command(gpu_id, cmd_line, results_list, lock, progress_counte
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
-            timeout=3600  # 1小时超时
+            timeout=3600 * 5  # 5小时超时
         )
         
         if result.returncode != 0:
