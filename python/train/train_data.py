@@ -382,6 +382,10 @@ class MultiDocDataset(GistDataset):
         elif "hotpotqa" in path:
             data = datasets.load_dataset("jsonl", data_files=path, split="train")
             extract_documents = lambda sample: sample
+        elif "wikimqa" in path:
+            dataset = load_mdoc_dataset("wikimqa", "xanhho/2WikiMultihopQA", split='train')
+            extract_documents = lambda sample: dataset.extract_documents(sample, data_path=path)
+            data = dataset.data
         elif "longmagpie" in path or "longalpaca" in path:
             data = datasets.load_from_disk(path)
             extract_documents = None

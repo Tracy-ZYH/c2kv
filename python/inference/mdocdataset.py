@@ -92,43 +92,52 @@ class AbstractMDQADataset(ABC):
 
 
 class WikiMQADataset(AbstractMDQADataset):
-    def __init__(self, data_path: str | None, enable_cot: bool) -> None:
+    def __init__(self, data_path: str | None, enable_cot: bool = False, split: str = 'test') -> None:
         self.data_path = data_path
         if data_path is None:
-            self.data = datasets.load_dataset('zai-org/LongBench', '2wikimqa')['test']
+            self.data = datasets.load_dataset('zai-org/LongBench', '2wikimqa', split=split)
         else:
-            self.data = datasets.load_dataset("json", data_files=data_path)['train']
+            self.data = datasets.load_dataset(data_path, split=split)
         self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
         self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
         print(f"Loading dataset from {data_path}...")
-        self.context = self.data['context']
-        self.qid = self.data['_id']
-        self.question = self.data['input' if data_path is None else 'question']
-        self.answer = self.data['answers' if data_path is None else 'answer']
         self.metric = max_f1_score_with_reasoning if enable_cot else max_f1_score
         print(f"Done loading {data_path}")
+    
+    @staticmethod
+    def extract_documents(
+        sample: Dict[str, Any], 
+        query_prompt: str | None=None, 
+        data_path: str | None=None) -> Dict[str, Any]:
+        context_list = []
+        if data_path is None:
+            for item in sample['context'].split('Passage'):
+                if len(item) > 10:
+                    context_list.append('Passage' + item + '\n\n')
+        elif isinstance(sample['context'], dict):
+            for i, (title, lines) in enumerate(zip(sample['context']['title'], sample['context']['content'])):
+                context_str = f"Document {i+1} (title: {title}) " + " ".join(lines) + '\n\n'
+                context_list.append(context_str)
+        else:
+            for i, item in enumerate(eval(sample['context'])):
+                context_str = f"Document {i+1} (title: {item[0]}) " + " ".join(item[1]) + '\n\n'
+                context_list.append(context_str)
+        answer = sample['answers' if data_path is None else 'answer']
+        query = sample['input' if data_path is None else 'question']
+        query_prompt = query if query_prompt is None else query_prompt + query
+        return {
+            'qid': sample['_id'],
+            'question': query_prompt,
+            'documents': context_list,
+            'answer': answer if isinstance(answer, list) else [answer],
+        }
     
     def __len__(self) -> int:
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        context_list = []
-        if self.data_path is None:
-            for item in self.context[idx].split('Passage'):
-                if len(item) > 10:
-                    context_list.append('Passage' + item + '\n\n')
-        else:
-            for i, item in enumerate(eval(self.context[idx])):
-                context_str = f"Document {i+1} (title: {item[0]}) " + " ".join(item[1]) + '\n\n'
-                context_list.append(context_str)
-        answer = self.answer[idx]
-        return {
-            'qid': self.qid[idx],
-            'question': self.query_prompt + self.question[idx],
-            'documents': context_list,
-            'answer': answer if isinstance(answer, list) else [answer]
-        }
+        return self.extract_documents(self.data[idx], query_prompt=self.query_prompt, data_path=self.data_path)
 
 
 class MusiqueDataset(AbstractMDQADataset):
@@ -351,20 +360,77 @@ class LongAlpacaDataset(AbstractMDQADataset):
         return self.data[idx]
 
 
+_GSM8K_MATCHER = regex.compile(r"#### (-?[0-9.,]+)")
+class GSM8KDataset(AbstractMDQADataset):
+    def __init__(self) -> None:
+        data = datasets.load_dataset('openai/gsm8k', 'main', split='test')
+        self.data = data.map(self.precess_sample, with_indices=True, batched=False, num_proc=32, remove_columns=data.column_names)
+        self.system_prompt = "You are a helpful assistant to answer math questions."
+        self.max_new_tokens: int = 512
+    
+    @staticmethod
+    def metric(pred: str, gt_list: List[str]) -> float:
+        pred_m = _GSM8K_MATCHER.search(pred)
+        gt_m = _GSM8K_MATCHER.search(gt_list[0])
+        assert gt_m is not None, f"No match found in {gt_list[0]}"
+        if pred_m and pred_m.group(1) == gt_m.group(1):
+            return 1.0
+        return 0.0
+    
+    @staticmethod
+    def precess_sample(sample: Dict[str, ...], indice: int) -> Dict[str, ...]:
+        query_prompt = "Answer the following question and write the final answer after '#### '.\n\n"
+        sentences = sample['question'].split('. ')
+        return {
+            'qid': indice,
+            'question': query_prompt + sentences[-1],
+            'documents': ['. '.join(sentences[:-1])],
+            'answer': [sample['answer']],
+        }
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
+
+
+class NeedleDataset(AbstractMDQADataset):
+    def __init__(self, path: str):
+        self.data = datasets.load_dataset("jsonl", data_files=path)['train']
+        self.metric = max_f1_score
+        self.system_prompt = ("You are a helpful assistant. Use only the information in the context to answer the question."
+            "If the answer is not contained in the context, write 'I don't know'.")
+        self.max_new_tokens: int = 16
+        self.data = self.data.map(self._process_sample, num_proc=64, remove_columns=self.data.column_names, batched=False)
+    
+    @staticmethod
+    def _process_sample(sample: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            'qid': sample['id'],
+            'question': sample['question'],
+            'documents': sample['context'],
+            'answer': [sample['answer']],
+        }
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
+
+
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
-    enable_cot = kwargs.get('enable_cot', False)
     if name == "musique":
         if path is None:
             print('Defaulting musique dataset path to "../datasets/musique.jsonl"')
             path = "../datasets/musique.jsonl"
-        return MusiqueDataset(path, only_supporting=kwargs.get('only_supporting', False), enable_cot=enable_cot)
-    elif name == "wikimqa":
-        # if path is None:
-        #     print('Defaulting wikimqa dataset path to "../datasets/wikimqa.json"')
-        #     path = "../datasets/wikimqa.json"
-        return WikiMQADataset(path, enable_cot=enable_cot)
+        return MusiqueDataset(path, **kwargs)
+    kwargs.pop('only_supporting', None)
+    if name == "wikimqa":
+        return WikiMQADataset(path, **kwargs)
     elif name == "hotpotqa":
-        return HotpotQADataset(enable_cot=enable_cot)
+        return HotpotQADataset(**kwargs)
     elif name == "multinews":
         return MultiNewsDataset()
     elif name == "samsum":
@@ -379,5 +445,12 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
             print('Defaulting longalpaca dataset path to "../datasets/longalpaca_prompts.txt"')
             path = "../datasets/longalpaca_prompts.txt"
         return LongAlpacaDataset(path)
+    elif name == "gsm8k":
+        return GSM8KDataset()
+    elif name == "needle":
+        if path is None:
+            print('Defaulting needle dataset path to "../datasets/needle_haystack_testset.jsonl"')
+            path = "../datasets/needle_haystack_testset.jsonl"
+        return NeedleDataset(path)
     else:
         raise ValueError(f"Unsupported dataset name: {name}")
