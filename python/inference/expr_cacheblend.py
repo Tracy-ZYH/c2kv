@@ -22,6 +22,7 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
 from mdocdataset import load_mdoc_dataset
+from expr_timer import ExprTimer, DataRecorder
 
 
 def setup_environment_variables(
@@ -30,7 +31,7 @@ def setup_environment_variables(
     enable_sparse: bool = False,
 ):
     # LMCache-related environment variables
-    os.environ["LMCACHE_CHUNK_SIZE"] = "256"
+    os.environ["LMCACHE_CHUNK_SIZE"] = "128"
 
     # Blending related config# Enable blending in LMCache
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
@@ -167,6 +168,9 @@ def parse_args():
     parser.add_argument(
         "--cot", action="store_true", default=False, help="Use cot prompt"
     )
+    parser.add_argument(
+        "--profile", action="store_true", default=True, help="Profile the generation process"
+    )
     return parser.parse_args()
 
 
@@ -189,6 +193,8 @@ def main():
     results = []
     num_examples = len(dataset)
 
+    timer = ExprTimer("cacheblend", args.profile)
+
     with build_llm_with_lmcache(lmcache_connector, model) as llm:
         # Define the shared prompt and specific prompts
         warmup_prompt = tokenizer.encode("Nice to meet you" * 500)
@@ -209,23 +215,28 @@ def main():
 
         for i in tqdm(range(num_examples), file=sys.stdout):
             example = dataset[i]
+            record = timer.record(example['qid'])
             system_ids, doc_ids_list, query_ids = tokenize_example(
                 example, dataset, tokenizer, blend_special_ids, tokenizer_has_bos,
             )
 
             # Cache the documents separately
             cache_prompts = [{"prompt_token_ids": system_ids + doc_ids + warmup_prompt} for doc_ids in doc_ids_list]
-            _ = llm.generate(
-                prompts=cache_prompts, 
-                sampling_params=SamplingParams(max_tokens=1),
-            )
+            with record.record("extract"):
+                _ = llm.generate(
+                    prompts=cache_prompts, 
+                    sampling_params=SamplingParams(max_tokens=1),
+                )
+            
+            time.sleep(0.5) # let the cache stable
 
             # Generate the final output
             full_prompt = system_ids + [ids for doc_ids in doc_ids_list for ids in doc_ids] + query_ids
-            output = llm.generate(
-                prompts={"prompt_token_ids": full_prompt}, 
-                sampling_params=sampling_params
-            )
+            with record.record("blend+generate"):
+                output = llm.generate(
+                    prompts={"prompt_token_ids": full_prompt}, 
+                    sampling_params=sampling_params
+                )
             pred = output[0].outputs[0].text
 
             score = dataset.metric(pred, example['answer'])
@@ -250,6 +261,7 @@ def main():
         'dataset': dataset.__class__.__name__,
         'num_examples': len(results),
         'exact_match': avg_score,
+        **timer.statistics(),
     }
     
     summary_file = output_file.replace('.jsonl', '_summary.json')

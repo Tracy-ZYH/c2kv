@@ -11,6 +11,7 @@ import numpy as np
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
 from models import get_model_class, blend_gist_key_values
 from reuse_pipeline import tokenize_for_reuse, prefill_kv_cache
+from expr_timer import DataRecorder, ExprTimer
 
 MODEL_GENERATE_API_WARNING_STRING = """==== PLEASE READ ====
 With transformers==4.57.1 (which is required by this project), model.generate() API is buggy:
@@ -44,7 +45,8 @@ def evaluate_model_on_dataset(
     dataset: AbstractMDQADataset,
     max_examples: Optional[int] = None,
     output_file: Optional[str] = None,
-    cut_length: Optional[int] = None
+    cut_length: Optional[int] = None,
+    profile: bool = False,
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
     
@@ -75,9 +77,12 @@ def evaluate_model_on_dataset(
     else:
         system_inputs = tokenize_for_reuse(tokenizer, [dataset.system_prompt], keep_bos=True, role='system').to(device)
         sys_cache = prefill_kv_cache(model, system_inputs)
+
+    timer = ExprTimer("gist", enable=profile)
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
+        record = timer.record(example['qid'])
 
         # Pre-compute system prompt
         system_cache = sys_cache
@@ -92,12 +97,14 @@ def evaluate_model_on_dataset(
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
         model.model.config._attn_implementation = "sdpa"
-        outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
+        with record.record("extract"):
+            outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
-        context_cache, _ = blend_gist_key_values(
-            model.config, [outputs.past_key_values], [gist_mask], [pos_ids],
-            model.model.rotary_emb, system_length
-        )
+        with record.record("blend"):
+            context_cache, _ = blend_gist_key_values(
+                model.config, [outputs.past_key_values], [gist_mask], [pos_ids],
+                model.model.rotary_emb, system_length
+            )
         context_length = context_inputs.attention_mask.sum().item()
         precompute_length = pos_ids.max().item() + 1
         assert precompute_length == system_length + context_length, \
@@ -122,16 +129,17 @@ def evaluate_model_on_dataset(
 
         # Generate text
         model.model.config._attn_implementation = "flash_attention_2"
-        generated_outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids.unsqueeze(0),
-            past_key_values=context_cache,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tokenizer.eos_token_id,
-            use_cache=True,
-            use_gist=True,
-        )
+        with record.record("generate"):
+            generated_outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids.unsqueeze(0),
+                past_key_values=context_cache,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+                use_cache=True,
+                use_gist=True,
+            )
         del context_cache
         
         # Decode generated text (skip query part)
@@ -169,6 +177,7 @@ def evaluate_model_on_dataset(
             'dataset': dataset.__class__.__name__,
             'num_examples': len(results),
             'exact_match': exact_match,
+            **timer.statistics(),
         }
         
         summary_file = output_file.replace('.jsonl', '_summary.json')
@@ -203,6 +212,8 @@ def main():
                        help="Use cot prompt")
     parser.add_argument("--cut_length", type=int, default=None,
                        help="Cut documents to specified length")
+    parser.add_argument("--profile", action="store_true", default=True,
+                       help="Profile model")
     
     args = parser.parse_args()
 
@@ -225,6 +236,7 @@ def main():
         max_examples=args.max_examples,
         output_file=args.output_file,
         cut_length=args.cut_length,
+        profile=args.profile,
     )
     
     print(f"\nEvaluation Results:")

@@ -11,6 +11,7 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, Llama
 
 from rope_reposition import rotate_k_cache_rope
 from compress_kv import compress_kv, QueryStorage
+from expr_timer import DataRecorder, ExprTimer
 
 from transformers import (
     AutoTokenizer, PreTrainedTokenizer, AutoModelForCausalLM, GenerationConfig, AutoConfig
@@ -96,22 +97,24 @@ def build_block_past_key_values(
 @torch.inference_mode()
 def block_generate(
         blocks: List[str], instruction: str, generation_config: GenerationConfig, model: LlamaForCausalLM,
-        emb: LlamaRotaryEmbedding, tokenizer: PreTrainedTokenizer, num_local_attention_blocks: int,
+        emb: LlamaRotaryEmbedding, tokenizer: PreTrainedTokenizer, num_local_attention_blocks: int, record: DataRecorder,
         compression_method: Optional[str] = None) -> str:
-    past_key_values, input_ids, block_lengths = build_block_past_key_values(
-        blocks=blocks, instruction=instruction, tokenizer=tokenizer, model=model,
-        num_local_attention_blocks=num_local_attention_blocks, compression_method=compression_method,
-    )
-    if past_key_values is not None:
-        past_key_values = merge_and_rotary_past_key_values(pkvs=past_key_values, block_lengths=block_lengths, rope_theta=model.config.rope_theta)
+    with record.record("extract"):
+        past_key_values, input_ids, block_lengths = build_block_past_key_values(
+            blocks=blocks, instruction=instruction, tokenizer=tokenizer, model=model,
+            num_local_attention_blocks=num_local_attention_blocks, compression_method=compression_method,
+        )
+    with record.record("blend"):
+        if past_key_values is not None:
+            past_key_values = merge_and_rotary_past_key_values(pkvs=past_key_values, block_lengths=block_lengths, rope_theta=model.config.rope_theta)
     input_length = input_ids.size(-1)
     attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
-
-    outputs = model.generate(
-        input_ids=input_ids, attention_mask=attention_mask,
-        generation_config=generation_config, past_key_values=past_key_values,
-        use_cache=True,
-    )
+    with record.record("generate"):
+        outputs = model.generate(
+            input_ids=input_ids, attention_mask=attention_mask,
+            generation_config=generation_config, past_key_values=past_key_values,
+            use_cache=True,
+        )
     return tokenizer.decode(token_ids=outputs[0][input_length:].tolist(), skip_special_tokens=True)
 
 
@@ -122,6 +125,7 @@ def evaluate_model_on_dataset(
     model: LlamaForCausalLM,
     emb: LlamaRotaryEmbedding,
     tokenizer: PreTrainedTokenizer,
+    timer: ExprTimer,
     max_examples: Optional[int] = None,
     output_file: Optional[str] = None,
     compression_method: Optional[str] = None,
@@ -135,6 +139,7 @@ def evaluate_model_on_dataset(
 
     for i in tqdm(range(num_examples)):
         example = dataset[i]
+        record = timer.record(example['qid'])
 
         if 'system_prompt' in example:
             system_prompt = example['system_prompt']
@@ -157,6 +162,7 @@ def evaluate_model_on_dataset(
             emb=emb,
             tokenizer=tokenizer,
             num_local_attention_blocks=10000,
+            record=record,
             compression_method=compression_method,
         )
 
@@ -186,6 +192,7 @@ def evaluate_model_on_dataset(
             'dataset': dataset.__class__.__name__,
             'num_examples': len(results),
             'exact_match': exact_match,
+            **timer.statistics(),
         }
         
         summary_file = output_file.replace('.jsonl', '_summary.json')
@@ -217,6 +224,8 @@ def main():
                        help="Use cot prompt")
     parser.add_argument("--compress", type=str, default=None,
                        help="Compress method")
+    parser.add_argument("--profile", action="store_true", default=True,
+                       help="Profile model")
 
     args = parser.parse_args()
 
@@ -265,6 +274,7 @@ def main():
         model=model,
         emb=emb,
         tokenizer=tokenizer,
+        timer=ExprTimer("block-attn", args.profile),
         max_examples=args.max_examples,
         output_file=args.output_file,
         compression_method=args.compress,

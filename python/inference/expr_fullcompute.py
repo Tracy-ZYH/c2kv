@@ -8,6 +8,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 
 from compress_kv import compress_kv, QueryStorage
 from mdocdataset import load_mdoc_dataset, AbstractMDQADataset
+from expr_timer import DataRecorder, ExprTimer
 
 
 def prepare_example_with_template(example, system_prompt, tokenizer):
@@ -59,7 +60,7 @@ class MDQAEvaluator:
         self.compression_method = compression_method
     
     @torch.inference_mode()
-    def generate_answer(self, context: str, prompt: str, max_new_tokens: int) -> str:
+    def generate_answer(self, context: str, prompt: str, max_new_tokens: int, record: DataRecorder) -> str:
         """生成答案，prefill prompt后再generation"""
         # Prefill: tokenize context
         context_inputs = self.tokenizer(context, return_tensors="pt").to(self.device)
@@ -73,8 +74,9 @@ class MDQAEvaluator:
         # Prefill阶段：获取最后一个token的hidden state
         enable_compress = self.compression_method is not None
         with QueryStorage(self.model, enable_compress) as query_storage:
-            past_key_values = self.model(**context_inputs, return_dict=True, use_cache=True).past_key_values
-            queries = query_storage.get_all_queries()
+            with record.record('extract'):
+                past_key_values = self.model(**context_inputs, return_dict=True, use_cache=True).past_key_values
+                queries = query_storage.get_all_queries()
         
         if enable_compress:
             capacity = math.ceil(context_length / 4.0)
@@ -89,15 +91,16 @@ class MDQAEvaluator:
         mock_input_ids = prompt_inputs.input_ids.new_zeros((1, 1)).expand((-1, past_key_values.get_seq_length()))
         input_ids = torch.cat([mock_input_ids, prompt_inputs.input_ids], dim=1)
         attention_mask = context_inputs.attention_mask.new_ones(input_ids.shape)
-        outputs = self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-            use_cache=True,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=self.tokenizer.pad_token_id,
-        )
+        with record.record('generate'):
+            outputs = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+                use_cache=True,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
 
         # 解码并移除prompt部分
         full_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -108,16 +111,16 @@ class MDQAEvaluator:
 
 
 def evaluate_model_on_dataset(
-    model_name: str,
     dataset: AbstractMDQADataset,
-    max_examples: int = None,
-    output_file: str = None,
-    device: str = "cuda",
-    compression_method: str | None = None,
+    args: argparse.Namespace,
 ):
+    max_examples = args.max_examples
+    output_file = args.output_file
+
     """评估模型"""
-    evaluator = MDQAEvaluator(model_name, compression_method, device=device)
+    evaluator = MDQAEvaluator(args.model, args.compress, device=args.device)
     system_prompt = dataset.system_prompt
+    timer = ExprTimer("fr", args.profile)
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
     
@@ -126,9 +129,10 @@ def evaluate_model_on_dataset(
     
     for i in tqdm(range(num_examples), desc="Evaluating"):
         example = dataset[i]
+        record = timer.record(example['qid'])
         context, prompt, gt, qid = prepare_example_with_template(example, system_prompt, evaluator.tokenizer)
         
-        pred = evaluator.generate_answer(context, prompt, dataset.max_new_tokens)
+        pred = evaluator.generate_answer(context, prompt, dataset.max_new_tokens, record)
         em_score = dataset.metric(pred, gt)
         em_scores.append(em_score)
         
@@ -149,10 +153,11 @@ def evaluate_model_on_dataset(
                 f.write(json.dumps(result, ensure_ascii=False) + '\n')
         
         summary = {
-            'model': model_name,
+            'model': args.model,
             'dataset': dataset.__class__.__name__,
             'num_examples': len(results),
             'exact_match': exact_match,
+            **timer.statistics(),
         }
         
         summary_file = output_file.replace('.jsonl', '_summary.json')
@@ -173,6 +178,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--cot", action="store_true", default=False, help="Use cot prompt")
     parser.add_argument("--compress", type=str, default=None, help="KV Cache compression type")
+    parser.add_argument("--profile", action="store_true", default=True, help="Profile model")
     
     args = parser.parse_args()
     
@@ -184,14 +190,7 @@ def main():
     
     print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")
     
-    results = evaluate_model_on_dataset(
-        model_name=args.model,
-        dataset=dataset,
-        max_examples=args.max_examples,
-        output_file=args.output_file,
-        device=args.device,
-        compression_method=args.compress,
-    )
+    results = evaluate_model_on_dataset(dataset=dataset, args=args)
     
     print(f"\nEvaluation Results:")
     print(f"Model: {args.model}")

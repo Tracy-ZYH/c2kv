@@ -7,18 +7,20 @@ from tqdm import tqdm
 
 from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
 from reuse_pipeline import LLMInference, BatchedKVInstance, gen_recompute_mask
+from expr_timer import DataRecorder, ExprTimer
 
 
 @torch.inference_mode()
 def evaluate_model_on_dataset(
-    model_name: str,
     dataset: AbstractMDQADataset,
-    max_examples: Optional[int] = None,
-    output_file: Optional[str] = None,
-    recompute_type: Optional[str] = None,
-    compress_method: Optional[str] = None,
+    args: argparse.Namespace,
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
+
+    model_name = args.model
+    max_examples = args.max_examples
+    output_file = args.output_file
+
     
     # Initialize evaluator
     evaluator = LLMInference(model_name)
@@ -29,6 +31,8 @@ def evaluate_model_on_dataset(
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
 
+    timer = ExprTimer(f"reuse-{str(args.recompute_type)}", args.profile)
+
     if dataset.system_prompt is None:
         sys_cache = None
     else:
@@ -36,42 +40,48 @@ def evaluate_model_on_dataset(
     
     for i in tqdm(range(num_examples)):
         example = dataset[i]
+        record = timer.record(example['qid'])
 
         system_cache = sys_cache
         if 'system_prompt' in example:
             system_cache = evaluator.get_prefill_kv_cache([example['system_prompt']], True, role='system')
         assert system_cache is not None, "System prompt is not pre-computed"
 
-        def append_cache(batch: List[str], cache: BatchedKVInstance | None) -> BatchedKVInstance:
-            if not batch:
-                return cache
-            new_cache = evaluator.get_prefill_kv_cache(batch, False, 'user', compress_method)
-            return cache.stack(new_cache) if cache is not None else new_cache
-        context_cache = None
-        batched_documents = []
-        for doc in example['documents']:
-            if len(doc) > 4096:
-                context_cache = append_cache(batched_documents, context_cache)
-                context_cache = append_cache([doc], context_cache)
-                batched_documents = []
-            else:
-                batched_documents.append(doc)
-        context_cache = append_cache(batched_documents, context_cache)
-
-        if recompute_type is not None:
-            system_cache = evaluator.selective_recompute(
-                system_cache, context_cache, recompute_type,
-                discard_kv='system_prompt' in example
-            )
+        if not args.profile:
+            def append_cache(batch: List[str], cache: BatchedKVInstance | None) -> BatchedKVInstance:
+                if not batch:
+                    return cache
+                new_cache = evaluator.get_prefill_kv_cache(batch, False, 'user', args.compress)
+                return cache.stack(new_cache) if cache is not None else new_cache
             context_cache = None
+            batched_documents = []
+            for doc in example['documents']:
+                if len(doc) > 4096:
+                    context_cache = append_cache(batched_documents, context_cache)
+                    context_cache = append_cache([doc], context_cache)
+                    batched_documents = []
+                else:
+                    batched_documents.append(doc)
+            context_cache = append_cache(batched_documents, context_cache)
+        else:
+            with record.record("extract"):
+                context_cache = evaluator.get_prefill_kv_cache(example['documents'], False, 'user', args.compress)
 
-        pred = evaluator.decode_with_past_kv(
-            system_prompt_kv=system_cache,
-            precomputed_kv=context_cache,
-            query_text=example['question'],
-            max_new_tokens=dataset.max_new_tokens,
-        )
-        print(pred)
+        with record.record("blend"):
+            if args.recompute_type is not None:
+                system_cache = evaluator.selective_recompute(
+                    system_cache, context_cache, args.recompute_type,
+                    discard_kv='system_prompt' in example
+                )
+                context_cache = None
+
+        with record.record("generate"):
+            pred = evaluator.decode_with_past_kv(
+                system_prompt_kv=system_cache,
+                precomputed_kv=context_cache,
+                query_text=example['question'],
+                max_new_tokens=dataset.max_new_tokens,
+            )
 
         del context_cache
         del system_cache
@@ -103,6 +113,7 @@ def evaluate_model_on_dataset(
             'dataset': dataset.__class__.__name__,
             'num_examples': len(results),
             'exact_match': exact_match,
+            **timer.statistics(),
         }
         
         summary_file = output_file.replace('.jsonl', '_summary.json')
@@ -141,6 +152,8 @@ def main():
                        help="Use cot prompt")
     parser.add_argument("--compress", type=str, default=None,
                        help="KV Cache compression type (e.g. \"snapkv\")")
+    parser.add_argument("--profile", action="store_true", default=True,
+                       help="Profile model")
     
     args = parser.parse_args()
 
@@ -155,14 +168,7 @@ def main():
     print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")
     
     # Evaluate model
-    results = evaluate_model_on_dataset(
-        model_name=args.model,
-        dataset=dataset,
-        max_examples=args.max_examples,
-        output_file=args.output_file,
-        recompute_type=args.recompute_type,
-        compress_method=args.compress,
-    )
+    results = evaluate_model_on_dataset(dataset=dataset, args=args)
     
     print(f"\nEvaluation Results:")
     print(f"Model: {args.model}")

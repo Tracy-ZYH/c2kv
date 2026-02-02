@@ -43,11 +43,14 @@ def max_rouge_score(pred: str, gt_list: List[str]) -> float:
     
 
 QA_SYSTEM_PROMPT: str = ("You will be asked a question after reading several passages. "
-    "Please directly answer the question based on the given passages. Do NOT repeat the question. "
-    "The answer should be within 5 words.\n\n")
+    "Please directly answer the question based on the given passages.\n\n")
 
-QA_QUERY_PROMPT: str = ("Answer the question directly based on the given passages. "
-    "Do NOT repeat the question. The answer should be within 5 words.\n\n")
+QA_QUERY_PROMPT: str = (
+    "Answer the question directly based on the given passages. "
+    "Output exactly one phrase as the final answer. No explanation. No extra text.\n"
+    "Example: Question: What is the capital of France? Paris.\n\n"
+    "Question: "
+)
 
 QA_MAX_NEW_TOKENS: int = 16
 
