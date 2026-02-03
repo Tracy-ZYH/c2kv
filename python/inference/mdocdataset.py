@@ -241,7 +241,7 @@ class SAMSumDataset(AbstractMDQADataset):
         print(f"Loading dataset from zai-org/LongBench samsum...")
         self.data = datasets.load_dataset('zai-org/LongBench', 'samsum')['test']
         self.system_prompt: str = "Summarize the dialogue into a few short sentences. The following are some examples.\n\n"
-        self.question_prompt: str = "As the above examples, please summarize the dialogue into a few short sentences."
+        self.question_prompt: str = "As the above examples, please summarize the dialogue into a few short sentences.\n\n"
         self.max_new_tokens: int = 128
         self.paragraphs = self.data['context']
         self.qid = self.data['_id']
@@ -260,7 +260,7 @@ class SAMSumDataset(AbstractMDQADataset):
                 context_list.append('Dialogue' + item + '\n')
         return {
             'qid': self.qid[idx],
-            'question': self.question[idx] + self.question_prompt,
+            'question': self.question_prompt + self.question[idx],
             'documents': context_list,
             'answer': self.answer[idx],
         }

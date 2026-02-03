@@ -55,6 +55,7 @@ def get_model_class(
 ) -> Tuple[Type[PretrainedConfig], Type[PreTrainedModel]]:
     if gist_param_type == "qkv":
         from .llama import LlamaForCausalLM, LlamaConfig
+        from .qwen2_5 import Qwen2ForCausalLM, Qwen2Config
         from .qwen3 import Qwen3ForCausalLM, Qwen3Config
         from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeConfig
     # elif gist_param_type == "lora":
@@ -64,6 +65,7 @@ def get_model_class(
         raise ValueError(f"Unsupported gist_param_type: {gist_param_type}")
     ARCHITECTURE_TO_CLASS = {
         'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
+        'Qwen2ForCausalLM': (Qwen2Config, Qwen2ForCausalLM),
         'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
         'Qwen3MoeForCausalLM': (Qwen3MoeConfig, Qwen3MoeForCausalLM),
     }

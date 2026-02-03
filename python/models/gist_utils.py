@@ -274,7 +274,8 @@ def blend_gist_key_values(
     return DynamicCache(merged_gist_kv, config=model_config), attention_mask
 
 def gen_gist_proj(attn_hidden_size: int, config: PretrainedConfig) -> torch.nn.Linear:
-    proj = torch.nn.Linear(config.hidden_size, attn_hidden_size, bias=config.attention_bias)
+    bias = config.attention_bias if hasattr(config, "attention_bias") else True # Qwen2.5 has attention_bias
+    proj = torch.nn.Linear(config.hidden_size, attn_hidden_size, bias=bias)
     proj.weight.data.zero_()
     proj._is_hf_initialized = True
     return proj
@@ -287,7 +288,7 @@ def init_gist_proj(model, missing_keys):
                 return
             params = [gist_proj.weight, proj.weight]
             if proj.bias is not None:
-                params.extend[gist_proj.bias, proj.bias]
+                params.extend([gist_proj.bias, proj.bias])
             with deepspeed.zero.GatheredParameters(params, modifier_rank=0):
                 if (gist_proj.weight.sum(-1) == 0).any() or (gist_proj.weight > 1e29).any():
                     gist_proj.weight.data.copy_(proj.weight.data)

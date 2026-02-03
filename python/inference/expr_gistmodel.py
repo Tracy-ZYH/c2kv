@@ -60,7 +60,7 @@ def evaluate_model_on_dataset(
         trust_remote_code=True,
         local_files_only=True,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa"
+        attn_implementation="flash_attention_2",
     )
     device = model.device
     
@@ -96,7 +96,7 @@ def evaluate_model_on_dataset(
         documents = cut_documents(example['documents'], max_length=cut_length)
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
-        model.model.config._attn_implementation = "sdpa"
+        model.model.config._attn_implementation = "flex_attention"
         with record.record("extract"):
             outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
