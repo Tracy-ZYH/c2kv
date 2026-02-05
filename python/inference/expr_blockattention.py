@@ -154,6 +154,13 @@ def evaluate_model_on_dataset(
             tokenizer.apply_chat_template([{"role": "user", "content": example['question']}], tokenize=False, add_generation_prompt=True)
         )
 
+        if timer.enable and 'max_new_tokens' in example:
+            generation_config = GenerationConfig(
+                eos_token_id=tokenizer.eos_token_id,
+                max_new_tokens=example['max_new_tokens'],
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
         pred = block_generate(
             blocks=blocks[:-1],
             instruction=blocks[-1],
@@ -175,6 +182,10 @@ def evaluate_model_on_dataset(
             'ground_truth': example['answer'],
             'em_score': em_score
         })
+        if timer.enable:
+            record.phases['generate'] /= len(tokenizer.encode(pred))
+            results[-1]['timer'] = record.summary()
+            del results[-1]['prediction']
     
     # Calculate overall metrics
     exact_match = sum(em_scores) / len(em_scores) if em_scores else 0
@@ -224,7 +235,7 @@ def main():
                        help="Use cot prompt")
     parser.add_argument("--compress", type=str, default=None,
                        help="Compress method")
-    parser.add_argument("--profile", action="store_true", default=True,
+    parser.add_argument("--profile", action="store_true", default=False,
                        help="Profile model")
 
     args = parser.parse_args()
@@ -232,7 +243,7 @@ def main():
     # Load model and tokenizer
     print(f"Loading model from {args.model}")
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=args.model,
+        pretrained_model_name_or_path="Qwen/Qwen3-4B-Instruct-2507",
         use_fast=False, local_files_only=True
     )
     tokenizer.pad_token_id = tokenizer.eos_token_id

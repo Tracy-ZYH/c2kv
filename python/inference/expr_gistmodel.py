@@ -128,6 +128,8 @@ def evaluate_model_on_dataset(
         attention_mask = torch.ones_like(input_ids)
 
         # Generate text
+        if timer.enable and 'max_new_tokens' in example:
+            max_new_tokens = example['max_new_tokens']
         model.model.config._attn_implementation = "flash_attention_2"
         with record.record("generate"):
             generated_outputs = model.generate(
@@ -157,6 +159,10 @@ def evaluate_model_on_dataset(
             'ground_truth': example['answer'],
             'em_score': em_score
         })
+        if timer.enable:
+            record.phases['generate'] /= len(tokenizer.encode(pred))
+            results[-1]['timer'] = record.summary()
+            del results[-1]['prediction']
     
     # Calculate overall metrics
     exact_match = sum(em_scores) / len(em_scores) if em_scores else 0
@@ -212,7 +218,7 @@ def main():
                        help="Use cot prompt")
     parser.add_argument("--cut_length", type=int, default=None,
                        help="Cut documents to specified length")
-    parser.add_argument("--profile", action="store_true", default=True,
+    parser.add_argument("--profile", action="store_true", default=False,
                        help="Profile model")
     
     args = parser.parse_args()

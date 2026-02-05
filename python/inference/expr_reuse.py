@@ -75,12 +75,13 @@ def evaluate_model_on_dataset(
                 )
                 context_cache = None
 
+        max_new_tokens = example['max_new_tokens'] if timer.enable and 'max_new_tokens' in example else dataset.max_new_tokens
         with record.record("generate"):
             pred = evaluator.decode_with_past_kv(
                 system_prompt_kv=system_cache,
                 precomputed_kv=context_cache,
                 query_text=example['question'],
-                max_new_tokens=dataset.max_new_tokens,
+                max_new_tokens=max_new_tokens,
             )
 
         del context_cache
@@ -96,6 +97,10 @@ def evaluate_model_on_dataset(
             'ground_truth': example['answer'],
             'em_score': em_score
         })
+        if timer.enable:
+            record.phases['generate'] /= len(evaluator.tokenizer.encode(pred))
+            results[-1]['timer'] = record.summary()
+            del results[-1]['prediction']
     
     # Calculate overall metrics
     exact_match = sum(em_scores) / len(em_scores) if em_scores else 0
@@ -152,7 +157,7 @@ def main():
                        help="Use cot prompt")
     parser.add_argument("--compress", type=str, default=None,
                        help="KV Cache compression type (e.g. \"snapkv\")")
-    parser.add_argument("--profile", action="store_true", default=True,
+    parser.add_argument("--profile", action="store_true", default=False,
                        help="Profile model")
     
     args = parser.parse_args()

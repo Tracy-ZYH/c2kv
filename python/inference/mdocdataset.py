@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
+import itertools
 import datasets
 import string
 from numpy import isin
@@ -423,6 +424,31 @@ class NeedleDataset(AbstractMDQADataset):
         return self.data[idx]
 
 
+class ProfileMockDataset(AbstractMDQADataset):
+    def __init__(self) -> None:
+        self.system_prompt = "You are a helpful assistant."
+        self.max_new_tokens: int = 16
+        self.metric = max_rouge_score
+        self.context_lengths = [256, 512, 1024, 1536]
+        self.context_nums = [10, 20, 30, 40]
+        self.max_new_token_list = [32, 64, 128, 256]
+        self.params = list(itertools.product(self.context_lengths, self.context_nums, self.max_new_token_list))
+    
+    def __len__(self) -> int:
+        return len(self.params)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        context_length, context_num, max_new_tokens = self.params[idx]
+        context = "Hello world! " * context_length
+        return {
+            'qid': idx,
+            'question': "Repeat 'Hello world!', do not stop, do not write anything else.",
+            'documents': [context] * context_num,
+            'answer': [f"{context_length=}, {context_num=}, {max_new_tokens=}"],
+            'max_new_tokens': max_new_tokens,
+        }
+
+
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
     if name == "musique":
         if path is None:
@@ -455,5 +481,7 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
             print('Defaulting needle dataset path to "../datasets/needle_haystack_testset.jsonl"')
             path = "../datasets/needle_haystack_testset.jsonl"
         return NeedleDataset(path)
+    elif name == "profile":
+        return ProfileMockDataset()
     else:
         raise ValueError(f"Unsupported dataset name: {name}")

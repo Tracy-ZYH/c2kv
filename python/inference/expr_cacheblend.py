@@ -169,7 +169,7 @@ def parse_args():
         "--cot", action="store_true", default=False, help="Use cot prompt"
     )
     parser.add_argument(
-        "--profile", action="store_true", default=True, help="Profile the generation process"
+        "--profile", action="store_true", default=False, help="Profile the generation process"
     )
     return parser.parse_args()
 
@@ -231,6 +231,9 @@ def main():
             time.sleep(0.5) # let the cache stable
 
             # Generate the final output
+            if timer.enable and 'max_new_tokens' in example:
+                sampling_params = SamplingParams(max_tokens=example['max_new_tokens'])
+
             full_prompt = system_ids + [ids for doc_ids in doc_ids_list for ids in doc_ids] + query_ids
             with record.record("blend+generate"):
                 output = llm.generate(
@@ -247,6 +250,10 @@ def main():
                 'ground_truth': example['answer'],
                 'em_score': score,
             })
+            if timer.enable:
+                record.phases['blend+generate'] /= len(tokenizer.encode(pred))
+                results[-1]['timer'] = record.summary()
+                del results[-1]['prediction']
     
     avg_score = sum(scores) / len(scores) if scores else 0
 

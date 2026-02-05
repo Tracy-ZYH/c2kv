@@ -132,7 +132,8 @@ def evaluate_model_on_dataset(
         record = timer.record(example['qid'])
         context, prompt, gt, qid = prepare_example_with_template(example, system_prompt, evaluator.tokenizer)
         
-        pred = evaluator.generate_answer(context, prompt, dataset.max_new_tokens, record)
+        max_new_tokens = example['max_new_tokens'] if timer.enable and 'max_new_tokens' in example else dataset.max_new_tokens
+        pred = evaluator.generate_answer(context, prompt, max_new_tokens, record)
         em_score = dataset.metric(pred, gt)
         em_scores.append(em_score)
         
@@ -142,6 +143,10 @@ def evaluate_model_on_dataset(
             'ground_truth': gt,
             'em_score': em_score
         })
+        if timer.enable:
+            record.phases['generate'] /= len(evaluator.tokenizer.encode(pred))
+            results[-1]['timer'] = record.summary()
+            del results[-1]['prediction']
     
     # 计算指标
     exact_match = sum(em_scores) / len(em_scores) if em_scores else 0.0
@@ -178,7 +183,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     parser.add_argument("--cot", action="store_true", default=False, help="Use cot prompt")
     parser.add_argument("--compress", type=str, default=None, help="KV Cache compression type")
-    parser.add_argument("--profile", action="store_true", default=True, help="Profile model")
+    parser.add_argument("--profile", action="store_true", default=False, help="Profile model")
     
     args = parser.parse_args()
     
