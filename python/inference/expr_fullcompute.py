@@ -87,6 +87,14 @@ class MDQAEvaluator:
                 )
                 compressed_key_values.append((keys.unsqueeze(0), values.unsqueeze(0)))
             past_key_values = DynamicCache(compressed_key_values)
+
+        if record.enable:
+            cache_cpu = [(key.to(device="cpu"), value.to(device="cpu")) for key, value in past_key_values]
+            with record.record('offload'):
+                for layer_i in range(len(cache_cpu)):
+                    k, v = cache_cpu[layer_i]
+                    cache_cpu[layer_i] = (k.to(self.device), v.to(self.device))
+            del cache_cpu
         
         mock_input_ids = prompt_inputs.input_ids.new_zeros((1, 1)).expand((-1, past_key_values.get_seq_length()))
         input_ids = torch.cat([mock_input_ids, prompt_inputs.input_ids], dim=1)

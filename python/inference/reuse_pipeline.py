@@ -73,6 +73,15 @@ class BatchedKVInstance:
                 korv.extend(other_korv)
         self.original_lengths.extend(other.original_lengths)
         return self
+    
+    def to(self, device: str) -> None:
+        self.input_ids = [ids.to(device) for ids in self.input_ids]
+        past_key_values = []
+        for keys, values in self.past_key_values:
+            keys = [k.to(device) for k in keys]
+            values = [v.to(device) for v in values]
+            past_key_values.append((keys, values))
+        self.past_key_values = past_key_values
 
 
 class LLMInference:
@@ -167,6 +176,7 @@ class LLMInference:
         precomputed_kv: Optional[BatchedKVInstance] = None,
         max_new_tokens: int = 512,
         return_kv: bool = False,
+        role: str | None = "user",
     ) -> Union[str, Tuple[str, Tuple[Tuple[torch.Tensor, ...], ...]]]:
         """
         使用已有的键值缓存进行解码
@@ -195,7 +205,7 @@ class LLMInference:
         
         # 编码查询文本
         query_inputs = tokenize_for_reuse(
-            self.tokenizer, [query_text], keep_bos=False, role="user", add_generation_prompt=True
+            self.tokenizer, [query_text], keep_bos=True, role=role, add_generation_prompt=True
         ).to(self.device)
 
         if past_key_values is not None:

@@ -206,6 +206,7 @@ def main():
             blend_special_ids = blend_special_ids[1:]
 
         sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=dataset.max_new_tokens)
+        sampling_params_max1 = SamplingParams(max_tokens=1)
 
         print_output(llm, warmup_prompt, sampling_params, "warmup")
         warmup_prompt = tokenizer.apply_chat_template(
@@ -225,17 +226,29 @@ def main():
             with record.record("extract"):
                 _ = llm.generate(
                     prompts=cache_prompts, 
-                    sampling_params=SamplingParams(max_tokens=1),
+                    sampling_params=sampling_params_max1,
                 )
             
             time.sleep(0.5) # let the cache stable
 
             # Generate the final output
             if timer.enable and 'max_new_tokens' in example:
-                sampling_params = SamplingParams(max_tokens=example['max_new_tokens'])
+                sampling_params = SamplingParams(max_tokens=example['max_new_tokens'], min_tokens=example['max_new_tokens'])
 
             full_prompt = system_ids + [ids for doc_ids in doc_ids_list for ids in doc_ids] + query_ids
-            with record.record("blend+generate"):
+
+            if timer.enable:
+                with record.record("blend"):
+                    _ = llm.generate(
+                        prompts={"prompt_token_ids": full_prompt}, 
+                        sampling_params=sampling_params_max1,
+                    )
+                with record.record("blend+generate"):
+                    output = llm.generate(
+                        prompts={"prompt_token_ids": full_prompt}, 
+                        sampling_params=sampling_params
+                    )
+            else:
                 output = llm.generate(
                     prompts={"prompt_token_ids": full_prompt}, 
                     sampling_params=sampling_params

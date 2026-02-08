@@ -146,7 +146,7 @@ class WikiMQADataset(AbstractMDQADataset):
 
 class MusiqueDataset(AbstractMDQADataset):
     def __init__(self, data_path: str, only_supporting: bool=False, enable_cot: bool=False) -> None:
-        self.data = datasets.load_dataset("json", data_files=data_path)['train']
+        self.data = datasets.load_dataset("json", data_files=data_path)['train'].shuffle(seed=42).select(range(200))
         # self.data = datasets.load_dataset(data_path)['train']
         print(f"Loading dataset from {data_path}...")
         self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
@@ -366,10 +366,18 @@ class LongAlpacaDataset(AbstractMDQADataset):
 
 _GSM8K_MATCHER = regex.compile(r"#### (-?[0-9.,]+)")
 class GSM8KDataset(AbstractMDQADataset):
-    def __init__(self) -> None:
+    def __init__(self, shot_num: int = 4) -> None:
         data = datasets.load_dataset('openai/gsm8k', 'main', split='test')
-        self.data = data.map(self.precess_sample, with_indices=True, batched=False, num_proc=32, remove_columns=data.column_names)
-        self.system_prompt = "You are a helpful assistant to answer math questions."
+        self.example_documents = []
+        for i in range(shot_num):
+            self.example_documents.append(data[i]['question'] + "\n\n" + data[i]['answer'])
+        self.data = data.select(range(shot_num, len(data))).map(self.precess_sample, 
+            fn_kwargs={'documents': self.example_documents},
+            with_indices=True, batched=False, num_proc=32, remove_columns=data.column_names
+        )
+        self.system_prompt = ("You are a helpful assistant to answer math questions. "
+            "You are given several examples, and you are asked to answer the question. "
+            "Please solve the question step-by-step and write the final answer after '#### '.\n\n")
         self.max_new_tokens: int = 512
     
     @staticmethod
@@ -382,13 +390,13 @@ class GSM8KDataset(AbstractMDQADataset):
         return 0.0
     
     @staticmethod
-    def precess_sample(sample: Dict[str, ...], indice: int) -> Dict[str, ...]:
-        query_prompt = "Answer the following question and write the final answer after '#### '.\n\n"
-        sentences = sample['question'].split('. ')
+    def precess_sample(sample: Dict[str, ...], indice: int, documents: List[str]) -> Dict[str, ...]:
+        query_prompt = ("Following the above examples. First solve the following question step-by-step,"
+"output your reasoning. Finally, write the final answer after '#### '.\n\n")
         return {
-            'qid': indice,
-            'question': query_prompt + sentences[-1],
-            'documents': ['. '.join(sentences[:-1])],
+            'qid': str(indice),
+            'question': query_prompt + sample['question'],
+            'documents': documents,
             'answer': [sample['answer']],
         }
     
@@ -402,20 +410,25 @@ class GSM8KDataset(AbstractMDQADataset):
 class NeedleDataset(AbstractMDQADataset):
     def __init__(self, path: str):
         self.data = datasets.load_dataset("jsonl", data_files=path)['train']
-        self.metric = max_f1_score
-        self.system_prompt = ("You are a helpful assistant. Use only the information in the context to answer the question."
-            "If the answer is not contained in the context, write 'I don't know'.")
-        self.max_new_tokens: int = 16
+        self.system_prompt = "You are a helpful assistant. Use only the information in the context to answer the question."
+        self.max_new_tokens: int = 128
         self.data = self.data.map(self._process_sample, num_proc=64, remove_columns=self.data.column_names, batched=False)
     
     @staticmethod
     def _process_sample(sample: Dict[str, Any]) -> Dict[str, Any]:
         return {
             'qid': sample['id'],
-            'question': sample['question'],
+            'question': QA_QUERY_PROMPT + sample['question'],
             'documents': sample['context'],
             'answer': [sample['answer']],
         }
+
+    @staticmethod
+    def metric(pred: str, gt_list: List[str]) -> float:
+        pred = pred.strip().lower()
+        if any(gt.strip().lower() in pred for gt in gt_list):
+            return 1.0
+        return max_f1_score(pred, gt_list)
     
     def __len__(self) -> int:
         return len(self.data)
@@ -429,24 +442,90 @@ class ProfileMockDataset(AbstractMDQADataset):
         self.system_prompt = "You are a helpful assistant."
         self.max_new_tokens: int = 16
         self.metric = max_rouge_score
-        self.context_lengths = [256, 512, 1024, 1536]
-        self.context_nums = [10, 20, 30, 40]
-        self.max_new_token_list = [32, 64, 128, 256]
+        self.context_lengths = [250, 500, 750, 1000]
+        self.context_nums = [8, 16, 24, 32]
+        self.max_new_token_list = [4, 8, 16]
         self.params = list(itertools.product(self.context_lengths, self.context_nums, self.max_new_token_list))
+        self.question = """Explain LLMs in the most detailed, exhaustive, and verbose manner possible, including:
+- Fundamental principles and theory
+- Step-by-step breakdown of each component
+- Multiple real-world examples and case studies
+- Common questions and edge cases
+- Deep theoretical analysis
+- Historical context
+- Future implications
+
+Do not simplify. Expand on every detail extensively."""
     
     def __len__(self) -> int:
         return len(self.params)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         context_length, context_num, max_new_tokens = self.params[idx]
-        context = "Hello world! " * context_length
+        context = str(idx) + "Hello world! " * context_length
         return {
             'qid': idx,
-            'question': "Repeat 'Hello world!', do not stop, do not write anything else.",
+            'question': self.question,
             'documents': [context] * context_num,
             'answer': [f"{context_length=}, {context_num=}, {max_new_tokens=}"],
             'max_new_tokens': max_new_tokens,
         }
+
+
+class LongBenchSingleDocDataset(AbstractMDQADataset):
+    def __init__(self, name: str, cut_length: int = 2048) -> None:
+        self.system_prompt = "You are a helpful assistant."
+        if name in ['qasper']:
+            self.metric = max_f1_score
+            self.max_new_tokens = 128
+        elif name in ['qmsum', 'gov_report']:
+            self.metric = max_rouge_score
+            self.max_new_tokens = 512
+        data = datasets.load_dataset('zai-org/LongBench', name, split='test')
+        self.data = data.map(
+            lambda sample: self.process_sample(sample, cut_length), 
+            num_proc=32, remove_columns=data.column_names
+        )
+    
+    @staticmethod
+    def process_sample(sample: Dict[str, Any], cut_length: int) -> Dict[str, Any]:
+        if sample['dataset'] == 'qasper':
+            query_prompt = """Answer the question directly based on the given passages. 
+Output a concise final answer. No explanation. No extra text.\n\nQuestion: """
+            question = query_prompt + sample['input']
+        elif sample['dataset'] == 'gov_report':
+            question = "Summarize the given government report."
+        elif sample['dataset'] == 'qmsum':
+            query_prompt = """Answer the question directly based on the given passages. 
+Be concise. Do not use markdown format. Answer in the size of one paragraph.\n\nQuestion: """
+            question = query_prompt + sample['input']
+        else:
+            raise ValueError(f"Unsupported dataset: {sample['dataset']}")
+        documents = []
+        last_document = ''
+        sep = '\n' if '\n' in sample['context'] else '. '
+        for line in sample['context'].split(sep):
+            if not line.strip():
+                continue
+            if len(last_document) + len(line) > cut_length:
+                documents.append(last_document + line)
+                last_document = ''
+            else:
+                last_document += line + sep
+        if last_document:
+            documents.append(last_document)
+        return {
+            'qid': sample['_id'],
+            'question': question,
+            'documents': documents,
+            'answer': sample['answers'],
+        }
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
 
 
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
@@ -483,5 +562,7 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         return NeedleDataset(path)
     elif name == "profile":
         return ProfileMockDataset()
+    elif name in ['qmsum', 'gov_report', 'qasper']:
+        return LongBenchSingleDocDataset(name)
     else:
         raise ValueError(f"Unsupported dataset name: {name}")

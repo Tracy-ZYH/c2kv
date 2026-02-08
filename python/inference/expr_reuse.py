@@ -67,6 +67,11 @@ def evaluate_model_on_dataset(
             with record.record("extract"):
                 context_cache = evaluator.get_prefill_kv_cache(example['documents'], False, 'user', args.compress)
 
+        if timer.enable:
+            context_cache.to("cpu")
+            with record.record("offload"):
+                context_cache.to(evaluator.device)
+
         with record.record("blend"):
             if args.recompute_type is not None:
                 system_cache = evaluator.selective_recompute(

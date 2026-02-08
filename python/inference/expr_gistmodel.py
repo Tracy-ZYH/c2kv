@@ -93,7 +93,7 @@ def evaluate_model_on_dataset(
         system_length = system_cache.get_seq_length()
 
         # Pre-compute context
-        documents = cut_documents(example['documents'], max_length=cut_length)
+        documents = cut_documents([''.join(example['documents'])], max_length=cut_length)
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
         model.model.config._attn_implementation = "flex_attention"
@@ -128,8 +128,16 @@ def evaluate_model_on_dataset(
         attention_mask = torch.ones_like(input_ids)
 
         # Generate text
-        if timer.enable and 'max_new_tokens' in example:
-            max_new_tokens = example['max_new_tokens']
+        if timer.enable:
+            if 'max_new_tokens' in example:
+                max_new_tokens = example['max_new_tokens']
+            cache_cpu = [(key.to(device="cpu"), value.to(device="cpu")) for key, value in context_cache]
+            with record.record('offload'):
+                for layer_i in range(len(cache_cpu)):
+                    k, v = cache_cpu[layer_i]
+                    cache_cpu[layer_i] = (k.to(device), v.to(device))
+            del cache_cpu
+
         model.model.config._attn_implementation = "flash_attention_2"
         with record.record("generate"):
             generated_outputs = model.generate(

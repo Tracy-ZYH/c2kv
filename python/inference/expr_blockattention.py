@@ -107,6 +107,12 @@ def block_generate(
     with record.record("blend"):
         if past_key_values is not None:
             past_key_values = merge_and_rotary_past_key_values(pkvs=past_key_values, block_lengths=block_lengths, rope_theta=model.config.rope_theta)
+    if record.enable:
+        past_key_values_cpu = [(k.to(device=torch.device('cpu')), v.to(device=torch.device('cpu'))) for k, v in past_key_values]
+        with record.record("offload"):
+            for layer_i in enumerate(len(past_key_values_cpu)):
+                key, value = past_key_values_cpu[layer_i]
+                past_key_values_cpu[layer_i] = (key.to(device=model.device), value.to(device=model.device))
     input_length = input_ids.size(-1)
     attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
     with record.record("generate"):
@@ -243,7 +249,7 @@ def main():
     # Load model and tokenizer
     print(f"Loading model from {args.model}")
     tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path="Qwen/Qwen3-4B-Instruct-2507",
+        pretrained_model_name_or_path=args.model,
         use_fast=False, local_files_only=True
     )
     tokenizer.pad_token_id = tokenizer.eos_token_id
