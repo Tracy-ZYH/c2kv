@@ -146,7 +146,7 @@ class WikiMQADataset(AbstractMDQADataset):
 
 class MusiqueDataset(AbstractMDQADataset):
     def __init__(self, data_path: str, only_supporting: bool=False, enable_cot: bool=False) -> None:
-        self.data = datasets.load_dataset("json", data_files=data_path)['train'].shuffle(seed=42).select(range(200))
+        self.data = datasets.load_dataset("json", data_files=data_path)['train']
         # self.data = datasets.load_dataset(data_path)['train']
         print(f"Loading dataset from {data_path}...")
         self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT

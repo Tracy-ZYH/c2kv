@@ -96,7 +96,7 @@ def evaluate_model_on_dataset(
         documents = cut_documents([''.join(example['documents'])], max_length=cut_length)
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
-        model.model.config._attn_implementation = "flex_attention"
+        model.model.config._attn_implementation = "sdpa" # sdpa or flex_attention
         with record.record("extract"):
             outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
@@ -230,6 +230,10 @@ def main():
                        help="Profile model")
     
     args = parser.parse_args()
+
+    if os.path.exists(args.output_file):
+        print(f"Output file {args.output_file} already exists, skipping")
+        return
 
     print(MODEL_GENERATE_API_WARNING_STRING)
 
