@@ -93,10 +93,10 @@ def evaluate_model_on_dataset(
         system_length = system_cache.get_seq_length()
 
         # Pre-compute context
-        documents = cut_documents([''.join(example['documents'])], max_length=cut_length)
+        documents = cut_documents(example['documents'], max_length=cut_length)
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
-        model.model.config._attn_implementation = "sdpa" # sdpa or flex_attention
+        model.model.config._attn_implementation = "flex_attention"
         with record.record("extract"):
             outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
