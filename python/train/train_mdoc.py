@@ -31,33 +31,31 @@ def main():
     with training_args.main_process_first(desc="Get dataset"):
         dataset_args = {
             'tokenizer': tokenizer, 'shuffle_seed': training_args.dataset_shuffle_seed,
-            'max_doc_length': 1536, 'max_doc_num': 10,
+            'max_doc_length': 1024, 'max_doc_num': 10, 'max_length': 512,
         }
         # load mdoc QA datasets
-        train_dataset = get_dataset('mdoc', "../datasets/hotpotqa_train.jsonl", **dataset_args)
-        eval_dataset = get_dataset('mdoc_eval', "../datasets/hotpotqa_train.jsonl", **dataset_args)
+        # train_dataset = get_dataset('mdoc', "../datasets/hotpotqa_train.jsonl", **dataset_args)
+        # eval_dataset = get_dataset('mdoc_eval', "../datasets/hotpotqa_train.jsonl", **dataset_args)
         # musique_train = get_dataset('mdoc', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
         # musique_eval = get_dataset('mdoc_eval', "../datasets/musique_ans_v1.0_train.jsonl", **dataset_args)
+        # wikimqa_train = get_dataset('mdoc', "wikimqa", **dataset_args)
+        # wikimqa_eval = get_dataset('mdoc_eval', "wikimqa", **dataset_args)
+        hotpotqa_path = os.path.join(training_args.train_data + "_cleaned", "hotpotqa_train_cleaned")
+        wikimqa_path = os.path.join(training_args.train_data + "_cleaned", "wikimqa_train_cleaned")
+        longmagpie_path = os.path.join(training_args.train_data, "longmagpie_1024")
+        train_dataset = get_dataset('mdoc', hotpotqa_path, **dataset_args)
+        eval_dataset = get_dataset('mdoc_eval', hotpotqa_path, **dataset_args)
+        wikimqa_train = get_dataset('mdoc', wikimqa_path, **dataset_args)
+        wikimqa_eval = get_dataset('mdoc_eval', wikimqa_path, **dataset_args)
         train_dataset.data = train_dataset.data.select(range(60000))
+        wikimqa_train.data = wikimqa_train.data.select(range(50000))
         # load longmagpie QA dataset
-        longmagpie_path = os.path.join(training_args.train_data, "longmagpie_processed")
         longmagpie_train = get_dataset('mdoc', longmagpie_path, **dataset_args)
         # longmagpie_eval = get_dataset('mdoc_eval', longmagpie_path, **dataset_args)
-        longmagpie_train.data = longmagpie_train.data.select(range(60000))
-        # dataset_args.pop('max_doc_length')
-        # dataset_args.pop('max_doc_num')
-        # load slimpajamas pretrain dataset
-        # dataset_args.update({
-            # 'max_length': train_dataset.max_length + train_dataset.max_doc_length * train_dataset.max_doc_num, 
-            # 'min_length': train_dataset.max_doc_length * 2,
-            # 'num_samples': 10000, 'streaming': False, 'cut_long_seq': True,
-        # })
-        # slimpajamas_path = os.path.join(training_args.train_data, "slimpajamas_subset")
-        # slimpajamas_train = get_dataset('pretrain', slimpajamas_path, **dataset_args).to_mdoc_format2(tokenizer, train_dataset)
+        longmagpie_train.data = longmagpie_train.data.select(range(40000))
         # print the lengths of all training datasets
-        # logger.info(f"Train dataset lengths: musique: {len(musique_train)}, longmagpie: {len(longmagpie_train)}, hotpotqa: {len(train_dataset)}")
-        train_dataset.merge([longmagpie_train])
-        # eval_dataset.merge([musique_eval], method='concat')
+        train_dataset.merge([longmagpie_train, wikimqa_train])
+        eval_dataset.merge([wikimqa_eval], method='concat')
 
     trainer = GistMultiDocTrainer(
         model=model,

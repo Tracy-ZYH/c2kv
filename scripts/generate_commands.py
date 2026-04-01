@@ -48,7 +48,7 @@ def main():
             model = checkpoint.split('/')[-3]
             for dataset in datasets:
                 cmd = [
-                    'python', 'python/inference/expr_gistmodel.py',
+                    'python', 'python/inference/expr_c2kv.py',
                     '--model', checkpoint,
                     '--output_file', f'results/gist/{model}/{method}/{dataset}/{os.path.basename(checkpoint)}.jsonl',
                     '--dataset', dataset,
