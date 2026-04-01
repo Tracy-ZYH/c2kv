@@ -1,5 +1,6 @@
 import torch
 import math
+import random
 from dataclasses import dataclass
 from typing import Tuple, Optional, Callable, List, Union
 from transformers import PretrainedConfig
@@ -43,7 +44,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
         def _prepare_gist_input_interleave(
-            input_ids: torch.LongTensor, attention_mask: torch.Tensor,
+            input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
         ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
             for mask in attention_mask:
                 if mask.any(): # only check non-empty sequences
@@ -78,7 +79,6 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                     sink_end = min(seqlen, ratio)
                     new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
                     # attention sink at end of chunk
-                    # begin = max(0, (j - 1) * ratio) # overlap with previous gist token
                     begin = j * ratio
                     end = min((j + 1) * ratio, original_seqlen)
                     padded_j = j + gist_pad
@@ -92,7 +92,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     elif gist_type.startswith('anchor-'):
         ratio = int(gist_type.split("-")[1])
         def _prepare_gist_input_anchor(
-            input_ids: torch.LongTensor, attention_mask: torch.Tensor,
+            input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
         ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
             for mask in attention_mask:
                 if mask.any(): # only check non-empty sequences
@@ -127,7 +127,6 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                     sink_end = min(seqlen, ratio)
                     new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
                     # attention sink at end of chunk
-                    # begin = max(0, (j - 1) * ratio) # overlap with previous gist token
                     begin = j * ratio
                     end = min((j + 1) * ratio, original_seqlen)
                     group_length = end - begin
@@ -143,6 +142,54 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
             return new_attn_mask, gist_mask, position_ids
         return _prepare_gist_input_anchor
+    elif gist_type == 'dynamic-interleave':
+        assert gist_residual_type is None or gist_residual_type == "none", "gist_residual_type must be none"
+        def _prepare_gist_input_dynamic_interleave(
+            input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
+        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+            if "ratio" in kwargs:
+                ratio = kwargs["ratio"]
+            else:
+                ratio = random.choice([4, 8, 16])
+            for mask in attention_mask:
+                if mask.any(): # only check non-empty sequences
+                    assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
+            batch_size, max_seqlen = input_ids.shape
+            max_gist_num = math.ceil(max_seqlen / ratio)
+            new_attn_mask = torch.zeros( # (batch_size, query_len, kv_length)
+                (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num), 
+                dtype=torch.bool, device=input_ids.device
+            )
+            position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
+            gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
+            gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
+            for i, seqlen in enumerate(attention_mask.sum(dim=1).tolist()):
+                if seqlen == 0:
+                    continue
+                original_seqlen = seqlen
+                padlen = 0 if padding_check_idx == 0 else max_seqlen - seqlen
+                new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
+                    torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
+                )
+                gist_num = math.ceil(seqlen / ratio)
+                gist_pad = 0 if padding_check_idx == 0 else max_gist_num - gist_num
+                gist_mask[i, gist_pad:gist_pad + gist_num] = 1
+                for j in range(gist_num):
+                    # attention sink at beginning of chunk
+                    sink_end = min(seqlen, ratio)
+                    new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
+                    # attention sink at end of chunk
+                    begin = j * ratio
+                    end = min((j + 1) * ratio, original_seqlen)
+                    padded_j = j + gist_pad
+                    gist_position_ids[i, padded_j] = end - 1
+                    new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
+                    new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
+            new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
+            position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
+            return new_attn_mask, gist_mask, position_ids
+        return _prepare_gist_input_dynamic_interleave
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
 

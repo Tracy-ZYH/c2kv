@@ -532,7 +532,9 @@ class LlamaModel(LlamaPreTrainedModel):
         attention_mask: torch.BoolTensor,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Tuple[BaseModelOutputWithPast, torch.Tensor, torch.Tensor]:
-        attention_mask, gist_mask, position_ids = self.prepare_gist_input(input_ids, attention_mask)
+        attention_mask, gist_mask, position_ids = self.prepare_gist_input(
+            input_ids, attention_mask, **kwargs
+        )
         gist_embed = self.gist_embed_tokens(input_ids.new_zeros((1, 1)).expand(gist_mask.shape))
         inputs_embeds = self.embed_tokens(input_ids)
         inputs_embeds = torch.cat([inputs_embeds, gist_embed], dim=1)
