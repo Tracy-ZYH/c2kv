@@ -128,6 +128,7 @@ class LLMInference:
         keep_bos: bool,
         role: str | None = None,
         compress_method: str | None = None,
+        repeat_token_num: int | None = None,
     ) -> BatchedKVInstance:
         """
         获取一批文本prefill后的键值缓存
@@ -142,9 +143,17 @@ class LLMInference:
         enable_compress = compress_method is not None
 
         inputs = tokenize_for_reuse(self.tokenizer, texts, keep_bos=keep_bos, role=role).to(self.device)
+        raw_inputs = None
+        if repeat_token_num and inputs['input_ids'].shape[1] > repeat_token_num:
+            raw_inputs = inputs
+            inputs["input_ids"] = torch.cat([inputs["input_ids"][:, :repeat_token_num], inputs["input_ids"]], dim=1)
+            inputs["attention_mask"] = torch.cat([inputs["attention_mask"][:, :repeat_token_num], inputs["attention_mask"]], dim=1)
         with QueryStorage(self.model, enabled=enable_compress) as query_storage:
             past_key_values = prefill_kv_cache(self.model, inputs)
             queries = query_storage.get_all_queries()
+        if raw_inputs is not None:
+            inputs = raw_inputs
+            past_key_values = [tuple(kv[:, :, repeat_token_num:] for kv in layer) for layer in past_key_values]
 
         seq_len = inputs.attention_mask.sum(dim=1).tolist()
         input_ids = [ids[:seql] for ids, seql in zip(inputs.input_ids, seq_len)]

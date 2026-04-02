@@ -41,15 +41,18 @@ def cut_documents(documents: List[str], max_length: int | None) -> List[str]:
 
 @torch.inference_mode()
 def evaluate_model_on_dataset(
-    model_name: str,
+    args: argparse.Namespace,
     dataset: AbstractMDQADataset,
-    max_examples: Optional[int] = None,
-    output_file: Optional[str] = None,
-    cut_length: Optional[int] = None,
-    profile: bool = False,
 ) -> Dict[str, float]:
     """Evaluate a model on a MDQA dataset"""
     
+    model_name = args.model
+    max_examples = args.max_examples
+    output_file = args.output_file
+    cut_length = args.cut_length
+    profile = args.profile
+    override_ratio = args.override_ratio
+
     # Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -97,8 +100,11 @@ def evaluate_model_on_dataset(
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
         model.model.config._attn_implementation = "flex_attention"
+        gist_extra_kwargs = {}
+        if getattr(model.config, 'gist_type', None) == 'dynamic-interleave' and override_ratio is not None:
+            gist_extra_kwargs['ratio'] = override_ratio
         with record.record("extract"):
-            outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
+            outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs, **gist_extra_kwargs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
         with record.record("blend"):
             context_cache, _ = blend_gist_key_values(
@@ -228,6 +234,8 @@ def main():
                        help="Cut documents to specified length")
     parser.add_argument("--profile", action="store_true", default=False,
                        help="Profile model")
+    parser.add_argument("--override-ratio", type=int, default=None,
+                       help="Override gist ratio for dynamic-interleave models")
     
     args = parser.parse_args()
 
@@ -248,14 +256,7 @@ def main():
     print(f"Loaded {len(dataset)} examples from {args.dataset} dataset")
     
     # Evaluate model
-    results = evaluate_model_on_dataset(
-        model_name=args.model,
-        dataset=dataset,
-        max_examples=args.max_examples,
-        output_file=args.output_file,
-        cut_length=args.cut_length,
-        profile=args.profile,
-    )
+    results = evaluate_model_on_dataset(args, dataset)
     
     print(f"\nEvaluation Results:")
     print(f"Model: {args.model}")
