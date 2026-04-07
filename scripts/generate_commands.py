@@ -26,8 +26,9 @@ def main():
     parser.add_argument('--add_ckpt', action='append', required=True, dest='checkpoints_roots', help='Additional checkpoint directory to evaluate')
     parser.add_argument('--datasets', default='wikimqa,musique,hotpotqa,multinews,samsum', help='Dataset names separated by comma (e.g., A,B,C,D)')
     parser.add_argument('--max_examples', type=int, default=None, help='Max number of examples to test.')
-    parser.add_argument('--output_file', required=True, help='Output TXT file to save commands')
-    args = parser.parse_args()
+    parser.add_argument('--output_file', required=True, help='Output file to save commands')
+    parser.add_argument('--overwrite', action='store_true', default=False, help='Overwrite the output file instead of appending')
+    args, extra_args = parser.parse_known_args()
 
     # 解析多个dataset
     datasets = [ds.strip() for ds in args.datasets.split(',')]
@@ -40,9 +41,12 @@ def main():
     
     print(f"Found {len(checkpoints)} checkpoints to evaluate")
     print(f"Will evaluate on {len(datasets)} datasets: {datasets}")
+    if extra_args:
+        print(f"Extra arguments to append: {' '.join(extra_args)}")
     
     # 生成命令并写入文件
-    with open(args.output_file, 'a') as f:
+    file_mode = 'w' if args.overwrite else 'a'
+    with open(args.output_file, file_mode) as f:
         for checkpoint in checkpoints:
             method = checkpoint.split('/')[-2]
             model = checkpoint.split('/')[-3]
@@ -55,9 +59,11 @@ def main():
                 ]
                 if args.max_examples:
                     cmd.extend(['--max_examples', str(args.max_examples)])
+                if extra_args:
+                    cmd.extend(extra_args)
                 f.write(' '.join(cmd) + '\n')
     
-    print(f"Commands saved to {args.output_file}")
+    print(f"Commands {'written' if args.overwrite else 'appended'} to {args.output_file}")
     print(f"Total commands generated: {len(checkpoints) * len(datasets)}")
 
 if __name__ == '__main__':
