@@ -15,10 +15,14 @@ except ImportError:
 def max_f1_score(pred: str, gt_list: List[str]) -> float:
     return max([qa_f1_score(pred, gt) for gt in gt_list])
 
+def max_f1_zh_score(pred: str, gt_list: List[str]) -> float:
+    """Chinese F1 score using qa_f1_zh_score."""
+    return max([qa_f1_zh_score(pred, gt) for gt in gt_list])
+
 def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
     """
     从带有推理过程的预测字符串中提取最终答案，并计算与基准答案列表的最大F1分数。
-    
+
     Args:
         pred (str): LLM的完整输出，应包含 "[Reasoning]... [Answer]..." 格式。
         gt_list (List[str]): 基准答案（Ground Truth）的列表。
@@ -41,6 +45,10 @@ def max_f1_score_with_reasoning(pred: str, gt_list: List[str]) -> float:
 
 def max_rouge_score(pred: str, gt_list: List[str]) -> float:
     return max([rouge_score(pred, gt) for gt in gt_list])
+
+def max_rouge_zh_score(pred: str, gt_list: List[str]) -> float:
+    """Chinese ROUGE score using rouge_zh_score."""
+    return max([rouge_zh_score(pred, gt) for gt in gt_list])
     
 
 QA_SYSTEM_PROMPT: str = ("You will be asked a question after reading several passages. "
@@ -390,7 +398,7 @@ class GSM8KDataset(AbstractMDQADataset):
         return 0.0
     
     @staticmethod
-    def precess_sample(sample: Dict[str, ...], indice: int, documents: List[str]) -> Dict[str, ...]:
+    def precess_sample(sample: Dict[str, Any], indice: int, documents: List[str]) -> Dict[str, Any]:
         query_prompt = ("Following the above examples. First solve the following question step-by-step,"
 "output your reasoning. Finally, write the final answer after '#### '.\n\n")
         return {
@@ -472,58 +480,214 @@ Do not simplify. Expand on every detail extensively."""
         }
 
 
-class LongBenchSingleDocDataset(AbstractMDQADataset):
-    def __init__(self, name: str, cut_length: int = 2048) -> None:
+class LongBenchDataset(AbstractMDQADataset):
+    """Unified dataset class for LongBench datasets supporting both single and multiple context formats."""
+
+    def __init__(self, name: str, cut_length: int = 4096) -> None:
+        self.name = name
+        self.cut_length = cut_length
         self.system_prompt = "You are a helpful assistant."
-        if name in ['qasper']:
+
+        # Configure dataset-specific settings
+        self._configure_dataset(name)
+
+        # Load and process data
+        print(f"Loading dataset from zai-org/LongBench {name}...")
+        data = datasets.load_dataset('zai-org/LongBench', name, split='test')
+        self.data = data.map(
+            lambda sample: self.process_sample(sample, name, cut_length),
+            num_proc=32, remove_columns=data.column_names
+        )
+        print(f"Done loading {name}")
+
+    def _configure_dataset(self, name: str) -> None:
+        """Configure metric, max_new_tokens, and system_prompt based on dataset type."""
+        # QA datasets - English
+        if name in ['qasper', 'multifieldqa_en', 'narrativeqa', 'triviaqa']:
             self.metric = max_f1_score
-            self.max_new_tokens = 128
+            self.max_new_tokens = 256
+        # QA datasets - Chinese
+        elif name in ['dureader', 'multifieldqa_zh']:
+            self.metric = max_f1_zh_score
+            self.max_new_tokens = 256
+        # Summarization datasets - English
         elif name in ['qmsum', 'gov_report']:
             self.metric = max_rouge_score
             self.max_new_tokens = 512
-        data = datasets.load_dataset('zai-org/LongBench', name, split='test')
-        self.data = data.map(
-            lambda sample: self.process_sample(sample, cut_length), 
-            num_proc=32, remove_columns=data.column_names
-        )
-    
-    @staticmethod
-    def process_sample(sample: Dict[str, Any], cut_length: int) -> Dict[str, Any]:
-        if sample['dataset'] == 'qasper':
-            query_prompt = """Answer the question directly based on the given passages. 
-Output a concise final answer. No explanation. No extra text.\n\nQuestion: """
-            question = query_prompt + sample['input']
-        elif sample['dataset'] == 'gov_report':
-            question = "Summarize the given government report."
-        elif sample['dataset'] == 'qmsum':
-            query_prompt = """Answer the question directly based on the given passages. 
-Be concise. Do not use markdown format. Answer in the size of one paragraph.\n\nQuestion: """
-            question = query_prompt + sample['input']
+        # Summarization datasets - Chinese
+        elif name == 'vcsum':
+            self.metric = max_rouge_zh_score
+            self.max_new_tokens = 512
+        # Classification datasets
+        elif name in ['lsht', 'trec']:
+            self.metric = self._accuracy_metric
+            self.max_new_tokens = 32
+        # Code understanding datasets
+        elif name in ['lcc', 'repobench-p']:
+            self.metric = max_f1_score
+            self.max_new_tokens = 256
+        # Passage retrieval datasets
+        elif name in ['passage_count', 'passage_retrieval_en', 'passage_retrieval_zh']:
+            self.metric = self._exact_match_metric
+            self.max_new_tokens = 32
         else:
-            raise ValueError(f"Unsupported dataset: {sample['dataset']}")
-        documents = []
-        last_document = ''
-        sep = '\n' if '\n' in sample['context'] else '. '
-        for line in sample['context'].split(sep):
-            if not line.strip():
-                continue
-            if len(last_document) + len(line) > cut_length:
-                documents.append(last_document + line)
-                last_document = ''
-            else:
-                last_document += line + sep
-        if last_document:
-            documents.append(last_document)
+            raise ValueError(f"Unsupported dataset: {name}")
+
+    @staticmethod
+    def _accuracy_metric(pred: str, gt_list: List[str]) -> float:
+        """Exact match accuracy for classification tasks."""
+        pred = pred.strip()
+        return 1.0 if any(pred == gt.strip() for gt in gt_list) else 0.0
+
+    @staticmethod
+    def _exact_match_metric(pred: str, gt_list: List[str]) -> float:
+        """Exact match for passage retrieval tasks."""
+        pred = pred.strip()
+        for gt in gt_list:
+            if gt.strip() in pred or pred in gt.strip():
+                return 1.0
+        return 0.0
+
+    @staticmethod
+    def process_sample(sample: Dict[str, Any], name: str, cut_length: int) -> Dict[str, Any]:
+        """Process a sample based on dataset type."""
+        dataset_type = sample['dataset']
+
+        # QA datasets
+        if dataset_type == 'qasper':
+            question = """Answer the question directly based on the given passages.
+Output only the answer. No explanation. No extra text.\n\nQuestion: """ + sample['input']
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'dureader':
+            question = "请直接回答问题，不要有任何解释或额外文字。\n\n问题：" + sample['input']
+            # Split by article markers
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['文章'], cut_length)
+
+        elif dataset_type == 'multifieldqa_en':
+            question = "Answer the question directly. Output only the answer with no explanation or extra text.\n\nQuestion: " + sample['input']
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'multifieldqa_zh':
+            question = "请直接回答问题，只输出答案，不要有任何解释或额外文字。\n\n问题：" + sample['input']
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'narrativeqa':
+            question = "Answer the question directly. Output only the answer with no explanation or extra text.\n\nQuestion: " + sample['input']
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'triviaqa':
+            question = "Answer the question directly. Output only the answer with no explanation or extra text.\n\nQuestion: " + sample['input']
+            # Context has "Passage:" markers
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['Passage:'], cut_length)
+
+        # Summarization datasets
+        elif dataset_type == 'gov_report':
+            question = "Summarize the given government report. Output only the summary with no extra text or preamble."
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'qmsum':
+            question = """Answer the question based on the given passages.
+Output only the answer in one paragraph. No markdown format. No explanation or extra text.\n\nQuestion: """ + sample['input']
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'vcsum':
+            question = "请总结以上对话，只输出摘要内容，不要有任何额外文字或前言。"
+            # Split by speaker markers
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['讲者'], cut_length)
+
+        # Classification datasets
+        elif dataset_type == 'lsht':
+            question = sample['input'] + "\n\n请从以下类别中选择一个最合适的，只输出类别名称，不要有任何解释或额外文字：\n" + "、".join(sample['all_classes'])
+            # Context contains example news articles
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['新闻内容：'], cut_length)
+
+        elif dataset_type == 'trec':
+            question = sample['input'] + "\n\nCategories: " + ", ".join(sample['all_classes']) + "\n\nChoose the most appropriate category. Output only the category name with no explanation or extra text."
+            # Context contains example questions
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['Question:'], cut_length)
+
+        # Code understanding datasets
+        elif dataset_type == 'lcc':
+            question = ("Complete the following code by finding the next line. Output only the code line with no explanation or extra text.\n\n" + sample['input']) if sample['input'] else "Find the missing line in the code. Output only the code line."
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'repobench-p':
+            question = "Based on the code context, complete the following code snippet. Output only the code with no explanation or extra text.\n\n" + sample['input']
+            documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        # Passage retrieval datasets
+        elif dataset_type == 'passage_count':
+            question = "How many paragraphs are there in the following text? Output only the number with no explanation or extra text."
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['Paragraph'], cut_length, keep_marker=True)
+
+        elif dataset_type == 'passage_retrieval_en':
+            question = "Which paragraph contains information about: " + sample['input'] + "\n\nOutput only the paragraph number (e.g., 'Paragraph 15') with no explanation or extra text."
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['Paragraph'], cut_length, keep_marker=True)
+
+        elif dataset_type == 'passage_retrieval_zh':
+            question = "哪一段包含以下信息：" + sample['input'] + "\n\n只输出段落编号（例如：'段落15'），不要有任何解释或额外文字。"
+            documents = LongBenchDataset._split_by_markers(sample['context'], ['Paragraph'], cut_length, keep_marker=True)
+
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_type}")
+
         return {
             'qid': sample['_id'],
             'question': question,
             'documents': documents,
-            'answer': sample['answers'],
+            'answer': sample['answers'] if isinstance(sample['answers'], list) else [sample['answers']],
         }
-    
+
+    @staticmethod
+    def _split_context(context: str, cut_length: int) -> List[str]:
+        """Split context into documents by cut_length."""
+        documents = []
+        last_document = ''
+        sep = '\n' if '\n' in context else '. '
+
+        for line in context.split(sep):
+            if not line.strip():
+                continue
+            if len(last_document) + len(line) > cut_length:
+                if last_document:
+                    documents.append(last_document)
+                last_document = line + sep
+            else:
+                last_document += line + sep
+
+        if last_document:
+            documents.append(last_document)
+
+        return documents if documents else [context]
+
+    @staticmethod
+    def _split_by_markers(context: str, markers: List[str], cut_length: int, keep_marker: bool = False) -> List[str]:
+        """Split context by specific markers (e.g., 'Paragraph', '文章')."""
+        documents = []
+
+        # Try to split by markers
+        for marker in markers:
+            if marker in context:
+                parts = context.split(marker)
+                for i, part in enumerate(parts):
+                    if i == 0 and not part.strip():
+                        continue
+                    doc = (marker + part) if keep_marker and i > 0 else part
+                    if doc.strip():
+                        # Further split if too long
+                        if len(doc) > cut_length * 2:
+                            documents.extend(LongBenchDataset._split_context(doc, cut_length))
+                        else:
+                            documents.append(doc)
+                return documents
+
+        # Fallback to regular splitting if no markers found
+        return LongBenchDataset._split_context(context, cut_length)
+
     def __len__(self) -> int:
         return len(self.data)
-    
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.data[idx]
 
@@ -562,7 +726,15 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         return NeedleDataset(path)
     elif name == "profile":
         return ProfileMockDataset()
-    elif name in ['qmsum', 'gov_report', 'qasper']:
-        return LongBenchSingleDocDataset(name)
+    # LongBench datasets (original 3 + new 13)
+    elif name in [
+        'qmsum', 'gov_report', 'qasper',  # Original 3
+        'dureader', 'multifieldqa_en', 'multifieldqa_zh', 'narrativeqa', 'triviaqa',  # QA (5)
+        'lsht', 'trec',  # Classification (2)
+        'lcc', 'repobench-p',  # Code understanding (2)
+        'passage_count', 'passage_retrieval_en', 'passage_retrieval_zh',  # Passage retrieval (3)
+        'vcsum'  # Summarization (1)
+    ]:
+        return LongBenchDataset(name, kwargs.get('cut_length', 8192))
     else:
         raise ValueError(f"Unsupported dataset name: {name}")
