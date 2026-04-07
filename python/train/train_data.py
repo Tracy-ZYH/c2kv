@@ -364,6 +364,146 @@ class SFTDataset(GistDataset):
         return outputs
 
 
+def _is_valid_tulu_sample(sample: Dict[str, Any]) -> bool:
+    """Check if a tulu sample is valid for processing."""
+    messages = sample.get('messages', [])
+    if not messages:
+        return False
+
+    # Filter out system messages
+    messages = [msg for msg in messages if msg.get('role') != 'system']
+
+    if len(messages) < 2:
+        return False
+
+    user_messages = [msg for msg in messages if msg.get('role') == 'user']
+    assistant_messages = [msg for msg in messages if msg.get('role') == 'assistant']
+
+    # Single-turn: check if user message has double newlines
+    if len(user_messages) == 1 and len(assistant_messages) == 1:
+        user_content = user_messages[0].get('content', '')
+        return '\n\n' in user_content
+
+    # For multi-turn, we require at least 2 messages and total content length >= 8192 to ensure enough context
+    if sum(map(lambda msg: len(msg.get('content', '')), messages)) < 8192:
+        return False
+
+    # Multi-turn: valid if at least 2 messages
+    return len(messages) >= 2
+
+
+def _split_context_messages(messages: List[Dict[str, str]], max_chars: int = 8192) -> List[str]:
+    """
+    Split context messages into documents, keeping messages intact.
+    Each document is at most max_chars characters.
+    """
+    documents = []
+    current_doc = []
+    current_length = 0
+
+    for msg in messages:
+        formatted = msg['content']
+        msg_length = len(formatted)
+
+        # If single message exceeds max_chars, it becomes its own document(s)
+        if msg_length > max_chars:
+            if current_doc:
+                documents.append('\n\n'.join(current_doc))
+                current_doc = []
+                current_length = 0
+            # Split long message into chunks
+            for i in range(0, msg_length, max_chars):
+                documents.append(formatted[i:i+max_chars])
+        elif current_length + msg_length + 2 > max_chars:  # +2 for \n\n separator
+            # Current doc is full, start new one
+            if current_doc:
+                documents.append('\n\n'.join(current_doc))
+            current_doc = [formatted]
+            current_length = msg_length
+        else:
+            # Add to current doc
+            current_doc.append(formatted)
+            current_length += msg_length + 2  # +2 for \n\n separator
+
+    # Add remaining
+    if current_doc:
+        documents.append('\n\n'.join(current_doc))
+
+    return documents
+
+
+def _process_single_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Process single-turn conversation from tulu dataset."""
+    user_msg = next(msg['content'] for msg in messages if msg['role'] == 'user')
+    assistant_msg = next(msg['content'] for msg in messages if msg['role'] == 'assistant')
+
+    # Split by double newlines
+    paragraphs = user_msg.split('\n\n')
+
+    # Last paragraph is question, rest are context documents
+    question = paragraphs[-1].strip()
+    documents = [p.strip() for p in paragraphs[:-1] if p.strip()]
+
+    return {
+        'documents': documents,
+        'question': question,
+        'answer': [assistant_msg]
+    }
+
+
+def _process_multi_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Process multi-turn conversation from tulu dataset."""
+    # Last turn is Q&A
+    # Find last user and assistant messages
+    last_user_idx = None
+    last_assistant_idx = None
+
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]['role'] == 'user' and last_user_idx is None:
+            last_user_idx = i
+        if messages[i]['role'] == 'assistant' and last_assistant_idx is None:
+            last_assistant_idx = i
+        if last_user_idx is not None and last_assistant_idx is not None:
+            break
+
+    question = messages[last_user_idx]['content']
+    answer = messages[last_assistant_idx]['content']
+
+    # Previous turns become context (everything before the last Q&A pair)
+    last_qa_start = min(last_user_idx, last_assistant_idx)
+    context_messages = messages[:last_qa_start] if last_qa_start > 0 else []
+
+    # Convert context messages to documents, splitting by 8192 chars
+    documents = _split_context_messages(context_messages) if context_messages else []
+
+    return {
+        'documents': documents,
+        'question': question,
+        'answer': [answer]
+    }
+
+
+def extract_tulu_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract documents, question, and answer from tulu-3-sft-mixture format.
+    """
+    messages = sample['messages']
+
+    # Filter out system messages
+    messages = [msg for msg in messages if msg['role'] != 'system']
+
+    # Determine if single-turn or multi-turn
+    user_messages = [msg for msg in messages if msg['role'] == 'user']
+    assistant_messages = [msg for msg in messages if msg['role'] == 'assistant']
+
+    if len(user_messages) == 1 and len(assistant_messages) == 1:
+        # Single-turn conversation
+        return _process_single_turn(messages)
+    else:
+        # Multi-turn conversation
+        return _process_multi_turn(messages)
+
+
 class MultiDocDataset(GistDataset):
     def __init__(
         self,
@@ -392,6 +532,13 @@ class MultiDocDataset(GistDataset):
         elif "longmagpie" in path or "longalpaca" in path:
             data = datasets.load_from_disk(path)
             extract_documents = None
+        elif "tulu" in path:
+            data = datasets.load_dataset(path, split="train")
+            # Pre-filter invalid samples
+            logger.info("Filtering tulu dataset samples...")
+            data = data.filter(_is_valid_tulu_sample, num_proc=32)
+            logger.info(f"Filtered dataset size: {len(data)}")
+            extract_documents = extract_tulu_documents
         else:
             raise NotImplementedError(f"Unsupported dataset {path}")
         if num_samples is None:
