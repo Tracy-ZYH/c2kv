@@ -733,6 +733,8 @@ class LongBenchDataset(AbstractMDQADataset):
         """Process a sample based on dataset type."""
         dataset_type = sample['dataset']
 
+        QA_QUERY_PROMPT_ZH = "请直接回答问题，只输出答案，不要有任何解释或额外文字。\n例子：问题：巴黎是哪个国家的首都？法国。\n\n问题："
+
         # QA datasets
         if dataset_type == 'qasper':
             question = """Answer the question directly based on the given passages.
@@ -740,24 +742,24 @@ Output only the answer. No explanation. No extra text.\n\nQuestion: """ + sample
             documents = LongBenchDataset._split_context(sample['context'], cut_length)
 
         elif dataset_type == 'dureader':
-            question = "请直接回答问题，不要有任何解释或额外文字。\n\n问题：" + sample['input']
+            question = QA_QUERY_PROMPT_ZH + sample['input']
             # Split by article markers
             documents = LongBenchDataset._split_by_markers(sample['context'], ['文章'], cut_length)
 
         elif dataset_type == 'multifieldqa_en':
-            question = "Answer the question directly. Output only the answer with no explanation or extra text.\n\nQuestion: " + sample['input']
+            question = QA_QUERY_PROMPT + sample['input']
             documents = LongBenchDataset._split_context(sample['context'], cut_length)
 
         elif dataset_type == 'multifieldqa_zh':
-            question = "请直接回答问题，只输出答案，不要有任何解释或额外文字。\n\n问题：" + sample['input']
+            question = QA_QUERY_PROMPT_ZH + sample['input']
             documents = LongBenchDataset._split_context(sample['context'], cut_length)
 
         elif dataset_type == 'narrativeqa':
-            question = "Answer the question directly. Output only the answer with no explanation or extra text.\n\nQuestion: " + sample['input']
+            question = QA_QUERY_PROMPT + sample['input']
             documents = LongBenchDataset._split_context(sample['context'], cut_length)
 
         elif dataset_type == 'triviaqa':
-            question = "Answer the question directly. Output only the answer with no explanation or extra text.\n\nQuestion: " + sample['input']
+            question = QA_QUERY_PROMPT + sample['input']
             # Context has "Passage:" markers
             documents = LongBenchDataset._split_by_markers(sample['context'], ['Passage:'], cut_length)
 
@@ -909,7 +911,7 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
     elif name == "ruler":
         if path is None:
             raise ValueError("RULER dataset requires a path to the JSONL file")
-        chunk_size = kwargs.get('chunk_size', 8192)
+        chunk_size = kwargs.get('chunk_size', 4096)
         return RULERDataset(path, chunk_size=chunk_size)
     # LongBench datasets (original 3 + new 13)
     elif name in [
@@ -920,6 +922,6 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         'passage_count', 'passage_retrieval_en', 'passage_retrieval_zh',  # Passage retrieval (3)
         'vcsum'  # Summarization (1)
     ]:
-        return LongBenchDataset(name, kwargs.get('cut_length', 8192))
+        return LongBenchDataset(name, kwargs.get('cut_length', 4096))
     else:
         raise ValueError(f"Unsupported dataset name: {name}")
