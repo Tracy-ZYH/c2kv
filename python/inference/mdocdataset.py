@@ -445,6 +445,186 @@ class NeedleDataset(AbstractMDQADataset):
         return self.data[idx]
 
 
+class RULERDataset(AbstractMDQADataset):
+    """
+    NVIDIA RULER benchmark dataset adapter.
+    Supports NIAH, variable tracking, common words extraction, and QA tasks.
+    Splits input into system prompt, context chunks, and question for KV concatenation.
+    """
+
+    def __init__(self, path: str, chunk_size: int = 8192):
+        """
+        Args:
+            path: Path to RULER JSONL file
+            chunk_size: Maximum characters per context chunk for KV concatenation
+        """
+        self.data = datasets.load_dataset("json", data_files=path)['train']
+        self.chunk_size = chunk_size
+        self.system_prompt = None  # Will be set per-example based on task type
+        self.max_new_tokens = 128  # Default, can be overridden per task
+        print(f"Loading RULER dataset from {path}...")
+        self.data = self.data.map(
+            self._process_sample,
+            num_proc=8,
+            remove_columns=self.data.column_names,
+            batched=False
+        )
+        print(f"Done loading RULER dataset with {len(self.data)} examples")
+
+    @staticmethod
+    def _detect_task_type(input_text: str) -> str:
+        """Detect RULER task type from input text."""
+        if "special magic" in input_text.lower() or "needle" in input_text.lower():
+            return "niah"
+        elif "variable assignment" in input_text.lower() or "track the chain" in input_text.lower():
+            return "variable_tracking"
+        elif "most often" in input_text.lower() or "common words" in input_text.lower():
+            return "common_words"
+        elif "frequency" in input_text.lower() and "ignore the dots" in input_text.lower():
+            return "frequency_words"
+        elif "answer the question based on" in input_text.lower():
+            return "qa"
+        else:
+            return "unknown"
+
+    @staticmethod
+    def _split_ruler_input(input_text: str, task_type: str, chunk_size: int) -> Dict[str, Any]:
+        """
+        Split RULER input into system prompt, context chunks, and question.
+
+        Returns:
+            Dict with 'system_prompt', 'documents' (list of chunks), 'question'
+        """
+        # Common patterns to identify sections
+        context_markers = [
+            "\n\n",  # Double newline often separates sections
+            "The following is",
+            "Below is",
+            "Here is",
+        ]
+
+        question_markers = [
+            "What is the",
+            "Which",
+            "How many",
+            "Answer:",
+            "Question:",
+            "Find the",
+            "Extract the",
+        ]
+
+        # Strategy: Find the last question marker to separate question from context
+        question_start = -1
+        question_marker_found = None
+
+        for marker in question_markers:
+            pos = input_text.rfind(marker)
+            if pos > question_start:
+                question_start = pos
+                question_marker_found = marker
+
+        if question_start == -1:
+            # No clear question found, treat last 500 chars as question
+            question_start = max(0, len(input_text) - 500)
+
+        # Split into instruction + context and question
+        context_part = input_text[:question_start].strip()
+        question_part = input_text[question_start:].strip()
+
+        # Find where actual context starts (after initial instruction)
+        instruction_end = 0
+        for i, line in enumerate(context_part.split('\n')):
+            if i < 5 and (len(line) < 200 or any(marker in line for marker in ["following", "Below", "Memorize"])):
+                instruction_end += len(line) + 1
+            else:
+                break
+
+        system_prompt = context_part[:instruction_end].strip()
+        context_text = context_part[instruction_end:].strip()
+
+        # Split context into chunks for KV concatenation
+        documents = []
+        if len(context_text) <= chunk_size:
+            documents = [context_text] if context_text else [""]
+        else:
+            # Split by paragraphs first
+            paragraphs = context_text.split('\n\n')
+            current_chunk = ""
+
+            for para in paragraphs:
+                if len(current_chunk) + len(para) + 2 <= chunk_size:
+                    current_chunk += para + "\n\n"
+                else:
+                    if current_chunk:
+                        documents.append(current_chunk.strip())
+                    current_chunk = para + "\n\n"
+
+            if current_chunk:
+                documents.append(current_chunk.strip())
+
+        # Ensure documents is never empty to maintain type consistency
+        if not documents:
+            documents = [""]
+
+        return {
+            'system_prompt': system_prompt if system_prompt else "You are a helpful assistant.",
+            'documents': documents,
+            'question': question_part
+        }
+
+    def _process_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a single RULER sample."""
+        input_text = sample['input']
+        task_type = self._detect_task_type(input_text)
+
+        # Split input into components
+        split_result = self._split_ruler_input(input_text, task_type, self.chunk_size)
+
+        # Determine max_new_tokens based on task
+        if task_type in ["niah", "variable_tracking"]:
+            max_new_tokens = 64
+        elif task_type in ["common_words", "frequency_words"]:
+            max_new_tokens = 128
+        elif task_type == "qa":
+            max_new_tokens = 256
+        else:
+            max_new_tokens = 128
+
+        return {
+            'qid': str(sample.get('index', 0)),
+            'system_prompt': split_result['system_prompt'],
+            'question': split_result['question'],
+            'documents': split_result['documents'],
+            'answer': sample['outputs'] if isinstance(sample['outputs'], list) else [sample['outputs']],
+            'max_new_tokens': max_new_tokens,
+            'task_type': task_type,
+        }
+
+    @staticmethod
+    def metric(pred: str, gt_list: List[str]) -> float:
+        """
+        RULER metric: exact match or F1 score.
+        """
+        pred = pred.strip()
+
+        # Try exact match first (case-insensitive)
+        if any(pred.lower() == gt.lower() for gt in gt_list):
+            return 1.0
+
+        # Try substring match
+        if any(gt.lower() in pred.lower() for gt in gt_list):
+            return 1.0
+
+        # Fall back to F1 score
+        return max_f1_score(pred, gt_list)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
+
+
 class ProfileMockDataset(AbstractMDQADataset):
     def __init__(self) -> None:
         self.system_prompt = "You are a helpful assistant."
@@ -726,6 +906,11 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         return NeedleDataset(path)
     elif name == "profile":
         return ProfileMockDataset()
+    elif name == "ruler":
+        if path is None:
+            raise ValueError("RULER dataset requires a path to the JSONL file")
+        chunk_size = kwargs.get('chunk_size', 8192)
+        return RULERDataset(path, chunk_size=chunk_size)
     # LongBench datasets (original 3 + new 13)
     elif name in [
         'qmsum', 'gov_report', 'qasper',  # Original 3
