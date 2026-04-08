@@ -392,44 +392,84 @@ def _is_valid_tulu_sample(sample: Dict[str, Any]) -> bool:
     return len(messages) >= 2
 
 
-def _split_context_messages(messages: List[Dict[str, str]], max_chars: int = 8192) -> List[str]:
+def _split_by_delimiter(text: str) -> List[str]:
     """
-    Split context messages into documents, keeping messages intact.
-    Each document is at most max_chars characters.
+    Split text by hierarchical delimiters, following Block-Attention approach.
+    Priority: \n\n → --- → === → \n\t → \n
     """
-    documents = []
-    current_doc = []
-    current_length = 0
+    import re
 
+    # For double newlines and single newlines, pair up results (merge delimiter with content)
+    if "\n\n" in text:
+        parts = re.split(r'(\n\n)', text)
+        if len(parts) == 1:
+            return parts
+        # Merge delimiter with preceding content: [content, \n\n, content, \n\n, ...]
+        result = [parts[i] + parts[i+1] for i in range(0, len(parts)-1, 2)]
+        if len(parts) % 2 == 1:  # Odd number means last part has no delimiter
+            result.append(parts[-1])
+        return result
+
+    if "---" in text:
+        return re.split(r'(---)', text)
+
+    if "===" in text:
+        return re.split(r'(===)', text)
+
+    if "\n\t" in text:
+        return re.split(r'(\n\t)', text)
+
+    if "\n" in text:
+        parts = re.split(r'(\n)', text)
+        if len(parts) == 1:
+            return parts
+        result = [parts[i] + parts[i+1] for i in range(0, len(parts)-1, 2)]
+        if len(parts) % 2 == 1:
+            result.append(parts[-1])
+        return result
+
+    return [text]
+
+
+def _merge_smallest_chunks(chunks: List[str]) -> List[str]:
+    """Merge the two smallest adjacent chunks."""
+    if len(chunks) <= 1:
+        return chunks
+
+    # Find the smallest adjacent pair
+    min_size = float('inf')
+    min_idx = 0
+    for i in range(len(chunks) - 1):
+        combined_size = len(chunks[i]) + len(chunks[i+1])
+        if combined_size < min_size:
+            min_size = combined_size
+            min_idx = i
+
+    # Merge the pair
+    merged = chunks[:min_idx] + [chunks[min_idx] + chunks[min_idx+1]] + chunks[min_idx+2:]
+    return merged
+
+
+def _split_context_messages(messages: List[Dict[str, str]], max_chunks: int = 15) -> List[str]:
+    """
+    Split context messages into documents using hierarchical delimiter-based splitting.
+    Follows Block-Attention approach with chunk limit enforcement.
+    """
+    # If there are many messages (≥12), don't split them - each message becomes one chunk
+    if len(messages) >= 12:
+        return [msg['content'] for msg in messages]
+
+    # Split each message into chunks
+    all_chunks = []
     for msg in messages:
-        formatted = msg['content']
-        msg_length = len(formatted)
+        chunks = _split_by_delimiter(msg['content'])
+        all_chunks.extend(chunks)
 
-        # If single message exceeds max_chars, it becomes its own document(s)
-        if msg_length > max_chars:
-            if current_doc:
-                documents.append('\n\n'.join(current_doc))
-                current_doc = []
-                current_length = 0
-            # Split long message into chunks
-            for i in range(0, msg_length, max_chars):
-                documents.append(formatted[i:i+max_chars])
-        elif current_length + msg_length + 2 > max_chars:  # +2 for \n\n separator
-            # Current doc is full, start new one
-            if current_doc:
-                documents.append('\n\n'.join(current_doc))
-            current_doc = [formatted]
-            current_length = msg_length
-        else:
-            # Add to current doc
-            current_doc.append(formatted)
-            current_length += msg_length + 2  # +2 for \n\n separator
+    # Enforce max_chunks limit by merging smallest chunks
+    while len(all_chunks) > max_chunks:
+        all_chunks = _merge_smallest_chunks(all_chunks)
 
-    # Add remaining
-    if current_doc:
-        documents.append('\n\n'.join(current_doc))
-
-    return documents
+    return all_chunks
 
 
 def _process_single_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -437,12 +477,17 @@ def _process_single_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     user_msg = next(msg['content'] for msg in messages if msg['role'] == 'user')
     assistant_msg = next(msg['content'] for msg in messages if msg['role'] == 'assistant')
 
-    # Split by double newlines
-    paragraphs = user_msg.split('\n\n')
+    # Split using hierarchical delimiter approach
+    chunks = _split_by_delimiter(user_msg)
 
-    # Last paragraph is question, rest are context documents
-    question = paragraphs[-1].strip()
-    documents = [p.strip() for p in paragraphs[:-1] if p.strip()]
+    # Last chunk is question, rest are context documents
+    question = chunks[-1].strip()
+    documents = [c.strip() for c in chunks[:-1] if c.strip()]
+
+    # Apply chunk limit (max 15 chunks total)
+    max_chunks = 15
+    while len(documents) > max_chunks:
+        documents = _merge_smallest_chunks(documents)
 
     return {
         'documents': documents,
