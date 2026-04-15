@@ -31,7 +31,7 @@ def setup_environment_variables(
     enable_sparse: bool = False,
 ):
     # LMCache-related environment variables
-    os.environ["LMCACHE_CHUNK_SIZE"] = "128"
+    os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 
     # Blending related config# Enable blending in LMCache
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
@@ -70,6 +70,7 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
         gpu_memory_utilization=0.8,
         enable_prefix_caching=False,
         enforce_eager=True,
+        max_model_len=128000,
     )
 
     llm = LLM(**asdict(llm_args))
@@ -142,8 +143,8 @@ def parse_args():
     parser.add_argument(
         "-b",
         "--blend-special-str",
-        default="# #",
-        help="Specify the special separators to separate chunks (default: '# #')",
+        default=" # # ",
+        help="Specify the special separators to separate chunks (default: ' # # ')",
     )
     parser.add_argument(
         "--only_supporting", 
@@ -161,6 +162,9 @@ def parse_args():
     )
     parser.add_argument(
         "--dataset", type=str, required=True,
+    )
+    parser.add_argument(
+        "--dataset_path", type=str, required=True,
     )
     parser.add_argument(
         "--output_file", type=str, required=True,
@@ -187,7 +191,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(model, local_files_only=True)
 
-    dataset = load_mdoc_dataset(args.dataset, only_supporting=args.only_supporting, enable_cot=args.cot)
+    dataset = load_mdoc_dataset(args.dataset, args.dataset_path, only_supporting=args.only_supporting, enable_cot=args.cot)
 
     scores = []
     results = []
@@ -270,6 +274,7 @@ def main():
     
     avg_score = sum(scores) / len(scores) if scores else 0
 
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         for result in results:
             if result:  # Only write non-empty results

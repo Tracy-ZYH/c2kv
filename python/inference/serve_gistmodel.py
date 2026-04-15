@@ -39,7 +39,7 @@ def initialize_model(model_name: str):
         trust_remote_code=True,
         local_files_only=True,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa"
+        attn_implementation="flash_attention_2"
     )
     device = model.device
     print("Model loaded successfully!")
@@ -148,8 +148,8 @@ def generate_response():
             # Pre-compute context if provided
             if documents:
                 context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
-                model.model.config._attn_implementation = "sdpa"
-                outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs)
+                model.model.config._attn_implementation = "flex_attention"
+                outputs, gist_mask, pos_ids = model.model.generate_gist(ratio=4, **context_inputs)
                 pos_ids = pos_ids[:, -gist_mask.shape[1]:]
                 context_cache, _ = blend_gist_key_values(
                     model.config, [outputs.past_key_values], [gist_mask], [pos_ids],

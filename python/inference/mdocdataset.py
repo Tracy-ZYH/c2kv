@@ -372,7 +372,30 @@ class LongAlpacaDataset(AbstractMDQADataset):
         return self.data[idx]
 
 
-_GSM8K_MATCHER = regex.compile(r"#### (-?[0-9.,]+)")
+def gsm8k_normalize_answer(answer: str) -> str:
+    """
+    标准化答案：去除逗号、空格、百分号等，统一格式。
+    """
+    # 去除千位分隔符逗号
+    answer = answer.replace(",", "")
+    # 去除美元符号等常见前缀
+    answer = answer.replace("$", "").strip()
+    # 处理百分比: "50%" -> "0.5" 或保持原样视情况而定
+    if answer.endswith("%"):
+        try:
+            val = float(answer[:-1]) / 100
+            # 如果结果是整数，转为整数字符串
+            if val == int(val):
+                return str(int(val))
+            return str(val)
+        except ValueError:
+            pass
+    # 去除多余空格
+    answer = answer.strip()
+    return answer
+
+_GSM8K_MATCHER1 = regex.compile(r"#### (-?[0-9.,]+)")
+_GSM8K_MATCHER2 = regex.compile(r"-?\d+\.?\d*")
 class GSM8KDataset(AbstractMDQADataset):
     def __init__(self, shot_num: int = 4) -> None:
         data = datasets.load_dataset('openai/gsm8k', 'main', split='test')
@@ -386,21 +409,27 @@ class GSM8KDataset(AbstractMDQADataset):
         self.system_prompt = ("You are a helpful assistant to answer math questions. "
             "You are given several examples, and you are asked to answer the question. "
             "Please solve the question step-by-step and write the final answer after '#### '.\n\n")
-        self.max_new_tokens: int = 512
+        self.max_new_tokens: int = 1024
     
     @staticmethod
     def metric(pred: str, gt_list: List[str]) -> float:
-        pred_m = _GSM8K_MATCHER.search(pred)
-        gt_m = _GSM8K_MATCHER.search(gt_list[0])
+        gt_m = _GSM8K_MATCHER1.search(gt_list[0])
+        pred_m = _GSM8K_MATCHER1.search(pred)
+        if pred_m is None:
+            pred_m = _GSM8K_MATCHER2.findall(pred)
+            pred_m = pred_m[-1] if pred_m else None
+        else:
+            pred_m = pred_m.group(1)
         assert gt_m is not None, f"No match found in {gt_list[0]}"
-        if pred_m and pred_m.group(1) == gt_m.group(1):
+        gt_m = gsm8k_normalize_answer(gt_m.group(1))
+        if pred_m and gsm8k_normalize_answer(pred_m) == gt_m:
             return 1.0
         return 0.0
     
     @staticmethod
     def precess_sample(sample: Dict[str, Any], indice: int, documents: List[str]) -> Dict[str, Any]:
         query_prompt = ("Following the above examples. First solve the following question step-by-step,"
-"output your reasoning. Finally, write the final answer after '#### '.\n\n")
+                        "Write the final answer after '#### <number>', only output the final numeric answer in the format of '#### <number>.\n\n")
         return {
             'qid': str(indice),
             'question': query_prompt + sample['question'],
@@ -548,16 +577,16 @@ class RULERDataset(AbstractMDQADataset):
             documents = [context_text] if context_text else [""]
         else:
             # Split by paragraphs first
-            paragraphs = context_text.split('\n\n')
+            paragraphs = context_text.split('\n')
             current_chunk = ""
 
             for para in paragraphs:
                 if len(current_chunk) + len(para) + 2 <= chunk_size:
-                    current_chunk += para + "\n\n"
+                    current_chunk += para + "\n"
                 else:
                     if current_chunk:
                         documents.append(current_chunk.strip())
-                    current_chunk = para + "\n\n"
+                    current_chunk = para + "\n"
 
             if current_chunk:
                 documents.append(current_chunk.strip())
@@ -911,7 +940,7 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
     elif name == "ruler":
         if path is None:
             raise ValueError("RULER dataset requires a path to the JSONL file")
-        chunk_size = kwargs.get('chunk_size', 4096)
+        chunk_size = kwargs.get('chunk_size', 8192)
         return RULERDataset(path, chunk_size=chunk_size)
     # LongBench datasets (original 3 + new 13)
     elif name in [

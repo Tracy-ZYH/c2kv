@@ -1,3 +1,4 @@
+import os
 import argparse
 import json
 import math
@@ -161,6 +162,9 @@ def evaluate_model_on_dataset(
     
     # 保存结果
     if output_file:
+        # Create output directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
         with open(output_file, 'w') as f:
             for result in results:
                 f.write(json.dumps(result, ensure_ascii=False) + '\n')

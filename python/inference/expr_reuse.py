@@ -1,3 +1,4 @@
+import os
 import argparse
 import json
 from typing import List, Dict, Any, Optional
@@ -112,6 +113,9 @@ def evaluate_model_on_dataset(
     
     # Save results if output file is specified
     if output_file:
+        # Create output directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
         with open(output_file, 'w', encoding='utf-8') as f:
             for result in results:
                 if result:  # Only write non-empty results
