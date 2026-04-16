@@ -36,6 +36,117 @@ def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1) -> torch.Tensor:
     x_embed = (x * cos) + (rotate_half(x) * sin)
     return x_embed
 
+def _build_interleave_mask_vectorized(
+    input_ids: torch.LongTensor,
+    attention_mask: torch.Tensor,
+    ratio: int,
+    padding_check_idx: int,
+    padding_side: str,
+    gist_residual_type: str = "none",
+) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+    device = input_ids.device
+    batch_size, max_seqlen = input_ids.shape
+    max_gist_num = math.ceil(max_seqlen / ratio)
+    total_len = max_seqlen + max_gist_num
+
+    # --- per-sample sequence lengths (vectorized) ---
+    original_seqlens = attention_mask.sum(dim=1)  # (batch_size,)
+    seqlens = original_seqlens.clone()
+
+    if gist_residual_type == "mean":
+        residual = seqlens % ratio
+        needs_pad = (residual != 0) & (seqlens > 0)
+        seqlens = torch.where(needs_pad, torch.clamp(seqlens + ratio - residual, max=max_seqlen), seqlens)
+
+    # padlen: left-padding offset per sample
+    if padding_check_idx == 0:  # right-padded
+        padlens = torch.zeros(batch_size, dtype=torch.long, device=device)
+    else:  # left-padded
+        padlens = max_seqlen - seqlens
+
+    gist_nums = ((seqlens + ratio - 1) // ratio).long()  # ceil division, (batch_size,)
+    if padding_check_idx == 0:
+        gist_pads = torch.zeros(batch_size, dtype=torch.long, device=device)
+    else:
+        gist_pads = max_gist_num - gist_nums
+
+    # --- gist_mask: (batch_size, max_gist_num) ---
+    gist_idx = torch.arange(max_gist_num, device=device).unsqueeze(0)  # (1, max_gist_num)
+    gist_mask = (gist_idx >= gist_pads.unsqueeze(1)) & (gist_idx < (gist_pads + gist_nums).unsqueeze(1))
+
+    # --- token-token causal mask (tril) ---
+    # Build a shared tril matrix and mask per-sample valid region
+    row_idx = torch.arange(max_seqlen, device=device).unsqueeze(1)  # (max_seqlen, 1)
+    col_idx = torch.arange(max_seqlen, device=device).unsqueeze(0)  # (1, max_seqlen)
+    causal_base = row_idx >= col_idx  # (max_seqlen, max_seqlen) lower-triangular
+
+    # Per-sample valid token range: [padlen, padlen + seqlen)
+    token_pos = torch.arange(max_seqlen, device=device).unsqueeze(0)  # (1, max_seqlen)
+    valid_row = (token_pos >= padlens.unsqueeze(1)) & (token_pos < (padlens + seqlens).unsqueeze(1))  # (B, max_seqlen)
+    valid_region = valid_row.unsqueeze(2) & valid_row.unsqueeze(1)  # (B, max_seqlen, max_seqlen)
+    token_token_mask = causal_base.unsqueeze(0) & valid_region  # (B, max_seqlen, max_seqlen)
+
+    # --- gist-related masks ---
+    # j_idx: local gist index (0-based) for each position in max_gist_num
+    # padded_j = j + gist_pad, so local j = gist_idx - gist_pad
+    local_j = gist_idx - gist_pads.unsqueeze(1)  # (B, max_gist_num), local chunk index
+
+    # chunk begin/end for each gist token
+    chunk_begin = local_j * ratio  # (B, max_gist_num)
+    chunk_end = torch.clamp((local_j + 1) * ratio, max=0).long()  # placeholder, compute properly below
+    chunk_end = torch.min((local_j + 1) * ratio, original_seqlens.unsqueeze(1))  # (B, max_gist_num)
+
+    # gist_position_ids: end - 1 for valid gist tokens, 0 otherwise
+    gist_position_ids = torch.where(gist_mask, (chunk_end - 1).long(), torch.zeros_like(local_j))
+
+    # sink_end per sample: min(seqlen, ratio)
+    sink_ends = torch.clamp(seqlens, max=ratio)  # (B,)
+
+    # --- gist-to-token attention mask: (B, max_gist_num, max_seqlen) ---
+    # For each gist token (row in gist dim), it attends to:
+    #   1) sink region: token positions in [padlen, padlen + sink_end)
+    #   2) chunk region: token positions in [padlen + chunk_begin, padlen + chunk_end)
+    # token_pos: (1, 1, max_seqlen), padlens: (B, 1, 1)
+    token_pos_3d = token_pos.unsqueeze(1)  # (1, 1, max_seqlen)
+    padlens_3d = padlens.unsqueeze(1).unsqueeze(2)  # (B, 1, 1)
+
+    # sink mask: gist j attends to [padlen, padlen + sink_end) — same for all j
+    sink_mask = (token_pos_3d >= padlens_3d) & (token_pos_3d < (padlens + sink_ends).unsqueeze(1).unsqueeze(2))
+    # (B, 1, max_seqlen) -> broadcast to (B, max_gist_num, max_seqlen)
+
+    # chunk mask: gist j attends to [padlen + chunk_begin_j, padlen + chunk_end_j)
+    chunk_begin_abs = padlens.unsqueeze(1) + chunk_begin  # (B, max_gist_num)
+    chunk_end_abs = padlens.unsqueeze(1) + chunk_end  # (B, max_gist_num)
+    chunk_mask = (token_pos_3d >= chunk_begin_abs.unsqueeze(2)) & (token_pos_3d < chunk_end_abs.unsqueeze(2))
+    # (B, max_gist_num, max_seqlen)
+
+    gist_to_token_mask = (sink_mask | chunk_mask) & gist_mask.unsqueeze(2)  # mask out invalid gist rows
+
+    # --- gist-to-gist causal mask: (B, max_gist_num, max_gist_num) ---
+    # gist j attends to gist [gist_pad, gist_pad + j + 1), i.e., all previous valid gists
+    gist_col_idx = torch.arange(max_gist_num, device=device).unsqueeze(0).unsqueeze(0)  # (1, 1, max_gist_num)
+    gist_row_idx = gist_idx.unsqueeze(2)  # (1, max_gist_num, 1)
+    gist_gist_causal = (gist_col_idx >= gist_pads.unsqueeze(1).unsqueeze(2)) & (gist_col_idx <= gist_row_idx)
+    gist_gist_mask = gist_gist_causal & gist_mask.unsqueeze(2) & gist_mask.unsqueeze(1)
+
+    # --- assemble full attention mask: (B, total_len, total_len) ---
+    new_attn_mask = torch.zeros((batch_size, total_len, total_len), dtype=torch.bool, device=device)
+    # token-token block (top-left)
+    new_attn_mask[:, :max_seqlen, :max_seqlen] = token_token_mask
+    # gist-to-token block (bottom-left)
+    new_attn_mask[:, max_seqlen:, :max_seqlen] = gist_to_token_mask
+    # gist-to-gist block (bottom-right)
+    new_attn_mask[:, max_seqlen:, max_seqlen:] = gist_gist_mask
+
+    new_attn_mask = new_attn_mask.unsqueeze(1)  # (B, 1, total_len, total_len)
+
+    # --- position_ids ---
+    position_ids = torch.arange(max_seqlen, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, max_seqlen)
+    position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
+
+    return new_attn_mask, gist_mask, position_ids
+
+
 def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "right") -> Callable:
     gist_type: str = config.gist_type
     gist_residual_type: str = config.gist_residual_type
@@ -47,47 +158,11 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
         ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
             for mask in attention_mask:
-                if mask.any(): # only check non-empty sequences
+                if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
-            batch_size, max_seqlen = input_ids.shape
-            max_gist_num = math.ceil(max_seqlen / ratio)
-            new_attn_mask = torch.zeros( # (batch_size, query_len, kv_length)
-                (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num), 
-                dtype=torch.bool, device=input_ids.device
+            return _build_interleave_mask_vectorized(
+                input_ids, attention_mask, ratio, padding_check_idx, padding_side, gist_residual_type,
             )
-            position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
-            gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
-            gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
-            for i, seqlen in enumerate(attention_mask.sum(dim=1).tolist()):
-                if seqlen == 0:
-                    continue
-                original_seqlen = seqlen
-                if gist_residual_type == "mean": # need to pad input_ids to multiple of ratio
-                    residual_padlen = seqlen % ratio
-                    if residual_padlen != 0:
-                        seqlen = min(max_seqlen, seqlen + ratio - residual_padlen)
-                padlen = 0 if padding_check_idx == 0 else max_seqlen - seqlen
-                new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
-                    torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
-                )
-                gist_num = math.ceil(seqlen / ratio)
-                gist_pad = 0 if padding_check_idx == 0 else max_gist_num - gist_num
-                gist_mask[i, gist_pad:gist_pad + gist_num] = 1
-                for j in range(gist_num):
-                    # attention sink at beginning of chunk
-                    sink_end = min(seqlen, ratio)
-                    new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
-                    # attention sink at end of chunk
-                    begin = j * ratio
-                    end = min((j + 1) * ratio, original_seqlen)
-                    padded_j = j + gist_pad
-                    gist_position_ids[i, padded_j] = end - 1
-                    new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
-                    new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
-            new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
-            position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
-            return new_attn_mask, gist_mask, position_ids
         return _prepare_gist_input_interleave
     elif gist_type.startswith('anchor-'):
         ratio = int(gist_type.split("-")[1])
@@ -152,43 +227,11 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             else:
                 ratio = random.choice([4, 8, 16])
             for mask in attention_mask:
-                if mask.any(): # only check non-empty sequences
+                if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
-            batch_size, max_seqlen = input_ids.shape
-            max_gist_num = math.ceil(max_seqlen / ratio)
-            new_attn_mask = torch.zeros( # (batch_size, query_len, kv_length)
-                (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num), 
-                dtype=torch.bool, device=input_ids.device
+            return _build_interleave_mask_vectorized(
+                input_ids, attention_mask, ratio, padding_check_idx, padding_side, "none",
             )
-            position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
-            gist_position_ids = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=input_ids.device)
-            gist_mask = torch.zeros((batch_size, max_gist_num), dtype=torch.bool, device=input_ids.device)
-            for i, seqlen in enumerate(attention_mask.sum(dim=1).tolist()):
-                if seqlen == 0:
-                    continue
-                original_seqlen = seqlen
-                padlen = 0 if padding_check_idx == 0 else max_seqlen - seqlen
-                new_attn_mask[i, padlen:seqlen + padlen, padlen:seqlen + padlen] = torch.tril(
-                    torch.ones(seqlen, seqlen, dtype=torch.bool, device=input_ids.device)
-                )
-                gist_num = math.ceil(seqlen / ratio)
-                gist_pad = 0 if padding_check_idx == 0 else max_gist_num - gist_num
-                gist_mask[i, gist_pad:gist_pad + gist_num] = 1
-                for j in range(gist_num):
-                    # attention sink at beginning of chunk
-                    sink_end = min(seqlen, ratio)
-                    new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
-                    # attention sink at end of chunk
-                    begin = j * ratio
-                    end = min((j + 1) * ratio, original_seqlen)
-                    padded_j = j + gist_pad
-                    gist_position_ids[i, padded_j] = end - 1
-                    new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
-                    new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
-            new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
-            position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
-            return new_attn_mask, gist_mask, position_ids
         return _prepare_gist_input_dynamic_interleave
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
