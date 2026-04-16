@@ -47,14 +47,16 @@ def main():
         eval_dataset = get_dataset('mdoc_eval', hotpotqa_path, **dataset_args)
         wikimqa_train = get_dataset('mdoc', wikimqa_path, **dataset_args)
         wikimqa_eval = get_dataset('mdoc_eval', wikimqa_path, **dataset_args)
-        train_dataset.data = train_dataset.data.select(range(60000))
-        wikimqa_train.data = wikimqa_train.data.select(range(50000))
+        tulu3_train = get_dataset('mdoc', "allenai/tulu-3-sft-mixture", **dataset_args)
+        train_dataset.data = train_dataset.data.select(range(40000))
+        wikimqa_train.data = wikimqa_train.data.select(range(40000))
+        tulu3_train.data = tulu3_train.data.select(range(200000))
         # load longmagpie QA dataset
         longmagpie_train = get_dataset('mdoc', longmagpie_path, **dataset_args)
         # longmagpie_eval = get_dataset('mdoc_eval', longmagpie_path, **dataset_args)
         longmagpie_train.data = longmagpie_train.data.select(range(40000))
-        # print the lengths of all training datasets
-        train_dataset.merge([longmagpie_train, wikimqa_train])
+        # print the lengths of all training datasets")
+        train_dataset.merge([longmagpie_train, wikimqa_train, tulu3_train])
         eval_dataset.merge([wikimqa_eval], method='concat')
 
     trainer = GistMultiDocTrainer(

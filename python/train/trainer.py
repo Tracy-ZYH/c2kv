@@ -279,3 +279,16 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         if model.training and self.distill_coef is not None:
             loss = self.apply_distill_loss(inputs["labels"], loss, self_distill_logits, outputs["logits"])
         return (loss, outputs) if return_outputs else loss
+    
+    def prediction_step(
+        self,
+        model: torch.nn.Module,
+        inputs: dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[list[str]] = None,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        attn_impl = model.model.config._attn_implementation
+        model.model.config._attn_implementation = "sdpa"
+        pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        model.model.config._attn_implementation = attn_impl
+        return pred
