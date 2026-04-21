@@ -132,7 +132,7 @@ def _build_interleave_mask_vectorized(
     # --- assemble full attention mask: (B, total_len, total_len) ---
     new_attn_mask = torch.zeros((batch_size, total_len, total_len), dtype=torch.bool, device=device)
     # token-token block (top-left)
-    new_attn_mask[:, :zmax_seqlen, :max_seqlen] = token_token_mask
+    new_attn_mask[:, :max_seqlen, :max_seqlen] = token_token_mask
     # gist-to-token block (bottom-left)
     new_attn_mask[:, max_seqlen:, :max_seqlen] = gist_to_token_mask
     # gist-to-gist block (bottom-right)
@@ -362,7 +362,6 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             return new_attn_mask, gist_mask, position_ids
         return _prepare_gist_input_anchor
     elif gist_type == 'dynamic-interleave':
-        assert gist_residual_type is None or gist_residual_type == "none", "gist_residual_type must be none"
         def _prepare_gist_input_dynamic_interleave(
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
         ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
@@ -395,22 +394,24 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
 
-def get_apply_gist_residual_func(config: GistConfigMixin) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+def get_apply_gist_residual_func(config: GistConfigMixin) -> Callable:
+    def _apply_gist_residual_interleave(
+        tokens_tensor: torch.Tensor, gist_tensor: torch.Tensor, ratio: int = 4
+    ) -> torch.Tensor:
+        batch_size, seq_length, hidden_size = tokens_tensor.shape
+        pad_length = seq_length % ratio
+        nopad_length = seq_length - pad_length
+        mean_tensor = tokens_tensor[:, :nopad_length].reshape(batch_size, -1, ratio, hidden_size).mean(dim=2)
+        if pad_length != 0:
+            pad_mean = tokens_tensor[:, nopad_length:].mean(dim=1, keepdim=True)
+            mean_tensor = torch.cat([mean_tensor, pad_mean], dim=1)
+        return mean_tensor + gist_tensor
     if config.gist_residual_type == "mean" and config.gist_type.startswith("interleave-"):
         ratio = int(config.gist_type.split('-')[1])
-        def _apply_gist_residual_interleave(
-            tokens_tensor: torch.Tensor, gist_tensor: torch.Tensor,
-        ) -> torch.Tensor:
-            batch_size, seq_length, hidden_size = tokens_tensor.shape
-            pad_length = seq_length % ratio
-            nopad_length = seq_length - pad_length
-            mean_tensor = tokens_tensor[:, :nopad_length].reshape(batch_size, -1, ratio, hidden_size).mean(dim=2)
-            if pad_length != 0:
-                pad_mean = tokens_tensor[:, nopad_length:].mean(dim=1, keepdim=True)
-                mean_tensor = torch.cat([mean_tensor, pad_mean], dim=1)
-            return mean_tensor + gist_tensor
-        return _apply_gist_residual_interleave
-    return lambda tokens_tensor, gist_tensor: gist_tensor
+        return lambda tokens_tensor, gist_tensor, **kwargs: _apply_gist_residual_interleave(tokens_tensor, gist_tensor, ratio=ratio)
+    elif config.gist_residual_type == "mean" and config.gist_type == "dynamic-interleave":
+        return lambda tokens_tensor, gist_tensor, **kwargs: _apply_gist_residual_interleave(tokens_tensor, gist_tensor, ratio=kwargs["ratio"])
+    return lambda tokens_tensor, gist_tensor, **kwargs: gist_tensor
 
 def process_context_input_ids(
     model: PreTrainedModel,

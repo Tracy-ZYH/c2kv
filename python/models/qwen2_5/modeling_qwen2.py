@@ -221,7 +221,7 @@ class Qwen2Attention(nn.Module):
         hidden_states = hidden_states[:, :-gist_num]
         hidden_shape = (input_shape[0], input_shape[1] - gist_num, -1, self.head_dim)
         
-        gist_hidden_states = self.apply_gist_residual(hidden_states, gist_hidden_states)
+        gist_hidden_states = self.apply_gist_residual(hidden_states, gist_hidden_states, **kwargs)
 
         # qkv states
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
