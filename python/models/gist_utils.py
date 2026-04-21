@@ -132,6 +132,150 @@ def _build_interleave_mask_vectorized(
     # --- assemble full attention mask: (B, total_len, total_len) ---
     new_attn_mask = torch.zeros((batch_size, total_len, total_len), dtype=torch.bool, device=device)
     # token-token block (top-left)
+    new_attn_mask[:, :zmax_seqlen, :max_seqlen] = token_token_mask
+    # gist-to-token block (bottom-left)
+    new_attn_mask[:, max_seqlen:, :max_seqlen] = gist_to_token_mask
+    # gist-to-gist block (bottom-right)
+    new_attn_mask[:, max_seqlen:, max_seqlen:] = gist_gist_mask
+
+    new_attn_mask = new_attn_mask.unsqueeze(1)  # (B, 1, total_len, total_len)
+
+    # --- position_ids ---
+    position_ids = torch.arange(max_seqlen, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, max_seqlen)
+    position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
+
+    return new_attn_mask, gist_mask, position_ids
+
+
+def _build_pattern_mask_vectorized(
+    input_ids: torch.LongTensor,
+    attention_mask: torch.Tensor,
+    pattern: torch.BoolTensor,
+    padding_check_idx: int,
+) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+    """Build attention mask for pattern-based gist insertion (vectorized).
+
+    Each True in `pattern` means a gist token is inserted after that position.
+    Attention rules (interleave-style):
+      - token-to-token: standard causal (lower-triangular)
+      - gist-to-token: each gist sees the "window" of original tokens between
+        the previous gist position (exclusive) and the current gist position (inclusive)
+      - gist-to-gist: causal (each gist sees itself and all previous gists)
+      - token-to-gist: none (original tokens do not attend to gist tokens)
+    """
+    device = input_ids.device
+    batch_size, max_seqlen = input_ids.shape
+
+    # --- per-sample valid region ---
+    original_seqlens = attention_mask.sum(dim=1)  # (B,)
+    if padding_check_idx == 0:  # right-padded
+        padlens = torch.zeros(batch_size, dtype=torch.long, device=device)
+    else:  # left-padded
+        padlens = max_seqlen - original_seqlens
+
+    # --- determine max_gist_num across the batch ---
+    # mask out pattern positions that fall outside valid tokens
+    token_pos = torch.arange(max_seqlen, device=device).unsqueeze(0)  # (1, S)
+    valid_token = (token_pos >= padlens.unsqueeze(1)) & (token_pos < (padlens + original_seqlens).unsqueeze(1))
+    pattern = pattern & valid_token  # (B, S)
+
+    gist_nums = pattern.sum(dim=1)  # (B,)
+    max_gist_num = gist_nums.max().item()
+    if max_gist_num == 0:
+        # no gist tokens needed — return trivial masks
+        total_len = max_seqlen
+        causal = torch.tril(torch.ones(max_seqlen, max_seqlen, dtype=torch.bool, device=device))
+        valid_row = valid_token  # (B, S)
+        valid_region = valid_row.unsqueeze(2) & valid_row.unsqueeze(1)
+        token_mask = causal.unsqueeze(0) & valid_region
+        token_mask = token_mask.unsqueeze(1)  # (B, 1, S, S)
+        gist_mask = torch.zeros((batch_size, 0), dtype=torch.bool, device=device)
+        position_ids = torch.arange(max_seqlen, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, -1)
+        return token_mask, gist_mask, position_ids
+
+    total_len = max_seqlen + max_gist_num
+
+    # --- build gist_mask and per-gist original-token positions ---
+    # For each sample, scatter the True positions into a dense (B, max_gist_num) layout.
+    # gist_token_pos[b, j] = the original-sequence index that gist j corresponds to.
+    # We use left-aligned packing (right-padded gist dim) for right-padded input,
+    # and right-aligned packing (left-padded gist dim) for left-padded input.
+
+    # Compute prefix-sum of pattern to get local gist indices (0-based within each sample)
+    gist_local_idx = pattern.long().cumsum(dim=1) - 1  # (B, S), -1 where pattern=False
+    # For left-padded: shift gist indices so they are right-aligned
+    if padding_check_idx != 0:
+        gist_pads = max_gist_num - gist_nums  # (B,)
+        gist_local_idx = gist_local_idx + gist_pads.unsqueeze(1)
+    else:
+        gist_pads = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+    # Build gist_mask: (B, max_gist_num)
+    gist_idx_range = torch.arange(max_gist_num, device=device).unsqueeze(0)  # (1, G)
+    gist_mask = (gist_idx_range >= gist_pads.unsqueeze(1)) & (gist_idx_range < (gist_pads + gist_nums).unsqueeze(1))
+
+    # Build gist_token_pos: (B, max_gist_num) — the original token position each gist corresponds to
+    # Scatter pattern positions into dense gist layout
+    gist_token_pos = torch.zeros((batch_size, max_gist_num), dtype=torch.long, device=device)
+    # For each (b, s) where pattern[b, s] = True, write s into gist_token_pos[b, gist_local_idx[b, s]]
+    pattern_positions = token_pos.expand(batch_size, -1)  # (B, S)
+    # Use scatter — only write where pattern is True
+    scatter_idx = gist_local_idx.clone()
+    scatter_idx[~pattern] = 0  # avoid out-of-bounds; these won't be used
+    gist_token_pos.scatter_(1, scatter_idx, pattern_positions)
+    # Zero out invalid gist positions
+    gist_token_pos = gist_token_pos * gist_mask.long()
+
+    # --- gist_position_ids: same as the original token position ---
+    gist_position_ids = gist_token_pos.clone()
+
+    # --- token-token causal mask ---
+    row_idx = torch.arange(max_seqlen, device=device).unsqueeze(1)  # (S, 1)
+    col_idx = torch.arange(max_seqlen, device=device).unsqueeze(0)  # (1, S)
+    causal_base = row_idx >= col_idx  # (S, S) lower-triangular
+
+    valid_row = valid_token  # (B, S)
+    valid_region = valid_row.unsqueeze(2) & valid_row.unsqueeze(1)  # (B, S, S)
+    token_token_mask = causal_base.unsqueeze(0) & valid_region  # (B, S, S)
+
+    # --- gist-to-token mask: (B, max_gist_num, max_seqlen) ---
+    # Each gist j sees original tokens in the window (prev_gist_pos, current_gist_pos].
+    # prev_gist_pos for j=first_gist is the padlen - 1 (i.e., window starts at padlen).
+    # We compute window_begin[b, j] = gist_token_pos[b, j-1] + 1 for j > first,
+    #                                 = padlen[b]               for j = first valid gist.
+
+    # Shift gist_token_pos to get previous gist positions
+    # prev_pos[b, j] = gist_token_pos[b, j-1] if j > gist_pad, else padlen[b] - 1
+    prev_pos = torch.zeros_like(gist_token_pos)
+    prev_pos[:, 1:] = gist_token_pos[:, :-1]
+    # For the first valid gist in each sample, set prev_pos to padlen - 1
+    # so that window_begin = padlen - 1 + 1 = padlen
+    first_gist_col = gist_pads  # (B,) — index of first valid gist
+    # Use scatter to set prev_pos at the first valid gist position
+    first_gist_col_expanded = first_gist_col.unsqueeze(1)  # (B, 1)
+    sentinel_val = (padlens - 1).unsqueeze(1)  # (B, 1) — so window_begin = padlen
+    prev_pos.scatter_(1, first_gist_col_expanded, sentinel_val)
+
+    window_begin = prev_pos + 1  # (B, G) — inclusive start of window
+    window_end = gist_token_pos + 1  # (B, G) — exclusive end of window
+
+    # token_pos_3d: (1, 1, S)
+    token_pos_3d = token_pos.unsqueeze(1)  # (1, 1, S)
+    gist_to_token_mask = (
+        (token_pos_3d >= window_begin.unsqueeze(2)) &
+        (token_pos_3d < window_end.unsqueeze(2)) &
+        gist_mask.unsqueeze(2)
+    )  # (B, G, S)
+
+    # --- gist-to-gist causal mask: (B, max_gist_num, max_gist_num) ---
+    gist_col_range = gist_idx_range.unsqueeze(1)  # (1, 1, G)
+    gist_row_range = gist_idx_range.unsqueeze(2)  # (1, G, 1)
+    gist_gist_causal = gist_col_range <= gist_row_range  # (1, G, G)
+    gist_gist_mask = gist_gist_causal & gist_mask.unsqueeze(2) & gist_mask.unsqueeze(1)  # (B, G, G)
+
+    # --- assemble full attention mask: (B, total_len, total_len) ---
+    new_attn_mask = torch.zeros((batch_size, total_len, total_len), dtype=torch.bool, device=device)
+    # token-token block (top-left)
     new_attn_mask[:, :max_seqlen, :max_seqlen] = token_token_mask
     # gist-to-token block (bottom-left)
     new_attn_mask[:, max_seqlen:, :max_seqlen] = gist_to_token_mask
@@ -233,6 +377,21 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                 input_ids, attention_mask, ratio, padding_check_idx, padding_side, "none",
             )
         return _prepare_gist_input_dynamic_interleave
+    elif gist_type == 'pattern':
+        def _prepare_gist_input_pattern(
+            input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
+        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+            assert "pattern" in kwargs, "pattern must be provided in kwargs for gist_type='pattern'"
+            pattern = kwargs["pattern"]
+            assert pattern.shape == input_ids.shape, \
+                f"pattern shape {pattern.shape} must match input_ids shape {input_ids.shape}"
+            for mask in attention_mask:
+                if mask.any():
+                    assert mask[padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
+            return _build_pattern_mask_vectorized(
+                input_ids, attention_mask, pattern, padding_check_idx, padding_side,
+            )
+        return _prepare_gist_input_pattern
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
 
