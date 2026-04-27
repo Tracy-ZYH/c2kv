@@ -365,15 +365,11 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
         def _prepare_gist_input_dynamic_interleave(
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
         ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
-            if "ratio" in kwargs:
-                ratio = kwargs["ratio"]
-            else:
-                ratio = random.choice([4, 8, 16])
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
             return _build_interleave_mask_vectorized(
-                input_ids, attention_mask, ratio, padding_check_idx, padding_side, "none",
+                input_ids, attention_mask, kwargs["ratio"], padding_check_idx, padding_side, "none",
             )
         return _prepare_gist_input_dynamic_interleave
     elif gist_type == 'pattern':
@@ -431,7 +427,10 @@ def process_context_input_ids(
     input_ids = context_input_ids.clone()
     gist_attn_mask = input_ids != -100
     input_ids[~gist_attn_mask] = model.gist_token_id
-    outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask)
+    generate_gist_kwargs = {}
+    if model.config.gist_type == "dynamic-interleave":
+        generate_gist_kwargs["ratio"] = random.choice([2, 4, 8])
+    outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask, **generate_gist_kwargs)
     # do reconstruction if reconstruct_kwargs is given
     reconstruct_loss = None
     if reconstruct_kwargs is not None and model.training:

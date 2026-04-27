@@ -13,8 +13,9 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_m
     --enable_gist True \
     --gist_param qkv \
     --gist_type dynamic-interleave \
-    --output_dir $OUTPUT_DIR/260411-tulu3-dynamic_interleave-1024 \
-    --logging_dir ./logs/llama3.1-8b-mixed/260411-tulu3-dynamic_interleave-1024 \
+    --gist_residual_type mean \
+    --output_dir $OUTPUT_DIR/260424-tulu3-dyn_interleave-1024-residual \
+    --logging_dir ./logs/llama3.1-8b-mixed/260424-tulu3-dyn_interleave-1024-residual \
     --logging_steps 10 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \
