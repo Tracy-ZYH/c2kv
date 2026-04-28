@@ -19,6 +19,10 @@ def main():
     parser = HfArgumentParser([ModelArgs, TrainingArgs])
     model_args, training_args = parser.parse_args_into_dataclasses()
 
+    if model_args.gist_gradient_checkpointing:
+        import models.gist_utils as _gist_utils
+        _gist_utils.GIST_GRADIENT_CHECKPOINTING = True
+
     model, tokenizer = get_model_and_tokenizer(model_args, evaluation_mode=not training_args.do_train)
 
     if model_args.enable_gist and training_args.only_train_gist:

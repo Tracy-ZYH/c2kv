@@ -90,6 +90,10 @@ class ModelArgs:
         default=None,
         metadata={'help': 'Gist residual type.'},
     )
+    gist_gradient_checkpointing: bool = field(
+        default=False,
+        metadata={'help': 'Enable gradient checkpointing for generate_gist to reduce VRAM usage.'},
+    )
     max_new_tokens: Optional[int] = field(
         default=None,
         metadata={'help': 'How many tokens at maximum to return?'},

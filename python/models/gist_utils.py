@@ -9,6 +9,8 @@ from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
+GIST_GRADIENT_CHECKPOINTING = False
+
 
 @dataclass
 class GistModelOutputWithPast(CausalLMOutputWithPast):

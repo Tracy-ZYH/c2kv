@@ -42,7 +42,7 @@ from .configuration_qwen3 import Qwen3Config
 from ..gist_utils import (
     get_prepare_gist_input_func, process_context_input_ids,
     gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast,
-    get_apply_gist_residual_func
+    get_apply_gist_residual_func, GIST_GRADIENT_CHECKPOINTING
 )
 
 
@@ -554,15 +554,37 @@ class Qwen3Model(Qwen3PreTrainedModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         gist_key_values = []
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            hidden_states, gist_layer_kv = decoder_layer.forward_with_gist(
-                hidden_states,
-                gist_mask,
-                attention_mask,
-                position_embeddings,
-                **kwargs,
-            )
-            gist_key_values.append(gist_layer_kv)
+        if self.training and GIST_GRADIENT_CHECKPOINTING:
+            # Use gradient checkpointing to reduce memory: recompute intermediate
+            # activations during backward instead of storing them for all layers.
+            # use_reentrant=True is required for DeepSpeed ZeRO-3 compatibility:
+            # use_reentrant=False uses lazy recomputation via unpack hooks that
+            # bypass DeepSpeed's parameter-gathering hooks, causing shape mismatches
+            # on partitioned parameters.
+            cos, sin = position_embeddings
+            for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+                def _make_ckpt_fn(layer):
+                    def _fn(hs):
+                        hs, (gk, gv) = layer.forward_with_gist(
+                            hs, gist_mask, attention_mask, (cos, sin), **kwargs
+                        )
+                        return hs, gk, gv
+                    return _fn
+                hidden_states, gist_k, gist_v = torch.utils.checkpoint.checkpoint(
+                    _make_ckpt_fn(decoder_layer), hidden_states,
+                    use_reentrant=True,
+                )
+                gist_key_values.append((gist_k, gist_v))
+        else:
+            for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+                hidden_states, gist_layer_kv = decoder_layer.forward_with_gist(
+                    hidden_states,
+                    gist_mask,
+                    attention_mask,
+                    position_embeddings,
+                    **kwargs,
+                )
+                gist_key_values.append(gist_layer_kv)
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
