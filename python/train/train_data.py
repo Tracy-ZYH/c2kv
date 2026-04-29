@@ -528,6 +528,42 @@ def _process_multi_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     }
 
 
+def _extract_nextcoder_code(prompt: str):
+    """Extract instruction (before first ```) and code (inside ``` fences) from a NextCoder prompt."""
+    import re
+    match = re.search(r'```(?:\w*)\n(.*?)```', prompt, re.DOTALL)
+    if match:
+        instruction = prompt[:match.start()].strip()
+        code = match.group(1).strip()
+    else:
+        # No code fence found — treat entire prompt as instruction
+        instruction = prompt.strip()
+        code = ""
+    return instruction, code
+
+
+def extract_nextcoder_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract documents, question, and answer from NextCoder dataset format."""
+    instruction, code = _extract_nextcoder_code(sample['prompt'])
+
+    # Split code into chunks by double newlines
+    if code:
+        chunks = [c.strip() for c in code.split('\n\n') if c.strip()]
+    else:
+        chunks = []
+
+    # Merge smallest adjacent chunks when exceeding max_chunks
+    max_chunks = 15
+    while len(chunks) > max_chunks:
+        chunks = _merge_smallest_chunks(chunks)
+
+    return {
+        'documents': chunks,
+        'question': instruction,
+        'answer': [sample['completion']],
+    }
+
+
 def extract_tulu_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract documents, question, and answer from tulu-3-sft-mixture format.
@@ -577,6 +613,9 @@ class MultiDocDataset(GistDataset):
         elif "longmagpie" in path or "longalpaca" in path:
             data = datasets.load_from_disk(path)
             extract_documents = None
+        elif "nextcoder" in path.lower():
+            data = datasets.load_from_disk(path)
+            extract_documents = extract_nextcoder_documents
         elif "tulu" in path:
             data = datasets.load_dataset(path, split="train")
             # Pre-filter invalid samples
