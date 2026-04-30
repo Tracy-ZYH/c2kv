@@ -55,7 +55,7 @@ def _build_interleave_mask_vectorized(
     original_seqlens = attention_mask.sum(dim=1)  # (batch_size,)
     seqlens = original_seqlens.clone()
 
-    if gist_residual_type == "mean":
+    if gist_residual_type in ("mean", "embed-mean"):
         residual = seqlens % ratio
         needs_pad = (residual != 0) & (seqlens > 0)
         seqlens = torch.where(needs_pad, torch.clamp(seqlens + ratio - residual, max=max_seqlen), seqlens)
@@ -332,7 +332,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                 if seqlen == 0:
                     continue
                 original_seqlen = seqlen
-                if gist_residual_type == "mean": # need to pad input_ids to multiple of ratio
+                if gist_residual_type in ("mean", "embed-mean"): # need to pad input_ids to multiple of ratio
                     residual_padlen = seqlen % ratio
                     if residual_padlen != 0:
                         seqlen = min(max_seqlen, seqlen + ratio - residual_padlen)
@@ -392,7 +392,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     else:
         raise NotImplementedError(f"gist_type {gist_type} not implemented")
 
-def get_apply_gist_residual_func(config: GistConfigMixin) -> Callable:
+def get_apply_gist_residual_func(config: GistConfigMixin, layer_idx: int = 0) -> Callable:
     def _apply_gist_residual_interleave(
         tokens_tensor: torch.Tensor, gist_tensor: torch.Tensor, ratio: int = 4
     ) -> torch.Tensor:
@@ -404,6 +404,14 @@ def get_apply_gist_residual_func(config: GistConfigMixin) -> Callable:
             pad_mean = tokens_tensor[:, nopad_length:].mean(dim=1, keepdim=True)
             mean_tensor = torch.cat([mean_tensor, pad_mean], dim=1)
         return mean_tensor + gist_tensor
+    if config.gist_residual_type == "embed-mean":
+        if layer_idx == 0:
+            if config.gist_type.startswith("interleave-"):
+                ratio = int(config.gist_type.split('-')[1])
+                return lambda tokens_tensor, gist_tensor, **kwargs: _apply_gist_residual_interleave(tokens_tensor, gist_tensor, ratio=ratio)
+            elif config.gist_type == "dynamic-interleave":
+                return lambda tokens_tensor, gist_tensor, **kwargs: _apply_gist_residual_interleave(tokens_tensor, gist_tensor, ratio=kwargs["ratio"])
+        return lambda tokens_tensor, gist_tensor, **kwargs: gist_tensor
     if config.gist_residual_type == "mean" and config.gist_type.startswith("interleave-"):
         ratio = int(config.gist_type.split('-')[1])
         return lambda tokens_tensor, gist_tensor, **kwargs: _apply_gist_residual_interleave(tokens_tensor, gist_tensor, ratio=ratio)
@@ -625,7 +633,7 @@ def init_gist_embed(model, missing_keys):
             # NOTE: with Llama3.1, change the following line to `if True` in order to initialize the parameters
             # if (model.gist_embed_tokens.weight == 0).all():
             if True:
-                if model.config.gist_residual_type == "mean":
+                if model.config.gist_residual_type in ("mean", "embed-mean"):
                     model.gist_embed_tokens.weight.data.zero_()
                 else:
                     model.gist_embed_tokens.weight.data[:] = model.embed_tokens.weight.data[

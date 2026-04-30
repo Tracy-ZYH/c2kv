@@ -227,7 +227,7 @@ class LlamaAttention(nn.Module):
         )
         
         self.gist_param = '' if config.gist_param is None else config.gist_param
-        self.apply_gist_residual = get_apply_gist_residual_func(config)
+        self.apply_gist_residual = get_apply_gist_residual_func(config, layer_idx)
         init_gist_param = self.gist_param.lower()
         if 'q' in init_gist_param:
             self.gist_q_proj = gen_gist_proj(config.num_attention_heads * self.head_dim, config)

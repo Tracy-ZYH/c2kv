@@ -57,17 +57,12 @@ def get_model_class(
         from .llama import LlamaForCausalLM, LlamaConfig
         from .qwen2_5 import Qwen2ForCausalLM, Qwen2Config
         from .qwen3 import Qwen3ForCausalLM, Qwen3Config
-        from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeConfig
-    # elif gist_param_type == "lora":
-        # from .llama_lora import LlamaForCausalLM, LlamaConfig
-        # from .qwen3_lora import Qwen3ForCausalLM, Qwen3Config
     else:
         raise ValueError(f"Unsupported gist_param_type: {gist_param_type}")
     ARCHITECTURE_TO_CLASS = {
         'LlamaForCausalLM': (LlamaConfig, LlamaForCausalLM),
         'Qwen2ForCausalLM': (Qwen2Config, Qwen2ForCausalLM),
         'Qwen3ForCausalLM': (Qwen3Config, Qwen3ForCausalLM),
-        'Qwen3MoeForCausalLM': (Qwen3MoeConfig, Qwen3MoeForCausalLM),
     }
     probe_config = AutoConfig.from_pretrained(
         model_name_or_path, 

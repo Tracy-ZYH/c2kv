@@ -25,8 +25,8 @@ def main():
     parser = argparse.ArgumentParser(description="Generate evaluation commands for multiple checkpoints.")
     parser.add_argument('--add_ckpt', action='append', required=True, dest='checkpoints_roots', help='Additional checkpoint directory to evaluate')
     parser.add_argument('--datasets', default='wikimqa,musique,hotpotqa,multinews,samsum', help='Dataset names separated by comma (e.g., A,B,C,D)')
-    parser.add_argument('--max_examples', type=int, default=None, help='Max number of examples to test.')
     parser.add_argument('--output_file', required=True, help='Output file to save commands')
+    parser.add_argument('--override-ratio', type=int, default=None, help='Override gist ratio')
     parser.add_argument('--overwrite', action='store_true', default=False, help='Overwrite the output file instead of appending')
     args, extra_args = parser.parse_known_args()
 
@@ -50,6 +50,8 @@ def main():
         for checkpoint in checkpoints:
             method = checkpoint.split('/')[-2]
             model = checkpoint.split('/')[-3]
+            if args.override_ratio and '_interleave' in method:
+                method = method.replace('_interleave', f'{args.override_ratio}x')
             for dataset in datasets:
                 cmd = [
                     'python', 'python/inference/expr_c2kv.py',
@@ -57,8 +59,8 @@ def main():
                     '--output_file', f'results/gist/{model}/{method}/{dataset}/{os.path.basename(checkpoint)}.jsonl',
                     '--dataset', dataset,
                 ]
-                if args.max_examples:
-                    cmd.extend(['--max_examples', str(args.max_examples)])
+                if args.override_ratio:
+                    cmd.extend(['--override-ratio', str(args.override_ratio)])
                 if extra_args:
                     cmd.extend(extra_args)
                 f.write(' '.join(cmd) + '\n')
