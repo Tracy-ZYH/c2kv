@@ -1,5 +1,5 @@
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
-export OUTPUT_DIR=/home/admin/workspace/aop_lab/app_data/checkpoints/qwen3-4b-inst/
+export OUTPUT_DIR=./checkpoints/qwen3-4b-inst/
 HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_sft \
     --num_train_epochs 5 \
     --warmup_steps 100 \

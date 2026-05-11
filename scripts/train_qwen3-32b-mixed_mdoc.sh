@@ -1,25 +1,25 @@
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
-export OUTPUT_DIR=/home/admin/workspace/aop_lab/app_data/checkpoints/qwen3-32b-mixed/
 HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_mdoc \
+    --resume_from_checkpoint ./checkpoints/qwen3-32b-mixed/260507-tulu3-dynamic_interleave-1024-embed_residual/checkpoint-2500 \
     --num_train_epochs 1 \
-    --warmup_ratio 0.06 \
+    --warmup_ratio 0.05 \
     --model_name_or_path Qwen/Qwen3-32B \
     --padding_side right \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 16 \
     --gradient_accumulation_steps 4 \
     --lr_scheduler_type cosine \
-    --learning_rate 1e-5 \
+    --learning_rate 5e-6 \
     --weight_decay 0.1 \
     --enable_gist True \
     --gist_param qkv \
     --gist_type dynamic-interleave \
-    --gist_residual_type mean \
+    --gist_residual_type embed-mean \
     --gist_gradient_checkpointing True \
-    --output_dir $OUTPUT_DIR/260429-tulu3-dynamic_interleave-1024-residual \
-    --logging_dir ./logs/qwen3-32b-mixed/260429-tulu3-dynamic_interleave-1024-residual \
+    --output_dir ./checkpoints/qwen3-32b-mixed/260507-tulu3-dynamic_interleave-1024-embed_residual \
+    --logging_dir ./logs/qwen3-32b-mixed/260507-tulu3-dynamic_interleave-1024-embed_residual \
     --logging_steps 1 \
-    --deepspeed ./configs/ds_config.json \
+    --deepspeed ./configs/ds_config_32b.json \
     --do_train True \
     --eval_strategy steps \
     --eval_steps 50 \

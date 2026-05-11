@@ -10,6 +10,8 @@ from inference.mdocdataset import load_mdoc_dataset, QA_SYSTEM_PROMPT
 
 logger = getLogger(__name__)
 
+MAX_CHUNKS = 10
+
 
 def add_eos(inputs: Mapping, eos_token_id: int):
     """Add eos for BatchEncoding object."""
@@ -450,7 +452,7 @@ def _merge_smallest_chunks(chunks: List[str]) -> List[str]:
     return merged
 
 
-def _split_context_messages(messages: List[Dict[str, str]], max_chunks: int = 15) -> List[str]:
+def _split_context_messages(messages: List[Dict[str, str]], max_chunks: int = MAX_CHUNKS) -> List[str]:
     """
     Split context messages into documents using hierarchical delimiter-based splitting.
     Follows Block-Attention approach with chunk limit enforcement.
@@ -472,7 +474,25 @@ def _split_context_messages(messages: List[Dict[str, str]], max_chunks: int = 15
     return all_chunks
 
 
-def _process_single_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+def _split_long_documents(documents: List[str], max_doc_length: int, max_doc_num: int) -> List[str]:
+    """Split documents that exceed max_doc_length (estimated as len(text) / 2 tokens)
+    and cap at max_doc_num."""
+    max_char_length = max_doc_length * 2
+    result = []
+    for doc in documents:
+        if len(doc) <= max_char_length:
+            result.append(doc)
+        else:
+            for i in range(0, len(doc), max_char_length):
+                chunk = doc[i:i + max_char_length].strip()
+                if chunk:
+                    result.append(chunk)
+    while len(result) > max_doc_num:
+        result = _merge_smallest_chunks(result)
+    return result
+
+
+def _process_single_turn(messages: List[Dict[str, str]], max_doc_length: int, max_doc_num: int) -> Dict[str, Any]:
     """Process single-turn conversation from tulu dataset."""
     user_msg = next(msg['content'] for msg in messages if msg['role'] == 'user')
     assistant_msg = next(msg['content'] for msg in messages if msg['role'] == 'assistant')
@@ -484,9 +504,7 @@ def _process_single_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     question = chunks[-1].strip()
     documents = [c.strip() for c in chunks[:-1] if c.strip()]
 
-    # Apply chunk limit (max 15 chunks total)
-    max_chunks = 15
-    while len(documents) > max_chunks:
+    while len(documents) > max_doc_num:
         documents = _merge_smallest_chunks(documents)
 
     return {
@@ -496,7 +514,7 @@ def _process_single_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     }
 
 
-def _process_multi_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+def _process_multi_turn(messages: List[Dict[str, str]], max_doc_length: int, max_doc_num: int) -> Dict[str, Any]:
     """Process multi-turn conversation from tulu dataset."""
     # Last turn is Q&A
     # Find last user and assistant messages
@@ -518,7 +536,7 @@ def _process_multi_turn(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     last_qa_start = min(last_user_idx, last_assistant_idx)
     context_messages = messages[:last_qa_start] if last_qa_start > 0 else []
 
-    # Convert context messages to documents, splitting by 8192 chars
+    # Convert context messages to documents
     documents = _split_context_messages(context_messages) if context_messages else []
 
     return {
@@ -542,7 +560,7 @@ def _extract_nextcoder_code(prompt: str):
     return instruction, code
 
 
-def extract_nextcoder_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
+def extract_nextcoder_documents(sample: Dict[str, Any], max_doc_length: int, max_doc_num: int) -> Dict[str, Any]:
     """Extract documents, question, and answer from NextCoder dataset format."""
     instruction, code = _extract_nextcoder_code(sample['prompt'])
 
@@ -552,10 +570,10 @@ def extract_nextcoder_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
     else:
         chunks = []
 
-    # Merge smallest adjacent chunks when exceeding max_chunks
-    max_chunks = 15
-    while len(chunks) > max_chunks:
+    while len(chunks) > max_doc_num:
         chunks = _merge_smallest_chunks(chunks)
+
+    chunks = _split_long_documents(chunks, max_doc_length, max_doc_num)
 
     return {
         'documents': chunks,
@@ -564,7 +582,34 @@ def extract_nextcoder_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def extract_tulu_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
+def extract_longalign_documents(sample: Dict[str, Any], max_doc_length: int, max_doc_num: int) -> Dict[str, Any]:
+    """
+    Extract documents, question, and answer from longalign-10k format.
+    Each sample has 'messages' with a single user turn (long context + question)
+    and a single assistant turn (answer).
+    """
+    messages = sample['messages']
+    user_msg = next(msg['content'] for msg in messages if msg['role'] == 'user')
+    assistant_msg = next(msg['content'] for msg in messages if msg['role'] == 'assistant')
+
+    chunks = _split_by_delimiter(user_msg)
+
+    question = chunks[-1].strip()
+    documents = [c.strip() for c in chunks[:-1] if c.strip()]
+
+    while len(documents) > max_doc_num:
+        documents = _merge_smallest_chunks(documents)
+
+    documents = _split_long_documents(documents, max_doc_length, max_doc_num)
+
+    return {
+        'documents': documents,
+        'question': question,
+        'answer': [assistant_msg],
+    }
+
+
+def extract_tulu_documents(sample: Dict[str, Any], max_doc_length: int, max_doc_num: int) -> Dict[str, Any]:
     """
     Extract documents, question, and answer from tulu-3-sft-mixture format.
     """
@@ -579,10 +624,10 @@ def extract_tulu_documents(sample: Dict[str, Any]) -> Dict[str, Any]:
 
     if len(user_messages) == 1 and len(assistant_messages) == 1:
         # Single-turn conversation
-        return _process_single_turn(messages)
+        return _process_single_turn(messages, max_doc_length, max_doc_num)
     else:
         # Multi-turn conversation
-        return _process_multi_turn(messages)
+        return _process_multi_turn(messages, max_doc_length, max_doc_num)
 
 
 class MultiDocDataset(GistDataset):
@@ -615,14 +660,24 @@ class MultiDocDataset(GistDataset):
             extract_documents = None
         elif "nextcoder" in path.lower():
             data = datasets.load_from_disk(path)
-            extract_documents = extract_nextcoder_documents
+            extract_documents = lambda s: extract_nextcoder_documents(s, max_doc_length, max_doc_num)
+        elif "longalign" in path:
+            data = datasets.load_dataset("json", data_files=path, split="train")
+            max_context_chars = max_doc_length * max_doc_num * 4
+            data = data.filter(
+                lambda s: len(s['messages'][0]['content']) <= max_context_chars,
+                num_proc=32,
+            )
+            print(len(data))
+            logger.info(f"Filtered longalign dataset size: {len(data)}")
+            extract_documents = lambda s: extract_longalign_documents(s, max_doc_length, max_doc_num)
         elif "tulu" in path:
             data = datasets.load_dataset(path, split="train")
             # Pre-filter invalid samples
             logger.info("Filtering tulu dataset samples...")
             data = data.filter(_is_valid_tulu_sample, num_proc=32)
             logger.info(f"Filtered dataset size: {len(data)}")
-            extract_documents = extract_tulu_documents
+            extract_documents = lambda s: extract_tulu_documents(s, max_doc_length, max_doc_num)
         else:
             raise NotImplementedError(f"Unsupported dataset {path}")
         if num_samples is None:
@@ -660,6 +715,7 @@ class MultiDocDataset(GistDataset):
     ) -> Dict[str, Any]:
         if extract_docs is not None:
             sample = extract_docs(sample)
+            sample['documents'] = [d for d in sample['documents'] if d.strip()]
             query_prompt_seed = sum(map(len, sample['documents'])) % len(QA_QUERY_PROMPTS)
             sample['question'] = QA_QUERY_PROMPTS[query_prompt_seed] + '\n\n' + sample['question']
         concat_doc_ids = []

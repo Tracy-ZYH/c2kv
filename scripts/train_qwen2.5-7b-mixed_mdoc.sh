@@ -1,5 +1,5 @@
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
-export OUTPUT_DIR=/home/admin/workspace/aop_lab/app_data/checkpoints/qwen2.5-7b-mixed/
+export OUTPUT_DIR=./checkpoints/qwen2.5-7b-mixed/
 HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_mdoc \
     --num_train_epochs 1 \
     --warmup_ratio 0.06 \
@@ -13,14 +13,14 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_m
     --enable_gist True \
     --gist_param qkv \
     --gist_type dynamic-interleave \
-    --gist_residual_type mean \
-    --output_dir $OUTPUT_DIR/260426-tulu3-dyn_interleave-1024 \
-    --logging_dir ./logs/qwen2.5-7b-mixed/260426-tulu3-dyn_interleave-1024 \
+    --gist_residual_type embed-mean \
+    --output_dir $OUTPUT_DIR/260430-tulu3-dynamic_interleave-1024-embed_residual \
+    --logging_dir ./logs/qwen2.5-7b-mixed/260430-tulu3-dynamic_interleave-1024-embed_residual \
     --logging_steps 10 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \
     --eval_strategy steps \
-    --eval_steps 1000 \
+    --eval_steps 100 \
     --only_train_gist True \
     --dataloader_num_workers 8 \
     --dataloader_prefetch_factor 32 \
