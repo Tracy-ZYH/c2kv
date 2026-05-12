@@ -76,10 +76,11 @@ def build_block_past_key_values(
         if enable_compress:
             compressed_kv = []
             capacity = math.ceil(past_key_values.get_seq_length() / 4.0)
-            for query, (keys, values) in zip(queries, past_key_values):
-                keys, values, _ = compress_kv(compression_method, capacity, query[0], keys[0], values[0])
+            # transformers 5.x: iterate `.layers` instead of the cache directly.
+            for query, layer in zip(queries, past_key_values.layers):
+                keys, values, _ = compress_kv(compression_method, capacity, query[0], layer.keys[0], layer.values[0])
                 compressed_kv.append((keys.unsqueeze(0), values.unsqueeze(0)))
-            past_key_values = DynamicCache(compressed_kv)
+            past_key_values = DynamicCache(ddp_cache_data=compressed_kv, config=model.config)
         caches.append(past_key_values)
 
     response_input_ids = torch.tensor(
@@ -106,11 +107,14 @@ def block_generate(
         )
     with record.record("blend"):
         if past_key_values is not None:
-            past_key_values = merge_and_rotary_past_key_values(pkvs=past_key_values, block_lengths=block_lengths, rope_theta=model.config.rope_theta)
+            rope_theta = model.config.rope_parameters.get("rope_theta", 10000.0) \
+                if hasattr(model.config, "rope_parameters") and model.config.rope_parameters is not None \
+                else getattr(model.config, "rope_theta", 10000.0)
+            past_key_values = merge_and_rotary_past_key_values(pkvs=past_key_values, block_lengths=block_lengths, rope_theta=rope_theta)
     if record.enable:
-        past_key_values_cpu = [(k.to(device=torch.device('cpu')), v.to(device=torch.device('cpu'))) for k, v in past_key_values]
+        past_key_values_cpu = [(layer.keys.to(device=torch.device('cpu')), layer.values.to(device=torch.device('cpu'))) for layer in past_key_values.layers]
         with record.record("offload"):
-            for layer_i in enumerate(len(past_key_values_cpu)):
+            for layer_i in range(len(past_key_values_cpu)):
                 key, value = past_key_values_cpu[layer_i]
                 past_key_values_cpu[layer_i] = (key.to(device=model.device), value.to(device=model.device))
     input_length = input_ids.size(-1)

@@ -5,8 +5,8 @@ from logging import getLogger
 from typing import Tuple, Type, Optional
 from dataclasses import asdict
 import transformers
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
-from transformers.modeling_utils import PreTrainedModel, PretrainedConfig
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig, PretrainedConfig
+from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.integrations import is_deepspeed_zero3_enabled
 

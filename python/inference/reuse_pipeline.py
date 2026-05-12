@@ -117,11 +117,11 @@ class LLMInference:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         config = self.model.config
-        self.rope_theta = config.rope_theta
-        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
+        # transformers 5.x: rope_theta / rope_type live under config.rope_parameters
+        # (config.rope_scaling is a BC property that aliases rope_parameters).
+        rope_params = getattr(config, "rope_parameters", None) or {}
+        self.rope_theta = rope_params.get("rope_theta", getattr(config, "rope_theta", 10000.0))
+        self.rope_type = rope_params.get("rope_type", "default")
 
     def get_prefill_kv_cache(self, 
         texts: List[str],
@@ -210,7 +210,7 @@ class LLMInference:
             past_ids = torch.cat(past_ids).unsqueeze(0)
             # we don't check this for the compressed KV case
             # assert past_ids.shape[1] == past_key_values[0][0][0].shape[1]
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            past_key_values = DynamicCache(ddp_cache_data=past_key_values, config=self.model.config)
         
         # 编码查询文本
         query_inputs = tokenize_for_reuse(
@@ -426,7 +426,7 @@ class LLMInference:
             precomputed_kv.past_key_values = ()
 
         retained_kv_length = int(retained_kv[0][0].shape[2])
-        retained_kv = DynamicCache.from_legacy_cache(tuple(retained_kv))
+        retained_kv = DynamicCache(ddp_cache_data=tuple(retained_kv), config=self.model.config)
 
         # 2. Concatenate ids to recompute + prepare customized attention_mask
         recompute_length = full_kv_length - retained_kv_length
@@ -477,7 +477,8 @@ class LLMInference:
         assert isinstance(output.past_key_values, DynamicCache)
         rearranged_index = rearranged_index.squeeze(0)
         ret_kv = []
-        for output_key, output_value in output.past_key_values:
+        for layer in output.past_key_values.layers:
+            output_key, output_value = layer.keys, layer.values
             output_key, output_value = output_key[0], output_value[0] # only 1 sequence
             key = torch.empty_like(output_key)
             value = torch.empty_like(output_value)

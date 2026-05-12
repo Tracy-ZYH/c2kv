@@ -181,8 +181,12 @@ class Qwen3Config(PretrainedConfig, GistConfigMixin):
         max_window_layers=28,
         layer_types=None,
         attention_dropout=0.0,
+        pad_token_id=None,
         **kwargs,
     ):
+        # transformers 5.x removed pad_token_id as a default attribute on PreTrainedConfig;
+        # store it explicitly so `config.pad_token_id` is always available.
+        self.pad_token_id = pad_token_id
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size

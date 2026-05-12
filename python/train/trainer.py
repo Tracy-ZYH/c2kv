@@ -200,9 +200,10 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
             self.past_length = self.system_kv.get_seq_length()
         # make a copy of the system_kv, repeated to batch_size
         system_kv = []
-        for keys, values in self.system_kv:
+        for layer in self.system_kv.layers:
+            keys, values = layer.keys, layer.values
             system_kv.append((keys.expand(batch_size, -1, -1, -1), values.expand(batch_size, -1, -1, -1)))
-        return DynamicCache(system_kv, config=model.model.config)
+        return DynamicCache(ddp_cache_data=system_kv, config=model.model.config)
 
     def prepare_vanilla_inputs(
         self,

@@ -87,10 +87,10 @@ class MDQAEvaluator:
                     self.compression_method, capacity, query[0], layer.keys[0], layer.values[0]
                 )
                 compressed_key_values.append((keys.unsqueeze(0), values.unsqueeze(0)))
-            past_key_values = DynamicCache(compressed_key_values)
+            past_key_values = DynamicCache(ddp_cache_data=compressed_key_values, config=self.model.config)
 
         if record.enable:
-            cache_cpu = [(key.to(device="cpu"), value.to(device="cpu")) for key, value in past_key_values]
+            cache_cpu = [(layer.keys.to(device="cpu"), layer.values.to(device="cpu")) for layer in past_key_values.layers]
             with record.record('offload'):
                 for layer_i in range(len(cache_cpu)):
                     k, v = cache_cpu[layer_i]
