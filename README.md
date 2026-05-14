@@ -63,9 +63,7 @@ C2KV enables **independently prefilled text segments to be compressed into compa
 pip install -r requirements.txt
 ```
 
-**Key dependencies**: `transformers==4.57.1`, `torch==2.9.0`, `deepspeed==0.18.1`, `flash-attn` (required for `flash_attention_2` backend).
-
-> **Important**: With `transformers==4.57.1`, the `model.generate()` API has a known bug with custom `position_ids`. See [huggingface/transformers#36510](https://github.com/huggingface/transformers/issues/36510) for the fix.
+**Key dependencies**: `transformers==5.8.0`, `torch==2.9.0`, `deepspeed==0.18.1`, `flash-attn` (required for `flash_attention_2` backend).
 
 ### Quick Start
 
