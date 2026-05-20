@@ -211,6 +211,8 @@ __marimo__/
 /logs
 /outputs/
 /saved_kv/
+/checkpoints
+/.*
 
 *.npy
 *.npz

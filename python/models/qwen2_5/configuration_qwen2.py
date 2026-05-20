@@ -14,8 +14,7 @@
 # limitations under the License.
 """Qwen2 model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig, layer_type_validation
-from transformers.modeling_rope_utils import rope_config_validation
+from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 from ..gist_utils import GistConfigMixin
@@ -201,13 +200,10 @@ class Qwen2Config(PretrainedConfig, GistConfigMixin):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        self.rope_parameters = rope_scaling
         self.attention_dropout = attention_dropout
-        # Validate the correctness of rotary position embeddings parameters
-        # BC: if there is a 'type' field, move it to 'rope_type'.
-        if self.rope_scaling is not None and "type" in self.rope_scaling:
-            self.rope_scaling["rope_type"] = self.rope_scaling["type"]
-        rope_config_validation(self)
+        self.standardize_rope_params()
+        self.validate_rope()
 
         self.layer_types = layer_types
         if self.layer_types is None:
@@ -217,7 +213,7 @@ class Qwen2Config(PretrainedConfig, GistConfigMixin):
                 else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        layer_type_validation(self.layer_types, self.num_hidden_layers)
+        self.validate_layer_type()
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

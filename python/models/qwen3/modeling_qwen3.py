@@ -531,6 +531,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        attention_mask = create_causal_mask(
+            self.config, inputs_embeds, attention_mask, past_key_values=None, position_ids=position_ids
+        )
+
         gist_key_values = []
         if self.training and GIST_GRADIENT_CHECKPOINTING:
             # use_reentrant=True is required for DeepSpeed ZeRO-3 compatibility:
