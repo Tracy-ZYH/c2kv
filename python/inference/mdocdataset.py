@@ -577,7 +577,7 @@ class RULERDataset(AbstractMDQADataset):
             documents = [context_text] if context_text else [""]
         else:
             # Split by paragraphs first
-            paragraphs = context_text.split('\n')
+            paragraphs = context_text.split('. ')
             current_chunk = ""
 
             for para in paragraphs:
