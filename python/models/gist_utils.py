@@ -24,6 +24,7 @@ class GistConfigMixin:
     gist_extra_embed_num: int = 1
     gist_token_id: int | None = None
     gist_residual_type: str = "none"
+    gist_overlap: int = 0
 
 
 def rotate_half(x) -> torch.Tensor:
@@ -45,6 +46,7 @@ def _build_interleave_mask_vectorized(
     padding_check_idx: int,
     padding_side: str,
     gist_residual_type: str = "none",
+    gist_overlap: int = 0,
 ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
     device = input_ids.device
     batch_size, max_seqlen = input_ids.shape
@@ -95,7 +97,6 @@ def _build_interleave_mask_vectorized(
 
     # chunk begin/end for each gist token
     chunk_begin = local_j * ratio  # (B, max_gist_num)
-    chunk_end = torch.clamp((local_j + 1) * ratio, max=0).long()  # placeholder, compute properly below
     chunk_end = torch.min((local_j + 1) * ratio, original_seqlens.unsqueeze(1))  # (B, max_gist_num)
 
     # gist_position_ids: end - 1 for valid gist tokens, 0 otherwise
@@ -116,8 +117,9 @@ def _build_interleave_mask_vectorized(
     sink_mask = (token_pos_3d >= padlens_3d) & (token_pos_3d < (padlens + sink_ends).unsqueeze(1).unsqueeze(2))
     # (B, 1, max_seqlen) -> broadcast to (B, max_gist_num, max_seqlen)
 
-    # chunk mask: gist j attends to [padlen + chunk_begin_j, padlen + chunk_end_j)
-    chunk_begin_abs = padlens.unsqueeze(1) + chunk_begin  # (B, max_gist_num)
+    # chunk mask: gist j attends to [padlen + overlap_begin_j, padlen + chunk_end_j)
+    overlap_begin = torch.clamp(chunk_begin - gist_overlap, min=0)
+    chunk_begin_abs = padlens.unsqueeze(1) + overlap_begin
     chunk_end_abs = padlens.unsqueeze(1) + chunk_end  # (B, max_gist_num)
     chunk_mask = (token_pos_3d >= chunk_begin_abs.unsqueeze(2)) & (token_pos_3d < chunk_end_abs.unsqueeze(2))
     # (B, max_gist_num, max_seqlen)
@@ -298,6 +300,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     gist_residual_type: str = config.gist_residual_type
     assert gist_type, "gist_type must be specified"
     padding_check_idx = 0 if padding_side == "right" else -1
+    gist_overlap = getattr(config, 'gist_overlap', 0)
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
         def _prepare_gist_input_interleave(
@@ -307,7 +310,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
             return _build_interleave_mask_vectorized(
-                input_ids, attention_mask, ratio, padding_check_idx, padding_side, gist_residual_type,
+                input_ids, attention_mask, ratio, padding_check_idx, padding_side, gist_residual_type, gist_overlap,
             )
         return _prepare_gist_input_interleave
     elif gist_type.startswith('anchor-'):
@@ -371,7 +374,7 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
             return _build_interleave_mask_vectorized(
-                input_ids, attention_mask, kwargs["ratio"], padding_check_idx, padding_side, "none",
+                input_ids, attention_mask, kwargs["ratio"], padding_check_idx, padding_side, "none", gist_overlap,
             )
         return _prepare_gist_input_dynamic_interleave
     elif gist_type == 'pattern':

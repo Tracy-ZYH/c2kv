@@ -61,7 +61,7 @@ def tokenize(
         max_length=max_length, truncation=max_length is not None,
         add_generation_prompt=add_generation_prompt,
         enable_thinking=False,
-    )
+    ).input_ids
     if not keep_bos and input_ids[0] == tokenizer.bos_token_id:
         input_ids = input_ids[1:]
     return input_ids

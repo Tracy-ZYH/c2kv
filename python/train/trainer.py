@@ -249,11 +249,6 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         """
         batch_size, doc_total_len = inputs['context_input_ids'].shape
         context_masks = inputs['context_input_ids'] != -100
-        # trim the context_input_ids if the last half is empty
-        # half_doc_total_len = doc_total_len // 2
-        # if not context_masks[:, half_doc_total_len:].any():
-        #     inputs['context_input_ids'] = inputs['context_input_ids'][:, :half_doc_total_len]
-        #     context_masks = context_masks[:, :half_doc_total_len]
         # special cases: no gist inference
         system_kv: DynamicCache = self._get_system_kv(model, batch_size)
         if not self.model_args.enable_gist:

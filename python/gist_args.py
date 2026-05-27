@@ -90,6 +90,10 @@ class ModelArgs:
         default=None,
         metadata={'help': 'Gist residual type.'},
     )
+    gist_overlap: int = field(
+        default=0,
+        metadata={'help': 'Number of preceding blocks each gist token also attends to.'}
+    )
     gist_gradient_checkpointing: bool = field(
         default=False,
         metadata={'help': 'Enable gradient checkpointing for generate_gist to reduce VRAM usage.'},
