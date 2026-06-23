@@ -36,6 +36,7 @@ def main():
         dataset_args = {
             'tokenizer': tokenizer, 'shuffle_seed': training_args.dataset_shuffle_seed,
             'max_doc_length': 1024, 'max_doc_num': 10, 'max_length': 1024,
+            'max_system_length': 256,
         }
         hotpotqa_path = os.path.join(training_args.train_data + "_cleaned", "hotpotqa_train_cleaned")
         wikimqa_path = os.path.join(training_args.train_data + "_cleaned", "wikimqa_train_cleaned")
@@ -63,7 +64,6 @@ def main():
     trainer = GistMultiDocTrainer(
         model=model,
         args=training_args,
-        system_ids=train_dataset.system_prompt_ids,
         max_doc_length=train_dataset.max_doc_length,
         model_args=model_args,
         train_dataset=train_dataset,

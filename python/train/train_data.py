@@ -11,6 +11,7 @@ from inference.mdocdataset import load_mdoc_dataset, QA_SYSTEM_PROMPT
 logger = getLogger(__name__)
 
 MAX_CHUNKS = 10
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def add_eos(inputs: Mapping, eos_token_id: int):
@@ -615,6 +616,9 @@ def extract_tulu_documents(sample: Dict[str, Any], max_doc_length: int, max_doc_
     """
     messages = sample['messages']
 
+    # Capture the first system message (if any) before filtering it out
+    system_text = next((msg['content'] for msg in messages if msg['role'] == 'system'), None)
+
     # Filter out system messages
     messages = [msg for msg in messages if msg['role'] != 'system']
 
@@ -624,10 +628,12 @@ def extract_tulu_documents(sample: Dict[str, Any], max_doc_length: int, max_doc_
 
     if len(user_messages) == 1 and len(assistant_messages) == 1:
         # Single-turn conversation
-        return _process_single_turn(messages, max_doc_length, max_doc_num)
+        result = _process_single_turn(messages, max_doc_length, max_doc_num)
     else:
         # Multi-turn conversation
-        return _process_multi_turn(messages, max_doc_length, max_doc_num)
+        result = _process_multi_turn(messages, max_doc_length, max_doc_num)
+    result['system'] = system_text
+    return result
 
 
 class MultiDocDataset(GistDataset):
@@ -638,6 +644,7 @@ class MultiDocDataset(GistDataset):
         max_length: int = 512,
         max_doc_length: int = 512,
         max_doc_num: int = 20,
+        max_system_length: int = 256,
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
     ):
@@ -691,33 +698,35 @@ class MultiDocDataset(GistDataset):
                 'max_length': max_length,
                 'max_doc_length': max_doc_length,
                 'max_doc_num': max_doc_num,
+                'max_system_length': max_system_length,
                 'extract_docs': extract_documents
             },
-            batched=False, 
+            batched=False,
             num_proc=64,
             remove_columns=data.column_names
         )
         self.max_doc_length = max_doc_length
-        self.system_prompt_ids = tokenize(
-            tokenizer, "You are a helpful assistant.", "system", keep_bos=True,
-        )
+        self.max_system_length = max_system_length
         self.max_doc_num = max_doc_num
         self.max_length = max_length
 
     @staticmethod
     def _preprocess_mdoc_sample(
-        sample: Dict[str, Any], 
+        sample: Dict[str, Any],
         tokenizer: AutoTokenizer,
         max_length: int,
         max_doc_length: int,
         max_doc_num: int,
+        max_system_length: int,
         extract_docs: Callable | None,
     ) -> Dict[str, Any]:
+        system_text = sample.get('system') or DEFAULT_SYSTEM_PROMPT
         if extract_docs is not None:
             sample = extract_docs(sample)
             sample['documents'] = [d for d in sample['documents'] if d.strip()]
             query_prompt_seed = sum(map(len, sample['documents'])) % len(QA_QUERY_PROMPTS)
             sample['question'] = QA_QUERY_PROMPTS[query_prompt_seed] + '\n\n' + sample['question']
+            system_text = sample.get('system') or system_text
         concat_doc_ids = []
         for doc in sample['documents'][:max_doc_num]:
             doc_ids = tokenize(tokenizer, doc, "user", max_doc_length)
@@ -726,6 +735,9 @@ class MultiDocDataset(GistDataset):
             concat_doc_ids.extend(doc_ids)
             concat_doc_ids.extend([-100] * pad_length)
         concat_doc_ids.extend([-100] * (max_doc_length * (max_doc_num - len(sample['documents']))))
+        system_ids = tokenize(tokenizer, system_text, "system", max_system_length, keep_bos=True)
+        system_ids = system_ids[:max_system_length]
+        system_input_ids = system_ids + [-100] * (max_system_length - len(system_ids))
         question_ids = tokenize(tokenizer, sample['question'], "user", add_generation_prompt=True)
         answer_ids = tokenizer.encode(sample['answer'][0], add_special_tokens=False)
         answer_ids.append(tokenizer.eos_token_id)
@@ -741,6 +753,7 @@ class MultiDocDataset(GistDataset):
             input_ids = input_ids[:max_length]
             labels = labels[:max_length]
         return {
+            'system_input_ids': system_input_ids,
             'context_input_ids': concat_doc_ids,
             'input_ids': input_ids,
             'labels': labels,
