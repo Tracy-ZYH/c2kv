@@ -636,6 +636,160 @@ def extract_tulu_documents(sample: Dict[str, Any], max_doc_length: int, max_doc_
     return result
 
 
+def _render_parts(parts: List[Dict[str, Any]] | None) -> str:
+    """Render a message's parts to text, wrapping tool calls/results as the chat template does."""
+    import json
+    out = []
+    for p in parts or []:
+        ptype = p.get('type')
+        if ptype == 'text':
+            out.append(p.get('content') or '')
+        elif ptype == 'tool_call':
+            payload = {'name': p.get('name', ''), 'arguments': p.get('arguments') or {}}
+            out.append('<tool_call>\n' + json.dumps(payload, ensure_ascii=False) + '\n</tool_call>')
+        elif ptype == 'tool_call_response':
+            out.append('<tool_response>\n' + str(p.get('result') or '') + '\n</tool_response>')
+    return '\n'.join(s for s in out if s)
+
+
+def _render_answer_body(out_messages: List[Dict[str, Any]] | None) -> str:
+    """Render the assistant output message(s) into the body string between the
+    generation prompt and EOS."""
+    return '\n'.join(s for s in (_render_parts(m.get('parts')) for m in (out_messages or [])) if s)
+
+
+def _render_conversation(
+    tokenizer: AutoTokenizer,
+    messages: List[Dict[str, Any]],
+    add_generation_prompt: bool = True,
+) -> List[int]:
+    """Render a list of {role, parts} messages to token ids, stripping BOS."""
+    formatted = [
+        {'role': 'user' if m.get('role') == 'tool' else m.get('role', 'user'),
+         'content': _render_parts(m.get('parts'))}
+        for m in messages
+    ]
+    ids = tokenizer.apply_chat_template(
+        formatted, tokenize=True, add_generation_prompt=add_generation_prompt,
+        enable_thinking=False,
+    ).input_ids
+    if ids and ids[0] == tokenizer.bos_token_id:
+        ids = ids[1:]
+    return ids
+
+
+def _fit_history(
+    tokenizer: AutoTokenizer,
+    non_system: List[Dict[str, Any]],
+    max_tokens: int,
+) -> List[int]:
+    """Return history token ids fitting within max_tokens.
+
+    Keeps the first user message plus as many recent turns as possible.
+    """
+    if not non_system:
+        return []
+    full_ids = _render_conversation(tokenizer, non_system)
+    if len(full_ids) <= max_tokens:
+        return full_ids
+    first = non_system[:1]
+    tail = non_system[1:]
+    for start in range(len(tail) - 1, -1, -1):
+        ids = _render_conversation(tokenizer, first + tail[start:])
+        if len(ids) <= max_tokens:
+            return ids
+    return _render_conversation(tokenizer, first)[:max_tokens]
+
+
+def _build_agent_dynamic_samples(
+    batch: Dict[str, List[Any]],
+    tokenizer: AutoTokenizer,
+    max_system_length: int,
+    dynamic_context_cap: int,
+    max_doc_length: int,
+    max_doc_num: int,
+) -> Dict[str, List[Any]]:
+    """Expand agent-trace sessions into per-span dynamic-context samples.
+
+    Each tool definition becomes a separate gist segment of exactly max_doc_length tokens
+    (padded with -100). The full prior conversation history is the question, truncated to
+    first user message + recent turns when needed. Total length bounded by dynamic_context_cap.
+    """
+    import json
+    outputs = {k: [] for k in
+        ('system_input_ids', 'context_input_ids', 'input_ids', 'labels', 'attention_mask', 'dynamic')}
+    for spans in batch['spans']:
+        for sp in spans or []:
+            status = sp.get('status') or {}
+            if status.get('code') != 1:
+                continue
+            attrs = sp.get('attributes') or {}
+            im_raw, om_raw = attrs.get('gen_ai.input.messages'), attrs.get('gen_ai.output.messages')
+            if not im_raw or not om_raw:
+                continue
+            try:
+                in_msgs, out_msgs = json.loads(im_raw), json.loads(om_raw)
+            except (ValueError, TypeError):
+                continue
+            answer_text = _render_answer_body(out_msgs)
+            if not answer_text:
+                continue
+            # Tools: parse → separate MCP vs regular → merge each group independently
+            # MCP tools are always included (they're what the model actually calls);
+            # remaining slots filled with merged regular tools.
+            tool_defs_raw = attrs.get('gen_ai.tool.definitions') or ''
+            try:
+                tools_list = json.loads(tool_defs_raw) if tool_defs_raw else []
+            except (ValueError, TypeError):
+                continue
+            if not tools_list:
+                continue
+            mcp_strs = [json.dumps(t, ensure_ascii=False) for t in tools_list
+                        if t.get('name', '').startswith('mcp__')]
+            regular_strs = [json.dumps(t, ensure_ascii=False) for t in tools_list
+                            if not t.get('name', '').startswith('mcp__')]
+            tool_strs = mcp_strs + regular_strs
+            for _ in range(max(0, len(tool_strs) - max_doc_num)):
+                tool_strs = _merge_smallest_chunks(tool_strs)
+            if not tool_strs:
+                continue
+            # System + answer (fixed cost)
+            system_text = '\n'.join(
+                _render_parts(m.get('parts')) for m in in_msgs if m.get('role') == 'system'
+            ).strip() or DEFAULT_SYSTEM_PROMPT
+            system_ids = tokenize(tokenizer, system_text, "system", max_system_length, keep_bos=True)
+            system_ids = system_ids[:max_system_length]
+            answer_ids = tokenizer.encode(answer_text, add_special_tokens=False)
+            answer_ids.append(tokenizer.eos_token_id)
+            # History: keep as much as possible while leaving room for at least 1 tool
+            non_system = [m for m in in_msgs if m.get('role') != 'system']
+            fixed_cost = len(system_ids) + len(answer_ids)
+            max_history_budget = dynamic_context_cap - fixed_cost - max_doc_length
+            if max_history_budget < 1:
+                continue
+            history_ids = _fit_history(tokenizer, non_system, max_history_budget)
+            # How many tool segments fit in remaining budget?
+            remaining = dynamic_context_cap - fixed_cost - len(history_ids)
+            n_tools = min(len(tool_strs), remaining // max_doc_length)
+            if n_tools == 0:
+                continue
+            # Tokenize each tool to exactly max_doc_length (pad shorter with -100)
+            flat_context: List[int] = []
+            for ts in tool_strs[:n_tools]:
+                tids = tokenize(tokenizer, ts, "user", max_doc_length)
+                flat_context.extend(tids)
+                flat_context.extend([-100] * (max_doc_length - len(tids)))
+            input_ids = history_ids + answer_ids
+            labels = [-100] * len(history_ids) + answer_ids
+            outputs['system_input_ids'].append(system_ids)
+            outputs['context_input_ids'].append(flat_context)
+            outputs['input_ids'].append(input_ids)
+            outputs['labels'].append(labels)
+            outputs['attention_mask'].append([1] * len(input_ids))
+            outputs['dynamic'].append(1)
+    return outputs
+
+
 class MultiDocDataset(GistDataset):
     def __init__(
         self,
@@ -645,9 +799,35 @@ class MultiDocDataset(GistDataset):
         max_doc_length: int = 512,
         max_doc_num: int = 20,
         max_system_length: int = 256,
+        dynamic_context_cap: int = 4096,
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
     ):
+        if "agent-llm-traces" in path:
+            data = datasets.load_dataset(
+                "parquet", data_files=os.path.join(path, "data", "*.parquet"), split="train")
+            data = data.map(
+                _build_agent_dynamic_samples,
+                fn_kwargs={
+                    'tokenizer': tokenizer,
+                    'max_system_length': max_system_length,
+                    'dynamic_context_cap': dynamic_context_cap,
+                    'max_doc_length': max_doc_length,
+                    'max_doc_num': max_doc_num,
+                },
+                batched=True,
+                num_proc=32,
+                remove_columns=data.column_names,
+            )
+            if num_samples is not None:
+                data = data.select(range(min(num_samples, len(data))))
+            self.data = data.shuffle(seed=shuffle_seed)
+            self.max_doc_length = max_doc_length
+            self.max_system_length = max_system_length
+            self.max_doc_num = max_doc_num
+            self.max_length = max_length
+            self.dynamic_context_cap = dynamic_context_cap
+            return
         if "musique" in path:
             dataset = load_mdoc_dataset("musique", path)
             extract_documents = dataset.extract_documents
@@ -709,6 +889,7 @@ class MultiDocDataset(GistDataset):
         self.max_system_length = max_system_length
         self.max_doc_num = max_doc_num
         self.max_length = max_length
+        self.dynamic_context_cap = dynamic_context_cap
 
     @staticmethod
     def _preprocess_mdoc_sample(
@@ -757,7 +938,8 @@ class MultiDocDataset(GistDataset):
             'context_input_ids': concat_doc_ids,
             'input_ids': input_ids,
             'labels': labels,
-            'attention_mask': attention_mask
+            'attention_mask': attention_mask,
+            'dynamic': 0,
         }
 
 

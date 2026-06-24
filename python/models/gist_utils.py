@@ -458,7 +458,7 @@ def process_context_input_ids(
     pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
     if gist_mask.all(): # context input_ids is full
         for j in range(chunk_num):
-            pos_ids[:, j] += j * seq_len
+            pos_ids[:, j] += past_length + j * seq_len
     else:
         assert attention_mask is not None, "attention_mask is required when context_input_ids is given"
         gist_lens = gist_mask.reshape((batch_size, chunk_num, max_gist_len)).sum(dim=2)
