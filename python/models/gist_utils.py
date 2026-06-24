@@ -39,6 +39,7 @@ def apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1) -> torch.Tensor:
     x_embed = (x * cos) + (rotate_half(x) * sin)
     return x_embed
 
+
 def _build_interleave_mask_vectorized(
     input_ids: torch.LongTensor,
     attention_mask: torch.Tensor,
@@ -301,23 +302,44 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     assert gist_type, "gist_type must be specified"
     padding_check_idx = 0 if padding_side == "right" else -1
     gist_overlap = getattr(config, 'gist_overlap', 0)
+
+    mask_dtype = getattr(config, "dtype", torch.get_default_dtype())
+    if isinstance(mask_dtype, str):
+        mask_dtype = getattr(torch, mask_dtype)
+
+    def _finalize(result):
+        attention_mask, gist_mask, position_ids = result
+        attention_mask = torch.where(
+            attention_mask,
+            torch.zeros(
+                (), dtype=mask_dtype, device=attention_mask.device
+            ),
+            torch.full(
+                (), float("-inf"), dtype=mask_dtype, device=attention_mask.device
+            ),
+        )
+        return attention_mask, gist_mask, position_ids
+
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
         def _prepare_gist_input_interleave(
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
-        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+        ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
-            return _build_interleave_mask_vectorized(
-                input_ids, attention_mask, ratio, padding_check_idx, padding_side, gist_residual_type, gist_overlap,
+            return _finalize(
+                _build_interleave_mask_vectorized(
+                    input_ids, attention_mask, ratio, padding_check_idx,
+                    padding_side, gist_residual_type, gist_overlap,
+                )
             )
         return _prepare_gist_input_interleave
     elif gist_type.startswith('anchor-'):
         ratio = int(gist_type.split("-")[1])
         def _prepare_gist_input_anchor(
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
-        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+        ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
             for mask in attention_mask:
                 if mask.any(): # only check non-empty sequences
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
@@ -364,23 +386,26 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                     new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
             new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
             position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
-            return new_attn_mask, gist_mask, position_ids
+            return _finalize((new_attn_mask, gist_mask, position_ids))
         return _prepare_gist_input_anchor
     elif gist_type == 'dynamic-interleave':
         def _prepare_gist_input_dynamic_interleave(
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
-        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+        ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
-            return _build_interleave_mask_vectorized(
-                input_ids, attention_mask, kwargs["ratio"], padding_check_idx, padding_side, "none", gist_overlap,
+            return _finalize(
+                _build_interleave_mask_vectorized(
+                    input_ids, attention_mask, kwargs["ratio"],
+                    padding_check_idx, padding_side, "none", gist_overlap,
+                )
             )
         return _prepare_gist_input_dynamic_interleave
     elif gist_type == 'pattern':
         def _prepare_gist_input_pattern(
             input_ids: torch.LongTensor, attention_mask: torch.Tensor, **kwargs
-        ) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+        ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
             assert "pattern" in kwargs, "pattern must be provided in kwargs for gist_type='pattern'"
             pattern = kwargs["pattern"]
             assert pattern.shape == input_ids.shape, \
@@ -388,8 +413,10 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
-            return _build_pattern_mask_vectorized(
-                input_ids, attention_mask, pattern, padding_check_idx, padding_side,
+            return _finalize(
+                _build_pattern_mask_vectorized(
+                    input_ids, attention_mask, pattern, padding_check_idx,
+                )
             )
         return _prepare_gist_input_pattern
     else:
