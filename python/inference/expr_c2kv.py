@@ -13,12 +13,6 @@ from models import get_model_class, blend_gist_key_values
 from reuse_pipeline import tokenize_for_reuse, prefill_kv_cache
 from expr_timer import DataRecorder, ExprTimer
 
-MODEL_GENERATE_API_WARNING_STRING = """==== PLEASE READ ====
-With transformers==4.57.1 (which is required by this project), model.generate() API is buggy:
-It is not compatible with custom position_ids, and it will cause incorrect results.
-See https://github.com/huggingface/transformers/issues/36510 for how to fix it.
-==== PLEASE READ ====
-"""
 
 def cut_documents(documents: List[str], max_length: int | None) -> List[str]:
     if max_length is None:
@@ -103,8 +97,7 @@ def evaluate_model_on_dataset(
         gist_extra_kwargs = {}
         if getattr(model.config, 'gist_type', None) == 'dynamic-interleave' and override_ratio is not None:
             gist_extra_kwargs['ratio'] = override_ratio
-        with record.record("extract"):
-            outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs, **gist_extra_kwargs)
+        outputs, gist_mask, pos_ids = model.model.generate_gist(**context_inputs, **gist_extra_kwargs)
         pos_ids = pos_ids[:, -gist_mask.shape[1]:]
         with record.record("blend"):
             context_cache, _ = blend_gist_key_values(
@@ -242,8 +235,6 @@ def main():
     if os.path.exists(args.output_file):
         print(f"Output file {args.output_file} already exists, skipping")
         return
-
-    print(MODEL_GENERATE_API_WARNING_STRING)
 
     # Load dataset
     dataset = load_mdoc_dataset(

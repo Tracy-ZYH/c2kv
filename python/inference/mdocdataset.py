@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import itertools
+import json
+from pathlib import Path
 import datasets
 import string
 from numpy import isin
@@ -101,6 +103,231 @@ class AbstractMDQADataset(ABC):
           - 'answer': list of answers (List[str])
         """
         pass
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    """Decode JSON-valued trace attributes while tolerating missing data."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value
+
+
+def _message_parts(messages: List[Dict[str, Any]]):
+    for message in messages:
+        yield from message.get("parts") or []
+
+
+def normalize_agent_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert agent-llm-traces tool definitions to HF chat-template format."""
+    normalized = []
+    for tool in tools:
+        if isinstance(tool.get("function"), dict):
+            normalized.append(tool)
+            continue
+        normalized.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters") or {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        })
+    return normalized
+
+
+def normalize_agent_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Keep textual messages and map them to the standard chat message schema."""
+    normalized = []
+    for message in messages:
+        texts = [
+            str(part.get("content", ""))
+            for part in message.get("parts") or []
+            if part.get("type") == "text"
+        ]
+        if texts or message.get("role") == "system":
+            normalized.append({
+                "role": message.get("role", "user"),
+                "content": "\n".join(texts),
+            })
+    return normalized
+
+
+def split_agent_tool_tokens(tokenizer, messages, tools) -> Dict[str, Any]:
+    """
+    Render an agent request and split it into:
+      uncompressed system/prefix + compressed tool JSON + uncompressed query/suffix.
+
+    Segments are tokenized independently because reusable KV boundaries prohibit
+    tokenizer merges across those boundaries. ``full`` is therefore the fair
+    full-compute baseline for the same token sequence.
+    """
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        tools=tools,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    start_marker = "<tools>\n"
+    end_marker = "\n</tools>"
+    start = rendered.find(start_marker)
+    end = rendered.find(end_marker, start + len(start_marker))
+    if start < 0 or end < 0:
+        raise RuntimeError("cannot find <tools>...</tools> block in chat template")
+
+    prefix_text = rendered[:start + len(start_marker)]
+    tool_text = rendered[start + len(start_marker):end]
+    suffix_text = rendered[end:]
+    encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
+    prefix = encode(prefix_text)
+    tool_block = encode(tool_text)
+    suffix = encode(suffix_text)
+    return {
+        "full": prefix + tool_block + suffix,
+        "prefix": prefix,
+        "tool_block": tool_block,
+        "suffix": suffix,
+        "rendered": rendered,
+        "prefix_text": prefix_text,
+        "tool_text": tool_text,
+        "suffix_text": suffix_text,
+    }
+
+
+class AgentLLMTracesDataset(AbstractMDQADataset):
+    """Adapter for simple, one-turn tool calls in Exgentic/agent-llm-traces."""
+
+    def __init__(
+        self,
+        data_path: str,
+        max_samples: Optional[int] = None,
+        max_tools: int = 5,
+        max_input_tokens: int = 12000,
+        max_new_tokens: int = 128,
+    ) -> None:
+        import pyarrow.parquet as pq
+
+        self.data_path = Path(data_path).expanduser()
+        data_dir = self.data_path / "data" if (self.data_path / "data").is_dir() else self.data_path
+        files = sorted(data_dir.glob("*.parquet"))
+        if not files:
+            raise FileNotFoundError(f"No parquet files found under {data_dir}")
+
+        self.system_prompt = None
+        self.max_new_tokens = max_new_tokens
+        self.metric = self.tool_call_match_score
+        self.data = []
+
+        for file in files:
+            table = pq.read_table(file)
+            for row_index, row in enumerate(table.to_pylist()):
+                for span_index, span in enumerate(row.get("spans") or []):
+                    sample = self._extract_sample(
+                        row, span, file.name, row_index, span_index,
+                        max_tools=max_tools,
+                        max_input_tokens=max_input_tokens,
+                    )
+                    if sample is None:
+                        continue
+                    self.data.append(sample)
+                    if max_samples is not None and len(self.data) >= max_samples:
+                        print(f"Loaded {len(self.data)} simple agent samples from {self.data_path}")
+                        return
+        print(f"Loaded {len(self.data)} simple agent samples from {self.data_path}")
+
+    @staticmethod
+    def _extract_sample(
+        row: Dict[str, Any],
+        span: Dict[str, Any],
+        file_name: str,
+        row_index: int,
+        span_index: int,
+        max_tools: int,
+        max_input_tokens: int,
+    ) -> Optional[Dict[str, Any]]:
+        attrs = span.get("attributes") or {}
+        raw_messages = _json_loads(attrs.get("gen_ai.input.messages"), [])
+        raw_outputs = _json_loads(attrs.get("gen_ai.output.messages"), [])
+        raw_tools = _json_loads(attrs.get("gen_ai.tool.definitions"), [])
+        calls = [
+            part for part in _message_parts(raw_outputs)
+            if part.get("type") == "tool_call"
+        ]
+        has_prior_tool_use = any(
+            part.get("type") in {"tool_call", "tool_call_response", "tool_result"}
+            for part in _message_parts(raw_messages)
+        )
+        input_tokens = attrs.get("gen_ai.usage.input_tokens") or 0
+        if (
+            not raw_messages
+            or not raw_tools
+            or has_prior_tool_use
+            or len(calls) != 1
+            or len(raw_tools) > max_tools
+            or input_tokens > max_input_tokens
+        ):
+            return None
+
+        messages = normalize_agent_messages(raw_messages)
+        tools = normalize_agent_tools(raw_tools)
+        if not messages:
+            return None
+        expected_call = calls[0]
+        question = next(
+            (message["content"] for message in reversed(messages) if message["role"] == "user"),
+            "",
+        )
+        system_prompt = "\n".join(
+            message["content"] for message in messages if message["role"] == "system"
+        )
+        qid = f"{file_name}:{row_index}:{span_index}"
+        return {
+            "qid": qid,
+            "file": file_name,
+            "row_index": row_index,
+            "span_index": span_index,
+            "session_id": row.get("session_id"),
+            "benchmark": row.get("benchmark"),
+            "harness": row.get("harness"),
+            "messages": messages,
+            "tools": tools,
+            "expected_tool_call": expected_call,
+            "system_prompt": system_prompt,
+            "question": question,
+            "documents": [
+                json.dumps(tool, ensure_ascii=False, separators=(",", ":"))
+                for tool in tools
+            ],
+            "answer": [json.dumps(expected_call, ensure_ascii=False, sort_keys=True)],
+            "input_tokens": input_tokens,
+        }
+
+    @staticmethod
+    def tool_call_match_score(pred: str, gt_list: List[str]) -> float:
+        """Strict normalized match when the prediction itself is JSON."""
+        try:
+            normalized_pred = json.dumps(json.loads(pred), ensure_ascii=False, sort_keys=True)
+        except (json.JSONDecodeError, TypeError):
+            normalized_pred = pred.strip()
+        return float(any(normalized_pred == gt.strip() for gt in gt_list))
+
+    @staticmethod
+    def split_tool_tokens(tokenizer, sample: Dict[str, Any]) -> Dict[str, Any]:
+        return split_agent_tool_tokens(tokenizer, sample["messages"], sample["tools"])
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.data[idx]
 
 
 class WikiMQADataset(AbstractMDQADataset):
@@ -904,6 +1131,13 @@ Output only the answer in one paragraph. No markdown format. No explanation or e
 
 
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
+    if name == "agent":
+        if path is None:
+            path = "../datasets/agent-llm-traces"
+            print(f'Defaulting agent-llm-traces dataset path to "{path}"')
+        kwargs.pop("only_supporting", None)
+        kwargs.pop("enable_cot", None)
+        return AgentLLMTracesDataset(path, **kwargs)
     if name == "musique":
         if path is None:
             print('Defaulting musique dataset path to "../datasets/musique.jsonl"')

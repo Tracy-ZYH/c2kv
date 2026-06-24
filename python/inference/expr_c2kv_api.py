@@ -34,7 +34,12 @@ def cut_documents(documents: List[str], max_length: int | None) -> List[str]:
 
 def extract_document(base_url: str, text: str, compression_ratio: int = 4, role: str = "user") -> dict:
     url = f"{base_url}/v1/c2kv/extract"
-    payload = {"text": text, "compression_ratio": compression_ratio, "role": role}
+    payload = {
+        "text": text,
+        "compression_ratio": compression_ratio,
+        "role": role,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
     resp = requests.post(url, json=payload, timeout=300)
     resp.raise_for_status()
     return resp.json()

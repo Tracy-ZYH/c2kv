@@ -335,6 +335,7 @@ class LlamaAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
+            kernel_options={"FORCE_USE_FLEX_ATTENTION": True},
             **kwargs,
         )
 

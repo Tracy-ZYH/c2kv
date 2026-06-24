@@ -18,12 +18,6 @@ tokenizer = None
 model = None
 device = None
 
-MODEL_GENERATE_API_WARNING_STRING = """==== PLEASE READ ====
-With transformers==4.57.1 (which is required by this project), model.generate() API is buggy:
-It is not compatible with custom position_ids, and it will cause incorrect results.
-See https://github.com/huggingface/transformers/issues/36510 for how to fix it.
-==== PLEASE READ ====
-"""
 
 def initialize_model(model_name: str):
     """Initialize the model and tokenizer globally"""
@@ -224,8 +218,6 @@ def main():
     
     args = parser.parse_args()
 
-    print(MODEL_GENERATE_API_WARNING_STRING)
-    
     # Initialize model
     initialize_model(args.model)
     
