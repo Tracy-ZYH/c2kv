@@ -92,7 +92,6 @@ def evaluate(args: argparse.Namespace, dataset: AgentDataset) -> Dict[str, Any]:
         dataset,
         tokenizer,
         max_examples=args.max_examples,
-        max_tool_tokens=args.max_tool_tokens,
     )
     total = len(indices)
     results = []
@@ -223,11 +222,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-examples", type=int)
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--max-tools", type=int)
-    parser.add_argument("--max-input-tokens", type=int)
     parser.add_argument(
-        "--max-tool-tokens",
-        type=int,
-        help="Skip examples whose rendered tool-definition message exceeds this length",
+        "--benchmark",
+        help="Only keep examples from one benchmark, or comma-separated benchmarks",
     )
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--output-file")
@@ -249,8 +246,8 @@ def main() -> None:
         args.dataset_path,
         max_samples=args.max_samples,
         max_tools=args.max_tools,
-        max_input_tokens=args.max_input_tokens,
         max_new_tokens=args.max_new_tokens,
+        benchmark=args.benchmark,
     )
     summary = evaluate(args, dataset)
     print(f"\nTool-call accuracy: {summary['tool_call_accuracy']:.4f}")

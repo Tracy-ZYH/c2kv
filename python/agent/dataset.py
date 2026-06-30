@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,6 +154,102 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
     return calls
 
 
+def _agent_example_to_record(example: AgentExample) -> Dict[str, Any]:
+    return {
+        "qid": example.qid,
+        "system_prompt": example.system_prompt,
+        "tools": json.dumps(example.tools, ensure_ascii=False),
+        "messages": json.dumps(example.messages, ensure_ascii=False),
+        "expected_tool_calls": json.dumps(
+            example.expected_tool_calls,
+            ensure_ascii=False,
+        ),
+        "max_new_tokens": example.max_new_tokens,
+    }
+
+
+def _record_to_agent_example(record: Dict[str, Any]) -> AgentExample:
+    return AgentExample(
+        qid=record["qid"],
+        system_prompt=record["system_prompt"],
+        tools=_json_loads(record["tools"], []),
+        messages=_json_loads(record["messages"], []),
+        expected_tool_calls=_json_loads(record["expected_tool_calls"], []),
+        max_new_tokens=record.get("max_new_tokens"),
+    )
+
+
+def _normalize_benchmarks(
+    benchmark: Optional[str | Sequence[str]],
+) -> Optional[List[str]]:
+    if benchmark is None:
+        return None
+    if isinstance(benchmark, str):
+        values = [item.strip() for item in benchmark.split(",")]
+    else:
+        values = [str(item).strip() for item in benchmark]
+    values = [item for item in values if item]
+    return values or None
+
+
+def _dataset_fingerprint(
+    files: Sequence[Path],
+    max_tools: Optional[int],
+    max_input_tokens: Optional[int],
+    max_new_tokens: int,
+    benchmarks: Optional[Sequence[str]],
+) -> str:
+    payload = {
+        "version": 3,
+        "max_tools": max_tools,
+        "max_input_tokens": max_input_tokens,
+        "max_new_tokens": max_new_tokens,
+        "benchmarks": sorted(benchmarks) if benchmarks is not None else None,
+        "files": [
+            {
+                "path": str(file.resolve()),
+                "size": file.stat().st_size,
+                "mtime_ns": file.stat().st_mtime_ns,
+            }
+            for file in files
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _iter_agent_llm_trace_records(
+    files: Sequence[str],
+    max_tools: Optional[int],
+    max_input_tokens: Optional[int],
+    max_new_tokens: int,
+    benchmarks: Optional[Sequence[str]],
+) -> Iterator[Dict[str, Any]]:
+    import pyarrow.parquet as pq
+
+    benchmark_set = set(benchmarks) if benchmarks is not None else None
+    for file_name in files:
+        file = Path(file_name)
+        table = pq.read_table(file)
+        for row_index, row in enumerate(table.to_pylist()):
+            row_benchmark = row.get("benchmark") or ""
+            for span_index, span in enumerate(row.get("spans") or []):
+                benchmark = span.get("benchmark") or row_benchmark
+                if benchmark_set is not None and benchmark not in benchmark_set:
+                    continue
+                example = AgentLLMTracesDataset._extract_example(
+                    row,
+                    span,
+                    f"{file.name}:{row_index}:{span_index}",
+                    max_tools=max_tools,
+                    max_input_tokens=max_input_tokens,
+                    max_new_tokens=max_new_tokens,
+                )
+                if example is not None:
+                    yield _agent_example_to_record(example)
+
+
 class AgentLLMTracesDataset(AgentDataset):
     """Simple tool-call subset of Exgentic/agent-llm-traces."""
 
@@ -163,9 +260,10 @@ class AgentLLMTracesDataset(AgentDataset):
         max_tools: Optional[int] = None,
         max_input_tokens: Optional[int] = None,
         max_new_tokens: int = 128,
+        benchmark: Optional[str | Sequence[str]] = None,
+        use_hf_cache: bool = True,
+        dataset_cache_dir: Optional[str] = None,
     ) -> None:
-        import pyarrow.parquet as pq
-
         self.data_path = Path(data_path).expanduser()
         data_dir = (
             self.data_path / "data"
@@ -177,22 +275,76 @@ class AgentLLMTracesDataset(AgentDataset):
             raise FileNotFoundError(f"No parquet files found under {data_dir}")
 
         self.max_new_tokens = max_new_tokens
-        self.examples: List[AgentExample] = []
-        for file in files:
-            table = pq.read_table(file)
-            for row_index, row in enumerate(table.to_pylist()):
-                for span_index, span in enumerate(row.get("spans") or []):
-                    example = self._extract_example(
-                        row,
-                        span,
-                        f"{file.name}:{row_index}:{span_index}",
-                        max_tools=max_tools,
-                        max_input_tokens=max_input_tokens,
-                    )
-                    if example is not None:
-                        self.examples.append(example)
-                    if max_samples is not None and len(self.examples) >= max_samples:
-                        return
+        benchmarks = _normalize_benchmarks(benchmark)
+        if use_hf_cache:
+            self.dataset = self._load_hf_dataset(
+                files,
+                max_samples=max_samples,
+                max_tools=max_tools,
+                max_input_tokens=max_input_tokens,
+                max_new_tokens=max_new_tokens,
+                benchmarks=benchmarks,
+                dataset_cache_dir=dataset_cache_dir,
+            )
+            self.examples = None
+        else:
+            self.dataset = None
+            self.examples: Optional[List[AgentExample]] = []
+            for record in _iter_agent_llm_trace_records(
+                [str(file) for file in files],
+                max_tools=max_tools,
+                max_input_tokens=max_input_tokens,
+                max_new_tokens=max_new_tokens,
+                benchmarks=benchmarks,
+            ):
+                self.examples.append(_record_to_agent_example(record))
+                if max_samples is not None and len(self.examples) >= max_samples:
+                    return
+
+    @staticmethod
+    def _load_hf_dataset(
+        files: Sequence[Path],
+        max_samples: Optional[int],
+        max_tools: Optional[int],
+        max_input_tokens: Optional[int],
+        max_new_tokens: int,
+        benchmarks: Optional[Sequence[str]],
+        dataset_cache_dir: Optional[str],
+    ) -> Any:
+        from datasets import Dataset, Features, Value
+
+        features = Features(
+            {
+                "qid": Value("string"),
+                "system_prompt": Value("string"),
+                "tools": Value("string"),
+                "messages": Value("string"),
+                "expected_tool_calls": Value("string"),
+                "max_new_tokens": Value("int64"),
+            }
+        )
+        dataset = Dataset.from_generator(
+            _iter_agent_llm_trace_records,
+            features=features,
+            cache_dir=dataset_cache_dir,
+            gen_kwargs={
+                "files": [str(file) for file in files],
+                "max_tools": max_tools,
+                "max_input_tokens": max_input_tokens,
+                "max_new_tokens": max_new_tokens,
+                "benchmarks": tuple(benchmarks) if benchmarks is not None else None,
+            },
+            fingerprint=_dataset_fingerprint(
+                files,
+                max_tools=max_tools,
+                max_input_tokens=max_input_tokens,
+                max_new_tokens=max_new_tokens,
+                benchmarks=benchmarks,
+            ),
+        )
+        if max_samples is not None and len(dataset) > max_samples:
+            dataset = dataset.select(range(max_samples))
+        return dataset
 
     @staticmethod
     def _extract_example(
@@ -201,6 +353,7 @@ class AgentLLMTracesDataset(AgentDataset):
         qid: str,
         max_tools: Optional[int],
         max_input_tokens: Optional[int],
+        max_new_tokens: int = 128,
     ) -> Optional[AgentExample]:
         attrs = span.get("attributes") or {}
         raw_messages = _json_loads(attrs.get("gen_ai.input.messages"), [])
@@ -232,12 +385,19 @@ class AgentLLMTracesDataset(AgentDataset):
             tools=normalize_tools(raw_tools),
             messages=messages,
             expected_tool_calls=[_normalize_call(call) for call in expected_calls],
+            max_new_tokens=max_new_tokens,
         )
 
     def __len__(self) -> int:
+        if self.dataset is not None:
+            return len(self.dataset)
+        assert self.examples is not None
         return len(self.examples)
 
     def __getitem__(self, index: int) -> AgentExample:
+        if self.dataset is not None:
+            return _record_to_agent_example(self.dataset[index])
+        assert self.examples is not None
         return self.examples[index]
 
 

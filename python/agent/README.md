@@ -21,9 +21,10 @@ The C2KV path renders three independent pieces:
 The rendered system/tool segments have a small LRU cache. Identical definitions
 can therefore reuse their prefilled/extracted KV across examples.
 
-Use `--max-tool-tokens N` to skip examples whose independently rendered tool
-system message is longer than `N` tokens. `--max-examples` is applied after
-this filtering.
+`AgentLLMTracesDataset` uses HuggingFace `datasets` cache by default. The first
+run builds an Arrow cache for the filtered simple tool-call subset; later runs
+with the same parquet files and preprocessing parameters load it directly via
+the default `datasets` cache configuration.
 
 ```bash
 export PYTHONPATH=$PWD/python
@@ -39,4 +40,18 @@ python python/agent/expr_agent_c2kv.py \
   --override-ratio 4 \
   --reuse-cache-size 1 \
   --output-file results/agent_c2kv.jsonl
+
+python python/agent/expr_agent_c2kv_api.py \
+  --base-url http://localhost:30000 \
+  --model default \
+  --tokenizer <c2kv-checkpoint-path> \
+  --dataset-path /path/to/agent-llm-traces \
+  --benchmark browsecompplus \
+  --compression-ratio 2 \
+  --tool-token-range 512,4096 \
+  --request-token-range 1024,8192 \
+  --preprocess-workers 4 \
+  --max-examples 5 \
+  --save-inputs \
+  --output-file results/agent_c2kv_api.jsonl
 ```
