@@ -48,7 +48,8 @@ def _build_interleave_mask_vectorized(
     padding_side: str,
     gist_residual_type: str = "none",
     gist_overlap: int = 0,
-) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+    mask_dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
     device = input_ids.device
     batch_size, max_seqlen = input_ids.shape
     max_gist_num = math.ceil(max_seqlen / ratio)
@@ -135,13 +136,13 @@ def _build_interleave_mask_vectorized(
     gist_gist_mask = gist_gist_causal & gist_mask.unsqueeze(2) & gist_mask.unsqueeze(1)
 
     # --- assemble full attention mask: (B, total_len, total_len) ---
-    new_attn_mask = torch.zeros((batch_size, total_len, total_len), dtype=torch.bool, device=device)
+    new_attn_mask = torch.full((batch_size, total_len, total_len), float("-inf"), dtype=mask_dtype, device=device)
     # token-token block (top-left)
-    new_attn_mask[:, :max_seqlen, :max_seqlen] = token_token_mask
+    new_attn_mask[:, :max_seqlen, :max_seqlen].masked_fill_(token_token_mask, 0.0)
     # gist-to-token block (bottom-left)
-    new_attn_mask[:, max_seqlen:, :max_seqlen] = gist_to_token_mask
+    new_attn_mask[:, max_seqlen:, :max_seqlen].masked_fill_(gist_to_token_mask, 0.0)
     # gist-to-gist block (bottom-right)
-    new_attn_mask[:, max_seqlen:, max_seqlen:] = gist_gist_mask
+    new_attn_mask[:, max_seqlen:, max_seqlen:].masked_fill_(gist_gist_mask, 0.0)
 
     new_attn_mask = new_attn_mask.unsqueeze(1)  # (B, 1, total_len, total_len)
 
@@ -157,7 +158,8 @@ def _build_pattern_mask_vectorized(
     attention_mask: torch.Tensor,
     pattern: torch.BoolTensor,
     padding_check_idx: int,
-) -> Tuple[torch.BoolTensor, torch.BoolTensor, torch.LongTensor]:
+    mask_dtype: torch.dtype = torch.float32,
+) -> Tuple[torch.Tensor, torch.BoolTensor, torch.LongTensor]:
     """Build attention mask for pattern-based gist insertion (vectorized).
 
     Each True in `pattern` means a gist token is inserted after that position.
@@ -192,7 +194,9 @@ def _build_pattern_mask_vectorized(
         causal = torch.tril(torch.ones(max_seqlen, max_seqlen, dtype=torch.bool, device=device))
         valid_row = valid_token  # (B, S)
         valid_region = valid_row.unsqueeze(2) & valid_row.unsqueeze(1)
-        token_mask = causal.unsqueeze(0) & valid_region
+        token_mask_bool = causal.unsqueeze(0) & valid_region
+        token_mask = torch.full((batch_size, max_seqlen, max_seqlen), float("-inf"), dtype=mask_dtype, device=device)
+        token_mask.masked_fill_(token_mask_bool, 0.0)
         token_mask = token_mask.unsqueeze(1)  # (B, 1, S, S)
         gist_mask = torch.zeros((batch_size, 0), dtype=torch.bool, device=device)
         position_ids = torch.arange(max_seqlen, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, -1)
@@ -279,13 +283,13 @@ def _build_pattern_mask_vectorized(
     gist_gist_mask = gist_gist_causal & gist_mask.unsqueeze(2) & gist_mask.unsqueeze(1)  # (B, G, G)
 
     # --- assemble full attention mask: (B, total_len, total_len) ---
-    new_attn_mask = torch.zeros((batch_size, total_len, total_len), dtype=torch.bool, device=device)
+    new_attn_mask = torch.full((batch_size, total_len, total_len), float("-inf"), dtype=mask_dtype, device=device)
     # token-token block (top-left)
-    new_attn_mask[:, :max_seqlen, :max_seqlen] = token_token_mask
+    new_attn_mask[:, :max_seqlen, :max_seqlen].masked_fill_(token_token_mask, 0.0)
     # gist-to-token block (bottom-left)
-    new_attn_mask[:, max_seqlen:, :max_seqlen] = gist_to_token_mask
+    new_attn_mask[:, max_seqlen:, :max_seqlen].masked_fill_(gist_to_token_mask, 0.0)
     # gist-to-gist block (bottom-right)
-    new_attn_mask[:, max_seqlen:, max_seqlen:] = gist_gist_mask
+    new_attn_mask[:, max_seqlen:, max_seqlen:].masked_fill_(gist_gist_mask, 0.0)
 
     new_attn_mask = new_attn_mask.unsqueeze(1)  # (B, 1, total_len, total_len)
 
@@ -307,19 +311,6 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
     if isinstance(mask_dtype, str):
         mask_dtype = getattr(torch, mask_dtype)
 
-    def _finalize(result):
-        attention_mask, gist_mask, position_ids = result
-        attention_mask = torch.where(
-            attention_mask,
-            torch.zeros(
-                (), dtype=mask_dtype, device=attention_mask.device
-            ),
-            torch.full(
-                (), float("-inf"), dtype=mask_dtype, device=attention_mask.device
-            ),
-        )
-        return attention_mask, gist_mask, position_ids
-
     if gist_type.startswith("interleave-"):
         ratio = int(gist_type.split("-")[1])
         def _prepare_gist_input_interleave(
@@ -328,11 +319,9 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
-            return _finalize(
-                _build_interleave_mask_vectorized(
-                    input_ids, attention_mask, ratio, padding_check_idx,
-                    padding_side, gist_residual_type, gist_overlap,
-                )
+            return _build_interleave_mask_vectorized(
+                input_ids, attention_mask, ratio, padding_check_idx,
+                padding_side, gist_residual_type, gist_overlap, mask_dtype,
             )
         return _prepare_gist_input_interleave
     elif gist_type.startswith('anchor-'):
@@ -345,9 +334,9 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
             batch_size, max_seqlen = input_ids.shape
             max_gist_num = math.ceil(max_seqlen / ratio)
-            new_attn_mask = torch.zeros( # (batch_size, query_len, kv_length)
-                (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num), 
-                dtype=torch.bool, device=input_ids.device
+            new_attn_mask = torch.full( # (batch_size, query_len, kv_length)
+                (batch_size, max_seqlen + max_gist_num, max_seqlen + max_gist_num),
+                float("-inf"), dtype=mask_dtype, device=input_ids.device
             )
             position_ids = torch.arange(max_seqlen, dtype=torch.long, device=input_ids.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, max_seqlen)
@@ -371,22 +360,21 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
                 for j in range(gist_num):
                     # attention sink at beginning of chunk
                     sink_end = min(seqlen, ratio)
-                    new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 1
+                    new_attn_mask[i, max_seqlen + j, padlen:sink_end + padlen] = 0.0
                     # attention sink at end of chunk
                     begin = j * ratio
                     end = min((j + 1) * ratio, original_seqlen)
                     group_length = end - begin
                     padded_j = j + gist_pad
                     gist_position_ids[i, padded_j] = end - 1
-                    new_attn_mask[i, padlen + begin:padlen + end, padlen + begin:padlen + end] = torch.tril(
-                        torch.ones((1, 1), dtype=torch.bool, device=input_ids.device).expand(group_length, group_length)
-                    )
-                    new_attn_mask[i, padlen + begin:padlen + end, max_seqlen + gist_pad:max_seqlen + padded_j] = 1
-                    new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 1
-                    new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 1
+                    tril_mask = torch.tril(torch.ones(group_length, group_length, dtype=torch.bool, device=input_ids.device))
+                    new_attn_mask[i, padlen + begin:padlen + end, padlen + begin:padlen + end].masked_fill_(tril_mask, 0.0)
+                    new_attn_mask[i, padlen + begin:padlen + end, max_seqlen + gist_pad:max_seqlen + padded_j] = 0.0
+                    new_attn_mask[i, max_seqlen + padded_j, begin + padlen:end + padlen] = 0.0
+                    new_attn_mask[i, max_seqlen + padded_j, max_seqlen + gist_pad:max_seqlen + padded_j + 1] = 0.0
             new_attn_mask = new_attn_mask.unsqueeze(1) # (batch_size, head_size, query_len, kv_length)
             position_ids = torch.cat([position_ids, gist_position_ids], dim=1)
-            return _finalize((new_attn_mask, gist_mask, position_ids))
+            return new_attn_mask, gist_mask, position_ids
         return _prepare_gist_input_anchor
     elif gist_type == 'dynamic-interleave':
         def _prepare_gist_input_dynamic_interleave(
@@ -395,11 +383,9 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {config.padding_side}-padded"
-            return _finalize(
-                _build_interleave_mask_vectorized(
-                    input_ids, attention_mask, kwargs["ratio"],
-                    padding_check_idx, padding_side, "none", gist_overlap,
-                )
+            return _build_interleave_mask_vectorized(
+                input_ids, attention_mask, kwargs["ratio"],
+                padding_check_idx, padding_side, "none", gist_overlap, mask_dtype,
             )
         return _prepare_gist_input_dynamic_interleave
     elif gist_type == 'pattern':
@@ -413,10 +399,8 @@ def get_prepare_gist_input_func(config: GistConfigMixin, padding_side: str = "ri
             for mask in attention_mask:
                 if mask.any():
                     assert mask[padding_check_idx].all(), f"tokenizer is not {padding_side}-padded"
-            return _finalize(
-                _build_pattern_mask_vectorized(
-                    input_ids, attention_mask, pattern, padding_check_idx,
-                )
+            return _build_pattern_mask_vectorized(
+                input_ids, attention_mask, pattern, padding_check_idx, mask_dtype,
             )
         return _prepare_gist_input_pattern
     else:
