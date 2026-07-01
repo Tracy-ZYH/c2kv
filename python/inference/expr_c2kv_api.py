@@ -54,9 +54,28 @@ def chat_completion(base_url: str, model: str, messages: list, max_new_tokens: i
         "temperature": temperature,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    resp = requests.post(url, json=payload, timeout=300)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    try:
+        resp = requests.post(url, json=payload, timeout=300)
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"].get("content")
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+        warnings.warn(f"chat completion error: {exc}")
+        return ""
+    if content is None:
+        warnings.warn("chat completion returned null content; using empty prediction")
+        return ""
+    if not isinstance(content, str):
+        warnings.warn(f"chat completion returned non-string content ({type(content).__name__}); using empty prediction")
+        return ""
+    return content
+
+
+def safe_metric(metric_fn, pred: str, ground_truth: Any, qid: Any) -> float:
+    try:
+        return metric_fn(pred or "", ground_truth)
+    except Exception as exc:
+        warnings.warn(f"[{qid}] metric error: {exc}")
+        return 0.0
 
 
 def _process_example(
@@ -85,7 +104,7 @@ def _process_example(
             else:
                 warnings.warn(f"[{example['qid']}] extract failed: {result.get('error')}")
                 doc_messages.append({"role": "user", "content": doc})
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
             warnings.warn(f"[{example['qid']}] extract error: {e}")
             doc_messages.append({"role": "user", "content": doc})
     t_extract = time.perf_counter() - t0
@@ -100,7 +119,7 @@ def _process_example(
     pred = chat_completion(base_url, model, messages, max_new_tokens)
     t_chat = time.perf_counter() - t1
 
-    em_score = metric_fn(pred, example['answer'])
+    em_score = safe_metric(metric_fn, pred, example['answer'], example['qid'])
 
     record: Dict[str, Any] = {
         'qid': example['qid'],

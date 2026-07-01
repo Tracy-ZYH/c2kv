@@ -47,9 +47,13 @@ def extract_segment(
         "role": role,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    response = requests.post(url, json=payload, timeout=300)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(url, json=payload, timeout=300)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        warnings.warn(f"extract error: {exc}")
+        return {}
 
 
 def chat_completion(
@@ -67,16 +71,29 @@ def chat_completion(
         "temperature": temperature,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    response = requests.post(url, json=payload, timeout=300)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(url, json=payload, timeout=300)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        warnings.warn(f"chat completion error: {exc}")
+        return {"choices": [{"message": {"content": ""}}]}
 
 
 def response_to_prediction(response_json: Dict[str, Any]) -> str:
-    message = response_json["choices"][0]["message"]
+    try:
+        message = response_json["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        warnings.warn(f"malformed chat completion response: {exc}")
+        return ""
     content = message.get("content")
-    if content is not None:
+    if isinstance(content, str):
         return content
+    if content is not None:
+        warnings.warn(
+            f"chat completion returned non-string content ({type(content).__name__}); using empty prediction"
+        )
+        return ""
     tool_calls = message.get("tool_calls")
     if tool_calls is not None:
         return json.dumps(tool_calls, ensure_ascii=False)
