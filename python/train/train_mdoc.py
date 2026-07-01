@@ -42,14 +42,12 @@ def main():
         wikimqa_path = os.path.join(training_args.train_data + "_cleaned", "wikimqa_train_cleaned")
         longmagpie_path = os.path.join(training_args.train_data, "longmagpie_1024")
         nextcoder_path = os.path.join(training_args.train_data, "microsoft--NextCoderDataset")
-        agent_path = "/mnt/nas1/duchuheng/datasets/agent-llm-traces"
 
         train_dataset = get_dataset('mdoc', hotpotqa_path, **dataset_args)
         wikimqa_train = get_dataset('mdoc', wikimqa_path, **dataset_args)
         tulu3_train = get_dataset('mdoc', "allenai/tulu-3-sft-mixture", **dataset_args)
         nextcoder_train = get_dataset('mdoc', nextcoder_path, **dataset_args)
         longmagpie_train = get_dataset('mdoc', longmagpie_path, **dataset_args)
-        agent_train = get_dataset('mdoc', agent_path, **dataset_args)
 
         eval_dataset = get_dataset('mdoc_eval', hotpotqa_path, **dataset_args)
         wikimqa_eval = get_dataset('mdoc_eval', wikimqa_path, **dataset_args)
@@ -59,9 +57,8 @@ def main():
         tulu3_train.data = tulu3_train.data.select(range(80000))
         nextcoder_train.data = nextcoder_train.data.select(range(56000))
         longmagpie_train.data = longmagpie_train.data.select(range(40000))
-        agent_train.data = agent_train.data.select(range(min(40000, len(agent_train.data))))
 
-        train_dataset.merge([wikimqa_train, tulu3_train, nextcoder_train, longmagpie_train, agent_train])
+        train_dataset.merge([wikimqa_train, tulu3_train, nextcoder_train, longmagpie_train])
         eval_dataset.merge([wikimqa_eval], method='concat')
 
     trainer = GistMultiDocTrainer(

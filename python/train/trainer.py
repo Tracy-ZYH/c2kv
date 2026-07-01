@@ -231,14 +231,28 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         Override the default compute_loss to process inputs 
         """
         batch_size, doc_total_len = inputs['context_input_ids'].shape
-        is_dynamic = bool(inputs.pop('dynamic')[0].item())
+        assert self.model_args.enable_gist, (
+            "GistMultiDocTrainer currently requires enable_gist=True; "
+            "the vanilla multi-doc path was removed when dynamic system prompts were added."
+        )
+        assert self.distill_coef is None, (
+            "GistMultiDocTrainer does not currently support gist_self_distill_coef; "
+            "teacher logits are not built for dynamic system/context batches."
+        )
+        dynamic_flags = inputs.pop('dynamic')
+        is_dynamic = dynamic_flags.bool()
+        assert bool(is_dynamic.all().item()) or not bool(is_dynamic.any().item()), (
+            "GistMultiDocTrainer received a mixed static/dynamic batch. "
+            "Dynamic context samples must be batched separately."
+        )
+        has_dynamic = bool(is_dynamic.any().item())
+        if has_dynamic:
+            assert batch_size == 1, "dynamic context requires per_device_train_batch_size=1"
         context_masks = inputs['context_input_ids'] != -100
         # build a per-sample system KV cache from variable-length system prompts
         system_input_ids = inputs.pop('system_input_ids')
         system_kv, system_mask, past_length = self._build_system_kv(model, system_input_ids)
         # prepare inputs for gist inference
-        if is_dynamic:
-            assert batch_size == 1, "dynamic context requires per_device_train_batch_size=1"
         inputs['context_input_ids'] = inputs['context_input_ids'].reshape((batch_size, -1, self.max_doc_length))
         inputs['past_key_values'] = system_kv
         inputs['past_attention_mask'] = system_mask
@@ -252,8 +266,6 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
         if self.model_args.gist_reconstruct_loss_coef is not None and model.training:
             self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
-        if model.training and self.distill_coef is not None:
-            loss = self.apply_distill_loss(inputs["labels"], loss, self_distill_logits, outputs["logits"])
         return (loss, outputs) if return_outputs else loss
     
     def prediction_step(
