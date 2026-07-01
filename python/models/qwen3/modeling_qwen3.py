@@ -617,13 +617,15 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         """
         # Generate gist (only used in training)
         kwargs['use_gist'] = False if use_gist is None else use_gist
+        past_attention_mask = kwargs.pop("past_attention_mask", None)
         reconstruct_loss = None
         if context_input_ids is not None:
             reconstruct_kwargs = None
             if labels is not None and reconstruct_loss_coef is not None:
                 reconstruct_kwargs = {"lm_head": self.lm_head, "loss_function": self.loss_function}
             past_key_values, attention_mask, reconstruct_loss = process_context_input_ids(
-                self.model, context_input_ids, past_key_values, attention_mask, position_ids, reconstruct_kwargs
+                self.model, context_input_ids, past_key_values, attention_mask, position_ids,
+                reconstruct_kwargs, past_attention_mask,
             )
             kwargs['use_gist'] = True
 

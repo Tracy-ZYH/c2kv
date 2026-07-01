@@ -440,6 +440,7 @@ def process_context_input_ids(
     attention_mask: torch.Tensor,
     position_ids: torch.LongTensor,
     reconstruct_kwargs: dict[str, ...] | None = None,
+    past_attention_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[DynamicCache, torch.Tensor, Optional[torch.Tensor]]:
     assert position_ids is not None, "position_ids is required when context_input_ids is given"
     if past_key_values is None:
@@ -468,7 +469,7 @@ def process_context_input_ids(
     pos_ids = pos_ids.reshape(batch_size, chunk_num, max_gist_len)
     if gist_mask.all(): # context input_ids is full
         for j in range(chunk_num):
-            pos_ids[:, j] += j * seq_len
+            pos_ids[:, j] += past_length + j * seq_len
     else:
         assert attention_mask is not None, "attention_mask is required when context_input_ids is given"
         gist_lens = gist_mask.reshape((batch_size, chunk_num, max_gist_len)).sum(dim=2)
@@ -494,7 +495,10 @@ def process_context_input_ids(
             layer_idx
         )
     gist_mask = gist_mask.reshape(batch_size, chunk_num * max_gist_len)
-    past_mask = gist_mask.new_ones((batch_size, past_length))
+    if past_attention_mask is not None:
+        past_mask = past_attention_mask.to(device=gist_mask.device, dtype=gist_mask.dtype)
+    else:
+        past_mask = gist_mask.new_ones((batch_size, past_length))
     # concat gist_attn_mask to attention_mask
     if attention_mask is not None:
         attention_mask = torch.cat([past_mask, gist_mask, attention_mask], dim=1)
