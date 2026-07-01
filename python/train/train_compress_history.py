@@ -23,12 +23,19 @@ class CompressHistoryDataArgs:
     source_type: str = "jsonl"
     eval_data: Optional[str] = None
     max_doc_length: int = 1024
+    min_doc_num: int = 2
     max_doc_num: int = 10
     max_length: int = 1024
     max_system_length: int = 2048
     history_selection: str = "tail"
     num_samples: Optional[int] = None
     eval_num_samples: Optional[int] = 512
+    resolved_only: bool = True
+    languages: Optional[str] = None
+    max_total_chars: Optional[int] = None
+    max_answer_chars: Optional[int] = None
+    recent_message_num: int = 1
+    source_num_proc: int = 8
 
 
 def main():
@@ -60,7 +67,18 @@ def main():
     with training_args.main_process_first(desc="Get compress-history dataset"):
         dataset_kwargs = {
             "source_type": data_args.source_type,
+            "source_kwargs": {
+                "resolved_only": data_args.resolved_only,
+                "languages": data_args.languages,
+                "max_total_chars": data_args.max_total_chars,
+                "max_answer_chars": data_args.max_answer_chars,
+                "recent_message_num": data_args.recent_message_num,
+                "num_proc": data_args.source_num_proc,
+            }
+            if data_args.source_type == "open_swe"
+            else None,
             "max_doc_length": data_args.max_doc_length,
+            "min_doc_num": data_args.min_doc_num,
             "max_doc_num": data_args.max_doc_num,
             "max_length": data_args.max_length,
             "max_system_length": data_args.max_system_length,
