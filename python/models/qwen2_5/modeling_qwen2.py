@@ -575,12 +575,16 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
+        system_input_ids: torch.LongTensor | None = None, # make trainer compatible
         context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
         use_gist: Optional[bool] = None,
         reconstruct_loss_coef: Optional[float] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
         r"""
+        system_input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            System input ids for generating gist.
+
         context_input_ids (`torch.LongTensor` of shape `(batch_size, chunk_num, sequence_length)`, *optional*):
             List of input ids for generating gist.
 

@@ -210,12 +210,10 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
                 continue
             left_ids[i, L_sys - n:] = system_input_ids[i][real_mask[i]]
             system_mask[i, L_sys - n:] = 1
-        attn_impl = model.model.config._attn_implementation
-        model.model.config._attn_implementation = "sdpa"
+        model.model.config._attn_implementation = "flash_attention_2"
         was_training = model.training
         model.eval()
         outputs = model(left_ids, attention_mask=system_mask, use_cache=True, logits_to_keep=1)
-        model.model.config._attn_implementation = attn_impl
         if was_training:
             model.train()
         return outputs.past_key_values, system_mask, L_sys
@@ -239,15 +237,6 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
             "GistMultiDocTrainer does not currently support gist_self_distill_coef; "
             "teacher logits are not built for dynamic system/context batches."
         )
-        dynamic_flags = inputs.pop('dynamic')
-        is_dynamic = dynamic_flags.bool()
-        assert bool(is_dynamic.all().item()) or not bool(is_dynamic.any().item()), (
-            "GistMultiDocTrainer received a mixed static/dynamic batch. "
-            "Dynamic context samples must be batched separately."
-        )
-        has_dynamic = bool(is_dynamic.any().item())
-        if has_dynamic:
-            assert batch_size == 1, "dynamic context requires per_device_train_batch_size=1"
         context_masks = inputs['context_input_ids'] != -100
         # build a per-sample system KV cache from variable-length system prompts
         system_input_ids = inputs.pop('system_input_ids')
@@ -263,6 +252,7 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
             position_ids[i] += past_length + seqlen
         inputs["position_ids"] = position_ids
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
+        model.model.config._attn_implementation = "flex_attention"
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
         if self.model_args.gist_reconstruct_loss_coef is not None and model.training:
             self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
@@ -275,8 +265,6 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         prediction_loss_only: bool,
         ignore_keys: Optional[list[str]] = None,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        attn_impl = model.model.config._attn_implementation
-        model.model.config._attn_implementation = "sdpa"
+        model.model.config._attn_implementation = "flex_attention"
         pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
-        model.model.config._attn_implementation = attn_impl
         return pred

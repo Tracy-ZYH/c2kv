@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -168,6 +169,7 @@ def _expand_openswe_batch(
     max_total_chars: Optional[int],
     max_answer_chars: Optional[int],
     recent_message_num: int,
+    max_samples_per_trace: Optional[int] = None,
 ) -> Dict[str, List[Any]]:
     allowed_languages = set(languages) if languages else None
     outputs = {
@@ -201,6 +203,7 @@ def _expand_openswe_batch(
         trajectory_id = batch.get("trajectory_id", [""])[row_index]
         qid_prefix = trajectory_id or instance_id or str(row_index)
 
+        trace_candidates: List[Dict[str, Any]] = []
         for assistant_index, message in enumerate(trajectory):
             if message.get("role") != "assistant":
                 continue
@@ -212,10 +215,11 @@ def _expand_openswe_batch(
                 for prior in trajectory[first_user_index + 1 : assistant_index]
                 if prior.get("role") != "system"
             ]
-            if len(previous) <= recent_message_num:
+            running_recent_message_num = random.randint(1, recent_message_num)
+            if len(previous) <= running_recent_message_num:
                 continue
-            history_raw = previous[:-recent_message_num]
-            current_raw = previous[-recent_message_num:]
+            history_raw = previous[:-running_recent_message_num]
+            current_raw = previous[-running_recent_message_num:]
             history = [
                 rendered
                 for rendered in (_render_openswe_history_message(item) for item in history_raw)
@@ -234,12 +238,23 @@ def _expand_openswe_batch(
                 sample_chars += sum(len(item["content"]) for item in current)
                 if sample_chars > max_total_chars:
                     continue
-            outputs["qid"].append(f"{qid_prefix}:{assistant_index}")
-            outputs["system_prompt"].append(prefix)
-            outputs["tools"].append("[]")
-            outputs["history_messages"].append(_json_dumps(history))
-            outputs["current_messages"].append(_json_dumps(current))
-            outputs["answer"].append(answer)
+            trace_candidates.append({
+                "qid": f"{qid_prefix}:{assistant_index}",
+                "system_prompt": prefix,
+                "tools": "[]",
+                "history_messages": _json_dumps(history),
+                "current_messages": _json_dumps(current),
+                "answer": answer,
+            })
+        if max_samples_per_trace is not None and len(trace_candidates) > max_samples_per_trace:
+            trace_candidates = random.sample(trace_candidates, max_samples_per_trace)
+        for candidate in trace_candidates:
+            outputs["qid"].append(candidate["qid"])
+            outputs["system_prompt"].append(candidate["system_prompt"])
+            outputs["tools"].append(candidate["tools"])
+            outputs["history_messages"].append(candidate["history_messages"])
+            outputs["current_messages"].append(candidate["current_messages"])
+            outputs["answer"].append(candidate["answer"])
     return outputs
 
 
@@ -261,6 +276,7 @@ class OpenSWETracesCompressHistorySource(CompressHistorySource):
         max_answer_chars: Optional[int] = None,
         recent_message_num: int = 1,
         num_proc: int = 8,
+        max_samples_per_trace: Optional[int] = None,
     ) -> None:
         self.path = Path(path)
         if self.path.is_file():
@@ -292,6 +308,7 @@ class OpenSWETracesCompressHistorySource(CompressHistorySource):
                 "max_total_chars": max_total_chars,
                 "max_answer_chars": max_answer_chars,
                 "recent_message_num": recent_message_num,
+                "max_samples_per_trace": max_samples_per_trace,
             },
         }
         if num_proc > 1:
@@ -418,17 +435,6 @@ def _split_message_to_fit(
     return chunks
 
 
-def _tagged_message_text(message: Message) -> str:
-    return f"<message role=\"{message['role']}\">\n{message['content']}\n</message>"
-
-
-def _merge_two_messages(left: Message, right: Message) -> Message:
-    return {
-        "role": "user",
-        "content": _tagged_message_text(left) + "\n\n" + _tagged_message_text(right),
-    }
-
-
 def _fit_reused_history(
     tokenizer: AutoTokenizer,
     messages: Sequence[Message],
@@ -440,19 +446,6 @@ def _fit_reused_history(
     for message in messages:
         split_messages.extend(_split_message_to_fit(tokenizer, message, max_doc_length))
     messages = list(split_messages)
-    while len(messages) > max_doc_num:
-        best_index = None
-        best_length = None
-        for index in range(len(messages) - 1):
-            merged = _merge_two_messages(messages[index], messages[index + 1])
-            length = _message_token_length(tokenizer, merged)
-            if length <= max_doc_length and (best_length is None or length < best_length):
-                best_index = index
-                best_length = length
-        if best_index is None:
-            break
-        merged = _merge_two_messages(messages[best_index], messages[best_index + 1])
-        messages = messages[:best_index] + [merged] + messages[best_index + 2 :]
     return _select_history(messages, max_doc_num=max_doc_num, policy=policy)
 
 
@@ -478,6 +471,55 @@ def _pad(values: List[int], length: int, pad_value: int) -> List[int]:
     return values + [pad_value] * (length - len(values))
 
 
+_INVALID_SAMPLE_MARKER = {
+    "system_input_ids": [],
+    "context_input_ids": [],
+    "input_ids": [],
+    "labels": [],
+    "attention_mask": [],
+    "dynamic": -1,
+}
+
+
+def _preprocess_record(
+    record: Dict[str, Any],
+    tokenizer: AutoTokenizer,
+    max_length: int,
+    max_doc_length: int,
+    min_doc_num: int,
+    max_doc_num: int,
+    max_system_length: int,
+    history_selection: HistorySelection,
+) -> Dict[str, Any]:
+    """Adapter that converts a raw dataset record into a CompressHistoryExample
+    and delegates to CompressHistoryDataset.preprocess_example.
+
+    Returns a sentinel dict with ``dynamic == -1`` when the sample is invalid,
+    because ``datasets.Dataset.map`` does not support returning ``None``.
+    """
+    example = CompressHistoryExample(
+        qid=str(record.get("qid", "")),
+        system_prompt=record.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
+        tools=_json_loads(record.get("tools"), []),
+        history_messages=_json_loads(record.get("history_messages"), []),
+        current_messages=_json_loads(record.get("current_messages"), []),
+        answer=record.get("answer") or "",
+    )
+    result = CompressHistoryDataset.preprocess_example(
+        example,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        max_doc_length=max_doc_length,
+        min_doc_num=min_doc_num,
+        max_doc_num=max_doc_num,
+        max_system_length=max_system_length,
+        history_selection=history_selection,
+    )
+    if result is None:
+        return dict(_INVALID_SAMPLE_MARKER)
+    return result
+
+
 class CompressHistoryDataset(GistDataset):
     """Convert CompressHistorySource examples into GistMultiDocTrainer format."""
 
@@ -493,25 +535,50 @@ class CompressHistoryDataset(GistDataset):
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
         history_selection: HistorySelection = "tail",
+        num_proc: int = 32,
     ) -> None:
-        rows = []
-        for index, example in enumerate(source):
-            if num_samples is not None and index >= num_samples:
-                break
-            row = self.preprocess_example(
-                example,
-                tokenizer=tokenizer,
-                max_length=max_length,
-                max_doc_length=max_doc_length,
-                min_doc_num=min_doc_num,
-                max_doc_num=max_doc_num,
-                max_system_length=max_system_length,
-                history_selection=history_selection,
+        raw_data = source.data if hasattr(source, "data") else None
+        if raw_data is not None and isinstance(raw_data, datasets.Dataset):
+            if num_samples is not None:
+                raw_data = raw_data.select(range(min(num_samples, len(raw_data))))
+            mapped = raw_data.map(
+                _preprocess_record,
+                fn_kwargs={
+                    "tokenizer": tokenizer,
+                    "max_length": max_length,
+                    "max_doc_length": max_doc_length,
+                    "min_doc_num": min_doc_num,
+                    "max_doc_num": max_doc_num,
+                    "max_system_length": max_system_length,
+                    "history_selection": history_selection,
+                },
+                num_proc=num_proc,
+                remove_columns=raw_data.column_names,
             )
-            if row is not None:
-                rows.append(row)
-        data = datasets.Dataset.from_list(rows)
-        self.data = data.shuffle(seed=shuffle_seed) if len(data) else data
+            # Filter out invalid samples marked by dynamic == -1
+            filtered = mapped.filter(lambda x: x["dynamic"] != -1, num_proc=num_proc)
+            data = filtered.shuffle(seed=shuffle_seed) if len(filtered) else filtered
+        else:
+            # Fallback to sequential iteration for sources without .data attribute
+            rows = []
+            for index, example in enumerate(source):
+                if num_samples is not None and index >= num_samples:
+                    break
+                row = self.preprocess_example(
+                    example,
+                    tokenizer=tokenizer,
+                    max_length=max_length,
+                    max_doc_length=max_doc_length,
+                    min_doc_num=min_doc_num,
+                    max_doc_num=max_doc_num,
+                    max_system_length=max_system_length,
+                    history_selection=history_selection,
+                )
+                if row is not None:
+                    rows.append(row)
+            data = datasets.Dataset.from_list(rows)
+            data = data.shuffle(seed=shuffle_seed) if len(data) else data
+        self.data = data
         self.max_doc_length = max_doc_length
         self.min_doc_num = min_doc_num
         self.max_system_length = max_system_length

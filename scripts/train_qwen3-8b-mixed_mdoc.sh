@@ -1,9 +1,9 @@
 export PYTHONPATH=`pwd`/python:$PYTHONPATH
-export OUTPUT_DIR=./checkpoints/qwen3-4b-mixed/
+export OUTPUT_DIR=./checkpoints/qwen3-8b-mixed/
 HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_mdoc \
     --num_train_epochs 1 \
     --warmup_steps 500 \
-    --model_name_or_path Qwen/Qwen3-4B-Instruct-2507 \
+    --model_name_or_path Qwen/Qwen3-8B \
     --padding_side right \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 16 \
@@ -13,10 +13,10 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_m
     --enable_gist True \
     --gist_param qkv \
     --gist_type dynamic-interleave \
-    --gist_overlap 64 \
+    --gist_overlap 16 \
     --gist_residual_type embed-mean \
-    --output_dir $OUTPUT_DIR/260701-dyn-overlap64-embed_residual \
-    --logging_steps 10 \
+    --output_dir $OUTPUT_DIR/260630-dyn-overlap16-embed_residual \
+    --logging_steps 1 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \
     --eval_strategy steps \

@@ -2,7 +2,7 @@ export PYTHONPATH=`pwd`/python:$PYTHONPATH
 export OUTPUT_DIR=./checkpoints/llama3.1-8b-mixed/
 HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_mdoc \
     --num_train_epochs 1 \
-    --warmup_ratio 0.06 \
+    --warmup_steps 500 \
     --model_name_or_path meta-llama/Meta-Llama-3.1-8B-Instruct \
     --padding_side right \
     --per_device_train_batch_size 1 \
@@ -13,9 +13,9 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=64 torchrun --nproc_per_node 8 -m train.train_m
     --enable_gist True \
     --gist_param qkv \
     --gist_type dynamic-interleave \
+    --gist_overlap 64 \
     --gist_residual_type embed-mean \
-    --output_dir $OUTPUT_DIR/260504-tulu3-dynamic_interleave-1024-embed_residual \
-    --logging_dir ./logs/llama3.1-8b-mixed/260504-tulu3-dynamic_interleave-1024-embed_residual \
+    --output_dir $OUTPUT_DIR/260626-dyn-overlap64-embed_residual \
     --logging_steps 10 \
     --deepspeed ./configs/ds_config.json \
     --do_train True \

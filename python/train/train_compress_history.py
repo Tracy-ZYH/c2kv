@@ -35,7 +35,8 @@ class CompressHistoryDataArgs:
     max_total_chars: Optional[int] = None
     max_answer_chars: Optional[int] = None
     recent_message_num: int = 1
-    source_num_proc: int = 8
+    max_samples_per_trace: Optional[int] = None
+    num_proc: int = 8
 
 
 def main():
@@ -73,7 +74,8 @@ def main():
                 "max_total_chars": data_args.max_total_chars,
                 "max_answer_chars": data_args.max_answer_chars,
                 "recent_message_num": data_args.recent_message_num,
-                "num_proc": data_args.source_num_proc,
+                "max_samples_per_trace": data_args.max_samples_per_trace,
+                "num_proc": data_args.num_proc,
             }
             if data_args.source_type == "open_swe"
             else None,
@@ -85,6 +87,7 @@ def main():
             "history_selection": data_args.history_selection,
             "num_samples": data_args.num_samples,
             "shuffle_seed": training_args.dataset_shuffle_seed,
+            "num_proc": data_args.num_proc,
         }
         train_dataset = get_compress_history_dataset(
             training_args.train_data,
