@@ -182,6 +182,15 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         if self.model_args.gist_reconstruct_loss_coef is not None:
             self.log_data.update({"compress_loss": []})
 
+    def _system_attn_impl(self) -> str:
+        attn_impl = getattr(self.model_args, "attn_impl", None)
+        if attn_impl in (None, "flex_attention"):
+            return "flash_attention_2"
+        return attn_impl
+
+    def _gist_attn_impl(self) -> str:
+        return getattr(self.model_args, "attn_impl", None) or "flex_attention"
+
     @torch.no_grad()
     def _build_system_kv(
         self, model, system_input_ids: torch.Tensor
@@ -210,10 +219,12 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
                 continue
             left_ids[i, L_sys - n:] = system_input_ids[i][real_mask[i]]
             system_mask[i, L_sys - n:] = 1
-        model.model.config._attn_implementation = "flash_attention_2"
+        original_attn_impl = model.model.config._attn_implementation
+        model.model.config._attn_implementation = self._system_attn_impl()
         was_training = model.training
         model.eval()
         outputs = model(left_ids, attention_mask=system_mask, use_cache=True, logits_to_keep=1)
+        model.model.config._attn_implementation = original_attn_impl
         if was_training:
             model.train()
         return outputs.past_key_values, system_mask, L_sys
@@ -252,7 +263,7 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
             position_ids[i] += past_length + seqlen
         inputs["position_ids"] = position_ids
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
-        model.model.config._attn_implementation = "flex_attention"
+        model.model.config._attn_implementation = self._gist_attn_impl()
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
         if self.model_args.gist_reconstruct_loss_coef is not None and model.training:
             self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
@@ -265,6 +276,6 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         prediction_loss_only: bool,
         ignore_keys: Optional[list[str]] = None,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        model.model.config._attn_implementation = "flex_attention"
+        model.model.config._attn_implementation = self._gist_attn_impl()
         pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
         return pred

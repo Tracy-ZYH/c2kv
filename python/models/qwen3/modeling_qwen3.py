@@ -315,6 +315,9 @@ class Qwen3Attention(nn.Module):
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
         )
+        attention_kwargs = {}
+        if self.config._attn_implementation == "flex_attention":
+            attention_kwargs["kernel_options"] = {"FORCE_USE_FLEX_ATTENTION": True}
 
         attn_output, _ = attention_interface(
             self,
@@ -325,7 +328,7 @@ class Qwen3Attention(nn.Module):
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             sliding_window=self.sliding_window,  # diff with Llama
-            kernel_options={"FORCE_USE_FLEX_ATTENTION": True},
+            **attention_kwargs,
             **kwargs,
         )
 

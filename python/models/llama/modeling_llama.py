@@ -326,6 +326,9 @@ class LlamaAttention(nn.Module):
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, eager_attention_forward
         )
+        attention_kwargs = {}
+        if self.config._attn_implementation == "flex_attention":
+            attention_kwargs["kernel_options"] = {"FORCE_USE_FLEX_ATTENTION": True}
 
         attn_output, _ = attention_interface(
             self,
@@ -335,7 +338,7 @@ class LlamaAttention(nn.Module):
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
-            kernel_options={"FORCE_USE_FLEX_ATTENTION": True},
+            **attention_kwargs,
             **kwargs,
         )
 

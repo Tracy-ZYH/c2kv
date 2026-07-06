@@ -216,3 +216,41 @@ __marimo__/
 
 *.npy
 *.npz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+datasets/
+datasets_cleaned/
+data/
+
+# Models and checkpoints
+models/
+checkpoints/
+outputs/
+output/
+runs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Logs
+*.log
+logs/
+
+# System
+.DS_Store
+Thumbs.db

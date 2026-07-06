@@ -1,0 +1,612 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Sequence
+
+import datasets
+import torch
+from torch.utils.data import Dataset
+from transformers import DataCollatorWithPadding, HfArgumentParser
+
+from gist_args import ModelArgs, TrainingArgs
+from models import *
+from train.train_data import DEFAULT_SYSTEM_PROMPT
+from train.train_data_multiturn import _chat_template_ids, _pad
+from train.trainer import GistMultiDocTrainer
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+Message = Dict[str, Any]
+
+
+@dataclass
+class AgentToolDefinitionDataArgs:
+    dataset_path: str = "./datasets/agent-llm-traces"
+    eval_ratio: float = 0.1
+    split_seed: int = 42
+    max_sessions: Optional[int] = None
+    max_samples_per_session: int = 4
+    max_doc_length: int = 4096
+    max_doc_num: int = 1
+    max_length: int = 2048
+    max_system_length: int = 256
+    max_tool_definition_chars: Optional[int] = None
+    max_input_chars: Optional[int] = None
+    max_target_chars: Optional[int] = None
+    require_tool_call: bool = True
+    num_proc: int = 8
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    device_type: str = "auto"
+    npu_attn_impl: str = "eager"
+
+
+@dataclass(frozen=True)
+class AgentToolDefinitionExample:
+    qid: str
+    session_id: str
+    tool_definition: str
+    input_messages: List[Message]
+    answer: str
+    has_tool_call: bool
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    if value is None or value == "":
+        return default
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _get_value(obj: Any, key: str, default: Any = None) -> Any:
+    if not isinstance(obj, dict):
+        return default
+    if key in obj:
+        return obj[key]
+    current = obj
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def _first_value(obj: Dict[str, Any], keys: Sequence[str], default: Any = None) -> Any:
+    for key in keys:
+        value = _get_value(obj, key, None)
+        if value is not None:
+            return value
+    return default
+
+
+def _canonical_tool_definition(value: Any) -> str:
+    parsed = _json_loads(value, value)
+    if isinstance(parsed, str):
+        return parsed.strip()
+    return _json_dumps(parsed)
+
+
+def _render_tool_calls(tool_calls: Any) -> tuple[str, bool]:
+    tool_calls = _json_loads(tool_calls, [])
+    if isinstance(tool_calls, dict):
+        tool_calls = [tool_calls]
+    if not isinstance(tool_calls, list):
+        return "", False
+    rendered = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = (
+            function.get("name")
+            or call.get("name")
+            or call.get("tool_name")
+            or call.get("function_name")
+            or ""
+        )
+        arguments = (
+            function.get("arguments")
+            or call.get("arguments")
+            or call.get("args")
+            or call.get("input")
+            or {}
+        )
+        payload = {"name": name, "arguments": arguments}
+        rendered.append("<tool_call>\n" + _json_dumps(payload) + "\n</tool_call>")
+    return "\n".join(rendered), bool(rendered)
+
+
+def _message_content_to_text(message: Message) -> str:
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if "text" in item:
+                    parts.append(str(item["text"]))
+                else:
+                    parts.append(_json_dumps(item))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return _json_dumps(content)
+
+
+def _normal_message(message: Message) -> Optional[Message]:
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role") or message.get("type") or "user"
+    if role == "tool":
+        role = "user"
+    content_parts = []
+    content = _message_content_to_text(message)
+    if content:
+        content_parts.append(content)
+    tool_calls_text, _ = _render_tool_calls(
+        message.get("tool_calls")
+        or message.get("toolCalls")
+        or message.get("function_call")
+    )
+    if tool_calls_text:
+        content_parts.append("Action:\n" + tool_calls_text)
+    if not content_parts and role != "assistant":
+        return None
+    return {"role": role, "content": "\n\n".join(content_parts)}
+
+
+def _render_output_messages(value: Any) -> tuple[str, bool]:
+    messages = _json_loads(value, [])
+    if isinstance(messages, dict):
+        messages = [messages]
+    if not isinstance(messages, list):
+        messages = [{"role": "assistant", "content": str(messages)}]
+
+    rendered_messages: List[str] = []
+    has_tool_call = False
+    for message in messages:
+        if not isinstance(message, dict):
+            if message:
+                rendered_messages.append(str(message))
+            continue
+        parts = []
+        reasoning = (
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or message.get("thought")
+            or message.get("thinking")
+            or message.get("cot")
+            or ""
+        )
+        if reasoning:
+            parts.append("Thought:\n" + str(reasoning).strip())
+        content = _message_content_to_text(message).strip()
+        if content:
+            parts.append(content)
+        tool_calls_text, found_tool_call = _render_tool_calls(
+            message.get("tool_calls")
+            or message.get("toolCalls")
+            or message.get("function_call")
+        )
+        if tool_calls_text:
+            parts.append("Action:\n" + tool_calls_text)
+        has_tool_call = has_tool_call or found_tool_call
+        rendered = "\n\n".join(part for part in parts if part).strip()
+        if rendered:
+            rendered_messages.append(rendered)
+
+    answer = "\n\n".join(rendered_messages).strip()
+    marker_text = answer.lower()
+    has_tool_call = has_tool_call or any(
+        marker in marker_text
+        for marker in ("<tool_call>", "action:", "function_call", "tool call")
+    )
+    return answer, has_tool_call
+
+
+def _iter_sessions(row: Dict[str, Any], row_index: int) -> Iterator[tuple[str, List[Dict[str, Any]]]]:
+    trace = _json_loads(_first_value(row, ["trace", "Trace"], row), row)
+    sessions = _first_value(row, ["trace.sessions", "sessions"], None)
+    if sessions is None and isinstance(trace, dict):
+        sessions = _first_value(trace, ["trace.sessions", "sessions"], None)
+    sessions = _json_loads(sessions, sessions)
+
+    if sessions is None:
+        spans = _first_value(row, ["spans", "trace.spans"], None)
+        spans = _json_loads(spans, spans)
+        if spans is not None:
+            sessions = [{"session_id": _first_value(row, ["session_id", "id"], f"row-{row_index}"), "spans": spans}]
+
+    if isinstance(sessions, dict):
+        sessions = [sessions]
+    if not isinstance(sessions, list):
+        return
+
+    for session_index, session in enumerate(sessions):
+        if not isinstance(session, dict):
+            continue
+        spans = _json_loads(session.get("spans"), session.get("spans"))
+        if not isinstance(spans, list):
+            continue
+        session_id = (
+            session.get("session_id")
+            or session.get("sessionId")
+            or session.get("id")
+            or _first_value(row, ["session_id", "trace_id", "id"], None)
+            or f"row-{row_index}:session-{session_index}"
+        )
+        yield str(session_id), spans
+
+
+def _span_attributes(span: Any) -> Dict[str, Any]:
+    span = _json_loads(span, span)
+    if not isinstance(span, dict):
+        return {}
+    attributes = span.get("attributes", span)
+    attributes = _json_loads(attributes, attributes)
+    return attributes if isinstance(attributes, dict) else {}
+
+
+class AgentLLMTracesSource:
+    def __init__(self, args: AgentToolDefinitionDataArgs) -> None:
+        self.args = args
+        self.path = self._resolve_dataset_path(Path(args.dataset_path))
+        data_files = self._find_parquet_files(self.path)
+        if not data_files:
+            raise FileNotFoundError(f"No parquet files found under {self.path}")
+        logger.info("Loading %d parquet shards from %s", len(data_files), self.path)
+        raw = datasets.load_dataset("parquet", data_files=data_files, split="train")
+        self.sessions = self._load_sessions(raw)
+        if args.max_sessions is not None:
+            self.sessions = self.sessions[: args.max_sessions]
+        logger.info("Loaded %d sessions before train/eval split", len(self.sessions))
+
+    @staticmethod
+    def _resolve_dataset_path(path: Path) -> Path:
+        if path.exists():
+            return path
+        fallback = Path("./data/agent-llm-traces")
+        if path.as_posix().endswith("/datasets/agent-llm-traces") and fallback.exists():
+            logger.warning("Using fallback dataset path %s because %s does not exist", fallback, path)
+            return fallback
+        return path
+
+    @staticmethod
+    def _find_parquet_files(path: Path) -> List[str]:
+        if path.is_file() and path.suffix == ".parquet":
+            return [str(path)]
+        search_roots = [path / "data", path]
+        files: List[Path] = []
+        for root in search_roots:
+            if root.is_dir():
+                files.extend(sorted(root.glob("*.parquet")))
+                files.extend(sorted(root.glob("*/*.parquet")))
+            if files:
+                break
+        return [str(file) for file in files]
+
+    def _load_sessions(self, raw: datasets.Dataset) -> List[Dict[str, Any]]:
+        sessions = []
+        for row_index, row in enumerate(raw):
+            for session_id, spans in _iter_sessions(row, row_index):
+                sessions.append({"session_id": session_id, "spans": spans})
+        session_ids = {item["session_id"] for item in sessions}
+        if len(session_ids) != len(sessions):
+            logger.info(
+                "Found %d session records with %d unique ids; split is still keyed by session_id",
+                len(sessions),
+                len(session_ids),
+            )
+        return sessions
+
+    def split_session_ids(self) -> tuple[set[str], set[str]]:
+        session_ids = sorted({item["session_id"] for item in self.sessions})
+        rng = random.Random(self.args.split_seed)
+        rng.shuffle(session_ids)
+        eval_count = max(1, int(round(len(session_ids) * self.args.eval_ratio))) if session_ids else 0
+        eval_ids = set(session_ids[:eval_count])
+        train_ids = set(session_ids[eval_count:])
+        return train_ids, eval_ids
+
+    def iter_examples(self, split: str) -> Iterator[AgentToolDefinitionExample]:
+        train_ids, eval_ids = self.split_session_ids()
+        keep_ids = train_ids if split == "train" else eval_ids
+        rng = random.Random(self.args.split_seed + (0 if split == "train" else 1))
+        for session in self.sessions:
+            session_id = session["session_id"]
+            if session_id not in keep_ids:
+                continue
+            candidates = self._session_examples(session_id, session["spans"])
+            if self.args.max_samples_per_session and len(candidates) > self.args.max_samples_per_session:
+                candidates = rng.sample(candidates, self.args.max_samples_per_session)
+            yield from candidates
+
+    def _session_examples(self, session_id: str, spans: Sequence[Any]) -> List[AgentToolDefinitionExample]:
+        tool_definition = ""
+        candidates = []
+        for span_index, span in enumerate(spans):
+            attributes = _span_attributes(span)
+            tool_value = attributes.get("gen_ai.tool.definitions")
+            if tool_value and not tool_definition:
+                tool_definition = _canonical_tool_definition(tool_value)
+            input_messages = _json_loads(attributes.get("gen_ai.input.messages"), [])
+            output_messages = attributes.get("gen_ai.output.messages")
+            if not tool_definition or not input_messages or output_messages is None:
+                continue
+            if self.args.max_tool_definition_chars is not None and len(tool_definition) > self.args.max_tool_definition_chars:
+                return []
+            if self.args.max_input_chars is not None and len(str(input_messages)) > self.args.max_input_chars:
+                continue
+            answer, has_tool_call = _render_output_messages(output_messages)
+            if self.args.max_target_chars is not None and len(answer) > self.args.max_target_chars:
+                answer = answer[: self.args.max_target_chars].rstrip()
+            if not answer:
+                continue
+            if self.args.require_tool_call and not has_tool_call:
+                continue
+            normalized_messages = [
+                item
+                for item in (_normal_message(message) for message in _json_loads(input_messages, []))
+                if item is not None and item.get("role") != "system"
+            ]
+            if not normalized_messages:
+                continue
+            candidates.append(
+                AgentToolDefinitionExample(
+                    qid=f"{session_id}:{span_index}",
+                    session_id=session_id,
+                    tool_definition=tool_definition,
+                    input_messages=normalized_messages,
+                    answer=answer,
+                    has_tool_call=has_tool_call,
+                    system_prompt=self.args.system_prompt,
+                )
+            )
+        return candidates
+
+
+def _resolve_device_type(requested: str) -> str:
+    requested = (requested or "auto").lower()
+    if requested != "auto":
+        return requested
+    try:
+        import torch_npu  # noqa: F401
+
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return "npu"
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def _setup_device(model_args: ModelArgs, data_args: AgentToolDefinitionDataArgs) -> str:
+    device_type = _resolve_device_type(data_args.device_type)
+    if device_type == "npu":
+        import torch_npu  # noqa: F401
+
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        torch.npu.set_device(local_rank)
+        if model_args.attn_impl in (None, "flex_attention", "flash_attention_2"):
+            logger.info(
+                "Overriding attention backend from %s to %s for Ascend NPU",
+                model_args.attn_impl,
+                data_args.npu_attn_impl,
+            )
+            model_args.attn_impl = data_args.npu_attn_impl
+        if model_args.device_map == "auto":
+            logger.info("Disabling device_map=auto for NPU distributed/deepspeed training")
+            model_args.device_map = None
+    return device_type
+
+
+class AgentToolDefinitionDataset(Dataset):
+    def __init__(
+        self,
+        examples: Sequence[AgentToolDefinitionExample],
+        tokenizer,
+        max_doc_length: int,
+        max_doc_num: int,
+        max_length: int,
+        max_system_length: int,
+    ) -> None:
+        self.max_doc_length = max_doc_length
+        self.max_doc_num = max_doc_num
+        self.max_length = max_length
+        self.max_system_length = max_system_length
+        self.data = []
+        skipped = 0
+        for example in examples:
+            row = self._preprocess_example(
+                example,
+                tokenizer=tokenizer,
+                max_doc_length=max_doc_length,
+                max_doc_num=max_doc_num,
+                max_length=max_length,
+                max_system_length=max_system_length,
+            )
+            if row is None:
+                skipped += 1
+            else:
+                self.data.append(row)
+        logger.info("Built %d samples; skipped %d long/empty samples", len(self.data), skipped)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        return self.data[index]
+
+    @staticmethod
+    def _preprocess_example(
+        example: AgentToolDefinitionExample,
+        tokenizer,
+        max_doc_length: int,
+        max_doc_num: int,
+        max_length: int,
+        max_system_length: int,
+    ) -> Optional[Dict[str, Any]]:
+        system_ids = _chat_template_ids(
+            tokenizer,
+            [{"role": "system", "content": example.system_prompt}],
+            keep_bos=True,
+            max_length=max_system_length,
+        )
+        system_input_ids = _pad(system_ids, max_system_length, -100)
+
+        tool_doc = {
+            "role": "user",
+            "content": "Tool definitions:\n" + example.tool_definition,
+        }
+        doc_ids = _chat_template_ids(tokenizer, [tool_doc])
+        if len(doc_ids) > max_doc_length:
+            return None
+        context_input_ids = _pad(doc_ids, max_doc_length, -100)
+        context_input_ids.extend([-100] * (max_doc_length * (max_doc_num - 1)))
+
+        prompt_ids = _chat_template_ids(
+            tokenizer,
+            example.input_messages,
+            add_generation_prompt=True,
+        )
+        answer_ids = tokenizer.encode(example.answer, add_special_tokens=False)
+        if not prompt_ids or not answer_ids:
+            return None
+        answer_ids.append(tokenizer.eos_token_id)
+        if len(prompt_ids) >= max_length:
+            prompt_ids = prompt_ids[-(max_length - 1) :]
+        answer_budget = max_length - len(prompt_ids)
+        answer_ids = answer_ids[:answer_budget]
+        if not answer_ids:
+            return None
+        input_ids = prompt_ids + answer_ids
+        labels = [-100] * len(prompt_ids) + answer_ids
+        pad_length = max_length - len(input_ids)
+        attention_mask = [1] * len(input_ids) + [0] * pad_length
+        input_ids = input_ids + [tokenizer.pad_token_id] * pad_length
+        labels = labels + [-100] * pad_length
+
+        return {
+            "system_input_ids": system_input_ids,
+            "context_input_ids": context_input_ids,
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "dynamic": 0,
+        }
+
+
+def main() -> None:
+    parser = HfArgumentParser([ModelArgs, TrainingArgs, AgentToolDefinitionDataArgs])
+    model_args, training_args, data_args = parser.parse_args_into_dataclasses()
+    device_type = _setup_device(model_args, data_args)
+
+    if model_args.gist_gradient_checkpointing:
+        import models.gist_utils as _gist_utils
+
+        _gist_utils.GIST_GRADIENT_CHECKPOINTING = True
+
+    model, tokenizer = get_model_and_tokenizer(
+        model_args,
+        device=device_type,
+        evaluation_mode=not training_args.do_train,
+    )
+
+    if model_args.enable_gist and training_args.only_train_gist:
+        for name, param in model.named_parameters():
+            param.requires_grad_("gist" in name)
+
+    logger.info(f"Total Model params: {format_numel_str(sum(p.numel() for p in model.parameters()))}")
+    logger.info(
+        "Trainable Model params: "
+        f"{format_numel_str(sum(p.numel() for p in model.parameters() if p.requires_grad))}"
+    )
+
+    with training_args.main_process_first(desc="Build agent tool-definition dataset"):
+        source = AgentLLMTracesSource(data_args)
+        train_examples = list(source.iter_examples("train"))
+        eval_examples = list(source.iter_examples("eval"))
+        train_session_ids = {example.session_id for example in train_examples}
+        eval_session_ids = {example.session_id for example in eval_examples}
+        overlap = train_session_ids & eval_session_ids
+        if overlap:
+            raise RuntimeError(f"Session split leakage detected: {sorted(overlap)[:5]}")
+        logger.info(
+            "Expanded %d train samples from %d sessions; %d eval samples from %d sessions",
+            len(train_examples),
+            len(train_session_ids),
+            len(eval_examples),
+            len(eval_session_ids),
+        )
+        train_dataset = AgentToolDefinitionDataset(
+            train_examples,
+            tokenizer=tokenizer,
+            max_doc_length=data_args.max_doc_length,
+            max_doc_num=data_args.max_doc_num,
+            max_length=data_args.max_length,
+            max_system_length=data_args.max_system_length,
+        )
+        eval_dataset = AgentToolDefinitionDataset(
+            eval_examples,
+            tokenizer=tokenizer,
+            max_doc_length=data_args.max_doc_length,
+            max_doc_num=data_args.max_doc_num,
+            max_length=data_args.max_length,
+            max_system_length=data_args.max_system_length,
+        )
+
+    if len(train_dataset) == 0:
+        raise RuntimeError("No train samples remained after filtering")
+    if len(eval_dataset) == 0:
+        logger.warning("No eval samples remained after filtering")
+
+    trainer = GistMultiDocTrainer(
+        model=model,
+        args=training_args,
+        max_doc_length=train_dataset.max_doc_length,
+        model_args=model_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset if len(eval_dataset) else None,
+        data_collator=DataCollatorWithPadding(
+            tokenizer=tokenizer,
+            padding=True,
+            return_tensors="pt",
+        ),
+    )
+
+    if training_args.do_train:
+        trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+    else:
+        if len(eval_dataset) == 0:
+            raise ValueError("Evaluation requested but eval dataset is empty")
+        eval_result = trainer.evaluate()
+        with training_args.main_process_first(desc="Evaluate model"):
+            logger.info(f"Evaluation result: {eval_result}")
+
+
+if __name__ == "__main__":
+    main()
