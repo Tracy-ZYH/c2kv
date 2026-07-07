@@ -265,6 +265,18 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
         model.model.config._attn_implementation = self._gist_attn_impl()
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
+        label_token_count = int((inputs["labels"] != -100).sum().detach().cpu().item())
+        self.log_data.setdefault("label_tokens", []).append(
+            inputs["labels"].new_tensor(float(label_token_count)).detach()
+        )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Non-finite loss detected: {loss.detach().float().item()}, "
+                f"label_tokens={label_token_count}, "
+                f"attn_impl={model.model.config._attn_implementation}, "
+                f"max_doc_length={self.max_doc_length}, "
+                f"input_length={input_length}"
+            )
         if self.model_args.gist_reconstruct_loss_coef is not None and model.training:
             self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
         return (loss, outputs) if return_outputs else loss

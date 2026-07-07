@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence
@@ -39,12 +40,15 @@ class AgentToolDefinitionDataArgs:
     max_sessions: Optional[int] = None
     max_samples_per_session: int = 4
     max_doc_length: int = 4096
-    max_doc_num: int = 1
+    max_doc_num: int = 10
     max_length: int = 2048
     max_system_length: int = 256
     max_tool_definition_chars: Optional[int] = None
+    max_tool_definition_tokens: int = 10000
     max_input_chars: Optional[int] = None
     max_target_chars: Optional[int] = None
+    min_target_tokens: int = 64
+    truncate_tool_definition: bool = True
     require_tool_call: bool = True
     num_proc: int = 8
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -116,6 +120,8 @@ def _render_tool_calls(tool_calls: Any) -> tuple[str, bool]:
     for call in tool_calls:
         if not isinstance(call, dict):
             continue
+        if call.get("type") not in (None, "tool_call", "function_call") and "function" not in call:
+            continue
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = (
             function.get("name")
@@ -136,16 +142,33 @@ def _render_tool_calls(tool_calls: Any) -> tuple[str, bool]:
     return "\n".join(rendered), bool(rendered)
 
 
+def _message_parts(message: Message) -> List[Dict[str, Any]]:
+    parts = message.get("parts")
+    parts = _json_loads(parts, parts)
+    if isinstance(parts, dict):
+        return [parts]
+    if isinstance(parts, list):
+        return [part for part in parts if isinstance(part, dict)]
+    return []
+
+
 def _message_content_to_text(message: Message) -> str:
     content = message.get("content", "")
+    if not content and _message_parts(message):
+        content = _message_parts(message)
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         parts = []
         for item in content:
             if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in ("tool_call", "function_call"):
+                    continue
                 if "text" in item:
                     parts.append(str(item["text"]))
+                elif "content" in item:
+                    parts.append(str(item["content"]))
                 else:
                     parts.append(_json_dumps(item))
             elif item is not None:
@@ -170,6 +193,7 @@ def _normal_message(message: Message) -> Optional[Message]:
         message.get("tool_calls")
         or message.get("toolCalls")
         or message.get("function_call")
+        or _message_parts(message)
     )
     if tool_calls_text:
         content_parts.append("Action:\n" + tool_calls_text)
@@ -210,6 +234,7 @@ def _render_output_messages(value: Any) -> tuple[str, bool]:
             message.get("tool_calls")
             or message.get("toolCalls")
             or message.get("function_call")
+            or _message_parts(message)
         )
         if tool_calls_text:
             parts.append("Action:\n" + tool_calls_text)
@@ -274,9 +299,10 @@ class AgentLLMTracesSource:
     def __init__(self, args: AgentToolDefinitionDataArgs) -> None:
         self.args = args
         self.path = self._resolve_dataset_path(Path(args.dataset_path))
+        self.source_skips: Counter[str] = Counter()
         data_files = self._find_parquet_files(self.path)
         if not data_files:
-            raise FileNotFoundError(f"No parquet files found under {self.path}")
+            raise FileNotFoundError(self._missing_dataset_message(self.path))
         logger.info("Loading %d parquet shards from %s", len(data_files), self.path)
         raw = datasets.load_dataset("parquet", data_files=data_files, split="train")
         self.sessions = self._load_sessions(raw)
@@ -303,16 +329,55 @@ class AgentLLMTracesSource:
         for root in search_roots:
             if root.is_dir():
                 files.extend(sorted(root.glob("*.parquet")))
-                files.extend(sorted(root.glob("*/*.parquet")))
+                if not files:
+                    files.extend(sorted(root.rglob("*.parquet")))
             if files:
                 break
         return [str(file) for file in files]
 
+    @staticmethod
+    def _missing_dataset_message(path: Path) -> str:
+        checked = [path / "data", path]
+        lines = [f"No parquet files found under dataset_path={path!s}."]
+        for item in checked:
+            if item.exists():
+                if item.is_dir():
+                    preview = sorted(child.name for child in item.iterdir())[:20]
+                    lines.append(f"Checked {item!s}: exists, first entries={preview}")
+                else:
+                    lines.append(f"Checked {item!s}: exists but is not a directory")
+            else:
+                lines.append(f"Checked {item!s}: missing")
+        lines.append(
+            "Set DATASET_PATH or --dataset_path to the directory that contains "
+            "data/train-00000-of-00039.parquet, or copy the Hugging Face dataset "
+            "to ./datasets/agent-llm-traces."
+        )
+        return "\n".join(lines)
+
     def _load_sessions(self, raw: datasets.Dataset) -> List[Dict[str, Any]]:
-        sessions = []
+        sessions_by_id: Dict[str, List[Dict[str, Any]]] = {}
         for row_index, row in enumerate(raw):
+            found_nested_session = False
             for session_id, spans in _iter_sessions(row, row_index):
-                sessions.append({"session_id": session_id, "spans": spans})
+                found_nested_session = True
+                sessions_by_id.setdefault(session_id, []).extend(spans)
+            if found_nested_session:
+                continue
+
+            session_id = (
+                row.get("session_id")
+                or row.get("trace_id")
+                or row.get("TraceId")
+                or row.get("traceId")
+                or f"row-{row_index}"
+            )
+            sessions_by_id.setdefault(str(session_id), []).append(dict(row))
+
+        sessions = [
+            {"session_id": session_id, "spans": self._sort_spans(spans)}
+            for session_id, spans in sessions_by_id.items()
+        ]
         session_ids = {item["session_id"] for item in sessions}
         if len(session_ids) != len(sessions):
             logger.info(
@@ -321,6 +386,16 @@ class AgentLLMTracesSource:
                 len(session_ids),
             )
         return sessions
+
+    @staticmethod
+    def _sort_spans(spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            spans,
+            key=lambda span: (
+                span.get("start_time") or "",
+                span.get("span_id") or "",
+            ),
+        )
 
     def split_session_ids(self) -> tuple[set[str], set[str]]:
         session_ids = sorted({item["session_id"] for item in self.sessions})
@@ -355,17 +430,22 @@ class AgentLLMTracesSource:
             input_messages = _json_loads(attributes.get("gen_ai.input.messages"), [])
             output_messages = attributes.get("gen_ai.output.messages")
             if not tool_definition or not input_messages or output_messages is None:
+                self.source_skips["missing_tool_input_or_output"] += 1
                 continue
             if self.args.max_tool_definition_chars is not None and len(tool_definition) > self.args.max_tool_definition_chars:
+                self.source_skips["tool_definition_too_many_chars"] += 1
                 return []
             if self.args.max_input_chars is not None and len(str(input_messages)) > self.args.max_input_chars:
+                self.source_skips["input_too_many_chars"] += 1
                 continue
             answer, has_tool_call = _render_output_messages(output_messages)
             if self.args.max_target_chars is not None and len(answer) > self.args.max_target_chars:
                 answer = answer[: self.args.max_target_chars].rstrip()
             if not answer:
+                self.source_skips["empty_answer"] += 1
                 continue
             if self.args.require_tool_call and not has_tool_call:
+                self.source_skips["no_tool_call"] += 1
                 continue
             normalized_messages = [
                 item
@@ -373,6 +453,7 @@ class AgentLLMTracesSource:
                 if item is not None and item.get("role") != "system"
             ]
             if not normalized_messages:
+                self.source_skips["empty_prompt"] += 1
                 continue
             candidates.append(
                 AgentToolDefinitionExample(
@@ -404,12 +485,30 @@ def _resolve_device_type(requested: str) -> str:
     return "cpu"
 
 
+def _visible_npu_count() -> Optional[int]:
+    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES") or os.environ.get("ASCEND_VISIBLE_DEVICES")
+    if visible_devices:
+        devices = [item.strip() for item in visible_devices.split(",") if item.strip()]
+        return len(devices)
+    try:
+        return int(torch.npu.device_count())
+    except Exception:
+        return None
+
+
 def _setup_device(model_args: ModelArgs, data_args: AgentToolDefinitionDataArgs) -> str:
     device_type = _resolve_device_type(data_args.device_type)
     if device_type == "npu":
         import torch_npu  # noqa: F401
 
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        visible_count = _visible_npu_count()
+        if visible_count is not None and local_rank >= visible_count:
+            visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES") or os.environ.get("ASCEND_VISIBLE_DEVICES")
+            raise RuntimeError(
+                f"LOCAL_RANK={local_rank} but only {visible_count} NPU device(s) are visible "
+                f"({visible}). Set NPROC_PER_NODE={visible_count}, or expose more NPUs."
+            )
         torch.npu.set_device(local_rank)
         if model_args.attn_impl in (None, "flex_attention", "flash_attention_2"):
             logger.info(
@@ -433,27 +532,38 @@ class AgentToolDefinitionDataset(Dataset):
         max_doc_num: int,
         max_length: int,
         max_system_length: int,
+        truncate_tool_definition: bool,
+        min_target_tokens: int,
+        max_tool_definition_tokens: int,
     ) -> None:
         self.max_doc_length = max_doc_length
         self.max_doc_num = max_doc_num
         self.max_length = max_length
         self.max_system_length = max_system_length
         self.data = []
-        skipped = 0
+        skipped_by_reason: Counter[str] = Counter()
         for example in examples:
-            row = self._preprocess_example(
+            row, reason = self._preprocess_example(
                 example,
                 tokenizer=tokenizer,
                 max_doc_length=max_doc_length,
                 max_doc_num=max_doc_num,
                 max_length=max_length,
                 max_system_length=max_system_length,
+                truncate_tool_definition=truncate_tool_definition,
+                min_target_tokens=min_target_tokens,
+                max_tool_definition_tokens=max_tool_definition_tokens,
             )
             if row is None:
-                skipped += 1
+                skipped_by_reason[reason] += 1
             else:
                 self.data.append(row)
-        logger.info("Built %d samples; skipped %d long/empty samples", len(self.data), skipped)
+        logger.info(
+            "Built %d samples; skipped %d samples by reason=%s",
+            len(self.data),
+            sum(skipped_by_reason.values()),
+            dict(skipped_by_reason),
+        )
 
     def __len__(self) -> int:
         return len(self.data)
@@ -469,7 +579,10 @@ class AgentToolDefinitionDataset(Dataset):
         max_doc_num: int,
         max_length: int,
         max_system_length: int,
-    ) -> Optional[Dict[str, Any]]:
+        truncate_tool_definition: bool,
+        min_target_tokens: int,
+        max_tool_definition_tokens: int,
+    ) -> tuple[Optional[Dict[str, Any]], str]:
         system_ids = _chat_template_ids(
             tokenizer,
             [{"role": "system", "content": example.system_prompt}],
@@ -483,10 +596,23 @@ class AgentToolDefinitionDataset(Dataset):
             "content": "Tool definitions:\n" + example.tool_definition,
         }
         doc_ids = _chat_template_ids(tokenizer, [tool_doc])
-        if len(doc_ids) > max_doc_length:
-            return None
-        context_input_ids = _pad(doc_ids, max_doc_length, -100)
-        context_input_ids.extend([-100] * (max_doc_length * (max_doc_num - 1)))
+        if len(doc_ids) > max_tool_definition_tokens:
+            return None, f"tool_definition_tokens>{max_tool_definition_tokens}"
+        max_context_tokens = max_doc_length * max_doc_num
+        if len(doc_ids) > max_context_tokens:
+            if not truncate_tool_definition:
+                return None, f"tool_definition_tokens>{max_context_tokens}"
+            doc_ids = doc_ids[:max_context_tokens]
+        doc_chunks = [
+            doc_ids[start : start + max_doc_length]
+            for start in range(0, len(doc_ids), max_doc_length)
+        ]
+        if len(doc_chunks) > max_doc_num:
+            return None, f"tool_definition_docs>{max_doc_num}"
+        context_input_ids: List[int] = []
+        for chunk in doc_chunks:
+            context_input_ids.extend(_pad(chunk, max_doc_length, -100))
+        context_input_ids.extend([-100] * (max_doc_length * (max_doc_num - len(doc_chunks))))
 
         prompt_ids = _chat_template_ids(
             tokenizer,
@@ -495,14 +621,18 @@ class AgentToolDefinitionDataset(Dataset):
         )
         answer_ids = tokenizer.encode(example.answer, add_special_tokens=False)
         if not prompt_ids or not answer_ids:
-            return None
+            return None, "empty_prompt_or_answer"
         answer_ids.append(tokenizer.eos_token_id)
-        if len(prompt_ids) >= max_length:
-            prompt_ids = prompt_ids[-(max_length - 1) :]
+        reserved_target_tokens = min(len(answer_ids), max(1, min_target_tokens))
+        if reserved_target_tokens >= max_length:
+            reserved_target_tokens = max(1, max_length // 2)
+        prompt_budget = max_length - reserved_target_tokens
+        if len(prompt_ids) > prompt_budget:
+            prompt_ids = prompt_ids[-prompt_budget:]
         answer_budget = max_length - len(prompt_ids)
         answer_ids = answer_ids[:answer_budget]
-        if not answer_ids:
-            return None
+        if len(answer_ids) < reserved_target_tokens:
+            return None, f"target_tokens<{reserved_target_tokens}"
         input_ids = prompt_ids + answer_ids
         labels = [-100] * len(prompt_ids) + answer_ids
         pad_length = max_length - len(input_ids)
@@ -517,7 +647,7 @@ class AgentToolDefinitionDataset(Dataset):
             "labels": labels,
             "attention_mask": attention_mask,
             "dynamic": 0,
-        }
+        }, "ok"
 
 
 def main() -> None:
@@ -550,6 +680,7 @@ def main() -> None:
         source = AgentLLMTracesSource(data_args)
         train_examples = list(source.iter_examples("train"))
         eval_examples = list(source.iter_examples("eval"))
+        logger.info("Source-stage skipped spans by reason=%s", dict(source.source_skips))
         train_session_ids = {example.session_id for example in train_examples}
         eval_session_ids = {example.session_id for example in eval_examples}
         overlap = train_session_ids & eval_session_ids
@@ -569,6 +700,9 @@ def main() -> None:
             max_doc_num=data_args.max_doc_num,
             max_length=data_args.max_length,
             max_system_length=data_args.max_system_length,
+            truncate_tool_definition=data_args.truncate_tool_definition,
+            min_target_tokens=data_args.min_target_tokens,
+            max_tool_definition_tokens=data_args.max_tool_definition_tokens,
         )
         eval_dataset = AgentToolDefinitionDataset(
             eval_examples,
@@ -577,6 +711,9 @@ def main() -> None:
             max_doc_num=data_args.max_doc_num,
             max_length=data_args.max_length,
             max_system_length=data_args.max_system_length,
+            truncate_tool_definition=data_args.truncate_tool_definition,
+            min_target_tokens=data_args.min_target_tokens,
+            max_tool_definition_tokens=data_args.max_tool_definition_tokens,
         )
 
     if len(train_dataset) == 0:
