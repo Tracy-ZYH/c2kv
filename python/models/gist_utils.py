@@ -448,6 +448,90 @@ def process_context_input_ids(
     past_length = past_key_values.get_seq_length()
     # reshape context_input_ids and generate gist
     batch_size, chunk_num, seq_len = context_input_ids.shape
+    valid_chunk_mask = (context_input_ids != -100).any(dim=2)
+    if not valid_chunk_mask.all():
+        flat_context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
+        flat_valid_mask = valid_chunk_mask.reshape(-1)
+        valid_indices = flat_valid_mask.nonzero(as_tuple=False).squeeze(1)
+        if valid_indices.numel() == 0:
+            if past_attention_mask is not None:
+                past_mask = past_attention_mask
+            else:
+                past_mask = attention_mask.new_ones((batch_size, past_length))
+            if attention_mask is not None:
+                attention_mask = torch.cat([past_mask.to(attention_mask.device), attention_mask], dim=1)
+            return past_key_values, attention_mask, None
+
+        context_input_ids = flat_context_input_ids[valid_indices]
+        input_ids = context_input_ids.clone()
+        gist_attn_mask = input_ids != -100
+        input_ids[~gist_attn_mask] = model.gist_token_id
+        generate_gist_kwargs = {}
+        if model.config.gist_type == "dynamic-interleave":
+            generate_gist_kwargs["ratio"] = random.choice([2, 4, 8])
+        outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask, **generate_gist_kwargs)
+        if reconstruct_kwargs is not None and model.training:
+            raise NotImplementedError("Reconstruction loss is not supported with padded empty context chunks.")
+
+        max_gist_len = gist_mask.shape[1]
+        flat_batch_indices = torch.div(valid_indices, chunk_num, rounding_mode="floor")
+        prefix_lengths = [past_length] * batch_size
+        for valid_row, batch_i in enumerate(flat_batch_indices.tolist()):
+            gist_len = int(gist_mask[valid_row].sum().item())
+            if gist_len == 0:
+                continue
+            original_len = int(pos_ids[valid_row, gist_len - 1].item()) + 1
+            pos_ids[valid_row, :gist_len] += prefix_lengths[batch_i]
+            prefix_lengths[batch_i] += original_len
+
+        cos, sin = model.rotary_emb(outputs.last_hidden_state, pos_ids)
+        merged_gist_lens = torch.zeros(batch_size, dtype=torch.long, device=gist_mask.device)
+        for batch_i in range(batch_size):
+            rows = flat_batch_indices == batch_i
+            if rows.any():
+                merged_gist_lens[batch_i] = gist_mask[rows].sum()
+        merged_gist_len = int(merged_gist_lens.max().item())
+        merged_gist_mask = torch.zeros(
+            (batch_size, merged_gist_len), dtype=torch.bool, device=gist_mask.device
+        )
+        for batch_i, gist_len in enumerate(merged_gist_lens.tolist()):
+            if gist_len:
+                merged_gist_mask[batch_i, :gist_len] = True
+
+        for layer_idx, (key, value) in enumerate(outputs.past_key_values):
+            key = apply_rotary_pos_emb(key, cos, sin)
+            batch_keys = []
+            batch_values = []
+            for batch_i in range(batch_size):
+                rows = flat_batch_indices == batch_i
+                row_mask = gist_mask[rows]
+                if rows.any() and row_mask.any():
+                    key_i = key[rows].transpose(1, 2)[row_mask].transpose(0, 1)
+                    value_i = value[rows].transpose(1, 2)[row_mask].transpose(0, 1)
+                else:
+                    head_num = key.shape[1]
+                    key_i = key.new_zeros((head_num, 0, key.shape[-1]))
+                    value_i = value.new_zeros((head_num, 0, value.shape[-1]))
+                pad_len = merged_gist_len - key_i.shape[1]
+                if pad_len > 0:
+                    key_i = torch.cat([key_i, key_i.new_zeros(key_i.shape[0], pad_len, key_i.shape[-1])], dim=1)
+                    value_i = torch.cat([value_i, value_i.new_zeros(value_i.shape[0], pad_len, value_i.shape[-1])], dim=1)
+                batch_keys.append(key_i)
+                batch_values.append(value_i)
+            past_key_values.update(
+                torch.stack(batch_keys, dim=0),
+                torch.stack(batch_values, dim=0),
+                layer_idx,
+            )
+
+        if past_attention_mask is not None:
+            past_mask = past_attention_mask.to(device=merged_gist_mask.device, dtype=merged_gist_mask.dtype)
+        else:
+            past_mask = merged_gist_mask.new_ones((batch_size, past_length))
+        if attention_mask is not None:
+            attention_mask = torch.cat([past_mask, merged_gist_mask, attention_mask], dim=1)
+        return past_key_values, attention_mask, None
+
     context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
     input_ids = context_input_ids.clone()
     gist_attn_mask = input_ids != -100

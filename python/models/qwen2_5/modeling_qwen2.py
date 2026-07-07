@@ -145,7 +145,11 @@ def eager_attention_forward(
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
+    fully_masked = torch.isneginf(attn_weights).all(dim=-1, keepdim=True)
+    fully_masked = fully_masked | (attn_weights == torch.finfo(attn_weights.dtype).min).all(dim=-1, keepdim=True)
+    attn_weights = attn_weights.masked_fill(fully_masked, 0.0)
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = attn_weights.masked_fill(fully_masked, 0.0)
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()

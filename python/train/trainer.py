@@ -22,7 +22,12 @@ class TrainerDistillMixin:
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         for loss_name, losses in self.log_data.items():
             if len(losses) > 0:
-                loss = self._nested_gather(torch.stack(losses)).mean().item()
+                loss_tensor = torch.stack(losses)
+                if hasattr(self, "_nested_gather"):
+                    loss_tensor = self._nested_gather(loss_tensor)
+                elif hasattr(self, "accelerator"):
+                    loss_tensor = self.accelerator.gather_for_metrics(loss_tensor)
+                loss = loss_tensor.mean().item()
                 logs[loss_name] = round(loss, 6)
                 self.log_data[loss_name] = []
         super().log(logs, start_time)
@@ -256,6 +261,12 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         inputs['context_input_ids'] = inputs['context_input_ids'].reshape((batch_size, -1, self.max_doc_length))
         inputs['past_key_values'] = system_kv
         inputs['past_attention_mask'] = system_mask
+        active_lengths = inputs["attention_mask"].sum(dim=1)
+        max_active_length = int(active_lengths.max().item())
+        if 0 < max_active_length < inputs["input_ids"].shape[1]:
+            inputs["input_ids"] = inputs["input_ids"][:, :max_active_length]
+            inputs["attention_mask"] = inputs["attention_mask"][:, :max_active_length]
+            inputs["labels"] = inputs["labels"][:, :max_active_length]
         input_length = inputs['input_ids'].shape[1]
         position_ids = torch.arange(input_length, dtype=torch.long, device=inputs["input_ids"].device)
         position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
