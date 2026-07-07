@@ -750,6 +750,8 @@ def main() -> None:
 
     if training_args.do_train:
         trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+        trainer.save_model(training_args.output_dir)
+        tokenizer.save_pretrained(training_args.output_dir)
     else:
         if len(eval_dataset) == 0:
             raise ValueError("Evaluation requested but eval dataset is empty")
