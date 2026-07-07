@@ -22,6 +22,11 @@ REQUIRE_TOOL_CALL="${REQUIRE_TOOL_CALL:-True}"
 TRUNCATE_TOOL_DEFINITION="${TRUNCATE_TOOL_DEFINITION:-False}"
 MIN_TARGET_TOKENS="${MIN_TARGET_TOKENS:-128}"
 LEARNING_RATE="${LEARNING_RATE:-5e-7}"
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-5}"
+WARMUP_STEPS="${WARMUP_STEPS:-5}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-4}"
+EVAL_STEPS="${EVAL_STEPS:-25}"
+SAVE_STEPS="${SAVE_STEPS:-100}"
 
 if [[ -z "${NPROC_PER_NODE:-}" ]]; then
   IFS=',' read -ra _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
@@ -40,6 +45,9 @@ echo "MAX_TOOL_DEFINITION_TOKENS=${MAX_TOOL_DEFINITION_TOKENS}"
 echo "MAX_LENGTH=${MAX_LENGTH}"
 echo "MIN_TARGET_TOKENS=${MIN_TARGET_TOKENS}"
 echo "LEARNING_RATE=${LEARNING_RATE}"
+echo "NUM_TRAIN_EPOCHS=${NUM_TRAIN_EPOCHS}"
+echo "WARMUP_STEPS=${WARMUP_STEPS}"
+echo "GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS}"
 
 if ! find "${DATASET_PATH}" -name '*.parquet' -type f -print -quit 2>/dev/null | grep -q .; then
   echo "ERROR: no parquet files found under DATASET_PATH=${DATASET_PATH}" >&2
@@ -51,13 +59,13 @@ torchrun --nproc_per_node "${NPROC_PER_NODE}" \
   agent/train_agent_tool_definition_c2kv.py \
   --device_type cuda \
   --attn_impl "${ATTN_IMPL}" \
-  --num_train_epochs 1 \
-  --warmup_steps 100 \
+  --num_train_epochs "${NUM_TRAIN_EPOCHS}" \
+  --warmup_steps "${WARMUP_STEPS}" \
   --model_name_or_path "${MODEL_NAME_OR_PATH}" \
   --padding_side right \
   --per_device_train_batch_size 1 \
   --per_device_eval_batch_size 1 \
-  --gradient_accumulation_steps 4 \
+  --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
   --lr_scheduler_type cosine \
   --learning_rate "${LEARNING_RATE}" \
   --weight_decay 0.1 \
@@ -85,9 +93,9 @@ torchrun --nproc_per_node "${NPROC_PER_NODE}" \
   --deepspeed ./configs/ds_config.json \
   --do_train True \
   --eval_strategy steps \
-  --eval_steps 100 \
+  --eval_steps "${EVAL_STEPS}" \
   --save_strategy steps \
-  --save_steps 500 \
+  --save_steps "${SAVE_STEPS}" \
   --dataloader_num_workers 4 \
   --dataloader_prefetch_factor 4 \
   --bf16 True \

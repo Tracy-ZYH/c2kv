@@ -7,9 +7,8 @@ import random
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
-import datasets
 import torch
 from torch.utils.data import Dataset
 from transformers import DataCollatorWithPadding, HfArgumentParser
@@ -304,8 +303,7 @@ class AgentLLMTracesSource:
         if not data_files:
             raise FileNotFoundError(self._missing_dataset_message(self.path))
         logger.info("Loading %d parquet shards from %s", len(data_files), self.path)
-        raw = datasets.load_dataset("parquet", data_files=data_files, split="train")
-        self.sessions = self._load_sessions(raw)
+        self.sessions = self._load_sessions(self._iter_parquet_rows(data_files))
         if args.max_sessions is not None:
             self.sessions = self.sessions[: args.max_sessions]
         logger.info("Loaded %d sessions before train/eval split", len(self.sessions))
@@ -355,7 +353,22 @@ class AgentLLMTracesSource:
         )
         return "\n".join(lines)
 
-    def _load_sessions(self, raw: datasets.Dataset) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _iter_parquet_rows(data_files: Sequence[str]) -> Iterator[Dict[str, Any]]:
+        """Read parquet rows without Hugging Face metadata decoding.
+
+        Some servers have an older `datasets` package that cannot decode newer
+        parquet metadata feature types such as `List`. PyArrow can read the
+        actual table data directly, which is all this script needs.
+        """
+        import pyarrow.parquet as pq
+
+        for data_file in data_files:
+            table = pq.read_table(data_file)
+            for row in table.to_pylist():
+                yield row
+
+    def _load_sessions(self, raw: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sessions_by_id: Dict[str, List[Dict[str, Any]]] = {}
         for row_index, row in enumerate(raw):
             found_nested_session = False
