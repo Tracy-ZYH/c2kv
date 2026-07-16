@@ -53,6 +53,27 @@ def prefill_kv_cache(
     return outputs.past_key_values
 
 
+def iter_cache_tensors(past_key_values):
+    if hasattr(past_key_values, "layers"):
+        for layer in past_key_values.layers:
+            yield layer.keys, layer.values
+        return
+    for layer in past_key_values:
+        if hasattr(layer, "keys") and hasattr(layer, "values"):
+            yield layer.keys, layer.values
+        else:
+            yield layer[0], layer[1]
+
+
+def get_cache_value_layer(past_key_values, layer_idx: int) -> torch.Tensor:
+    if hasattr(past_key_values, "layers"):
+        return past_key_values.layers[layer_idx].values
+    layer = past_key_values[layer_idx]
+    if hasattr(layer, "values"):
+        return layer.values
+    return layer[1]
+
+
 @dataclass
 class BatchedKVInstance:
     input_ids: List[torch.LongTensor]
@@ -104,10 +125,20 @@ class LLMInference:
             model_name_or_path,
             local_files_only=True,
         )
+        if device == "npu":
+            import torch_npu  # noqa: F401
+
+            torch.npu.set_device(0)
+        dtype = (
+            torch.bfloat16
+            if device in {"cuda", "npu"}
+            else torch.float32
+        )
+        device_map = {"": device} if device in {"cuda", "npu"} else None
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            dtype=torch.bfloat16 if device == "cuda" else torch.float32,
-            device_map="auto" if device == "cuda" else None,
+            dtype=dtype,
+            device_map=device_map,
             trust_remote_code=True,
             local_files_only=True,
             attn_implementation=attn_impl,
@@ -153,13 +184,16 @@ class LLMInference:
             queries = query_storage.get_all_queries()
         if raw_inputs is not None:
             inputs = raw_inputs
-            past_key_values = [tuple(kv[:, :, repeat_token_num:] for kv in layer) for layer in past_key_values]
+            past_key_values = [
+                (key[:, :, repeat_token_num:], value[:, :, repeat_token_num:])
+                for key, value in iter_cache_tensors(past_key_values)
+            ]
 
         seq_len = inputs.attention_mask.sum(dim=1).tolist()
         input_ids = [ids[:seql] for ids, seql in zip(inputs.input_ids, seq_len)]
 
         full_kv = []
-        for layer_i, (key_states, value_states) in enumerate(past_key_values):
+        for layer_i, (key_states, value_states) in enumerate(iter_cache_tensors(past_key_values)):
             layer_keys, layer_values = [], []
             batch_indices = []
             for seq_i, seq_l in enumerate(seq_len):
@@ -371,9 +405,10 @@ class LLMInference:
         full_length: int = len(full_ids)
         context_length = full_length - system_length
         # get reference and reused values
-        ref_values = self.model.model(
-            full_ids.unsqueeze(0), use_cache=True
-        ).past_key_values[compare_layer][1][0, :, system_length:]
+        ref_values = get_cache_value_layer(
+            self.model.model(full_ids.unsqueeze(0), use_cache=True).past_key_values,
+            compare_layer,
+        )[0, :, system_length:]
         reused_values = self._merge_kv_caches(
             system_kv.past_key_values, precomputed_kv.past_key_values, precomputed_kv.original_lengths
         )[compare_layer][1][0, :, system_length:]

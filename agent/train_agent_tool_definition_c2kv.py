@@ -36,6 +36,8 @@ class AgentToolDefinitionDataArgs:
     dataset_path: str = "./datasets/agent-llm-traces"
     eval_ratio: float = 0.1
     split_seed: int = 42
+    split_manifest_file: Optional[str] = None
+    split_manifest_name: str = "toolset_disjoint"
     max_sessions: Optional[int] = None
     max_samples_per_session: int = 4
     max_doc_length: int = 4096
@@ -64,6 +66,7 @@ class AgentToolDefinitionExample:
     answer: str
     has_tool_call: bool
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    tool_documents: Optional[List[str]] = None
 
 
 def _json_loads(value: Any, default: Any) -> Any:
@@ -411,12 +414,58 @@ class AgentLLMTracesSource:
         )
 
     def split_session_ids(self) -> tuple[set[str], set[str]]:
+        if self.args.split_manifest_file:
+            return self._split_session_ids_from_manifest()
         session_ids = sorted({item["session_id"] for item in self.sessions})
         rng = random.Random(self.args.split_seed)
         rng.shuffle(session_ids)
         eval_count = max(1, int(round(len(session_ids) * self.args.eval_ratio))) if session_ids else 0
         eval_ids = set(session_ids[:eval_count])
         train_ids = set(session_ids[eval_count:])
+        return train_ids, eval_ids
+
+    def _split_session_ids_from_manifest(self) -> tuple[set[str], set[str]]:
+        manifest_path = Path(self.args.split_manifest_file or "")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if "train_session_ids" in manifest and "eval_session_ids" in manifest:
+            selected = manifest
+            split_name = "root"
+        else:
+            split_name = self.args.split_manifest_name
+            if split_name not in manifest:
+                raise KeyError(
+                    f"Split {split_name!r} not found in {manifest_path}. "
+                    f"Available splits: {sorted(manifest)}"
+                )
+            selected = manifest[split_name]
+        train_ids = set(str(item) for item in selected.get("train_session_ids", []))
+        eval_ids = set(str(item) for item in selected.get("eval_session_ids", []))
+        overlap = train_ids & eval_ids
+        if overlap:
+            raise RuntimeError(
+                f"Split manifest {manifest_path}::{split_name} has train/eval overlap: "
+                f"{sorted(overlap)[:5]}"
+            )
+        available_ids = {item["session_id"] for item in self.sessions}
+        missing_train = train_ids - available_ids
+        missing_eval = eval_ids - available_ids
+        if missing_train or missing_eval:
+            logger.warning(
+                "Split manifest %s::%s references missing sessions; missing_train=%d missing_eval=%d",
+                manifest_path,
+                split_name,
+                len(missing_train),
+                len(missing_eval),
+            )
+        train_ids &= available_ids
+        eval_ids &= available_ids
+        logger.info(
+            "Using split manifest %s::%s with %d train sessions and %d eval sessions",
+            manifest_path,
+            split_name,
+            len(train_ids),
+            len(eval_ids),
+        )
         return train_ids, eval_ids
 
     def iter_examples(self, split: str) -> Iterator[AgentToolDefinitionExample]:
@@ -604,24 +653,45 @@ class AgentToolDefinitionDataset(Dataset):
         )
         system_input_ids = _pad(system_ids, max_system_length, -100)
 
-        tool_doc = {
-            "role": "user",
-            "content": "Tool definitions:\n" + example.tool_definition,
-        }
-        doc_ids = _chat_template_ids(tokenizer, [tool_doc])
-        if len(doc_ids) > max_tool_definition_tokens:
+        if example.tool_documents:
+            doc_id_groups = [
+                _chat_template_ids(
+                    tokenizer,
+                    [{"role": "user", "content": "Tool definition:\n" + document}],
+                )
+                for document in example.tool_documents
+                if document.strip()
+            ]
+            doc_tokens = sum(len(item) for item in doc_id_groups)
+        else:
+            tool_doc = {
+                "role": "user",
+                "content": "Tool definitions:\n" + example.tool_definition,
+            }
+            doc_id_groups = [_chat_template_ids(tokenizer, [tool_doc])]
+            doc_tokens = len(doc_id_groups[0])
+        if doc_tokens > max_tool_definition_tokens:
             return None, f"tool_definition_tokens>{max_tool_definition_tokens}"
         max_context_tokens = max_doc_length * max_doc_num
-        if len(doc_ids) > max_context_tokens:
+        if doc_tokens > max_context_tokens and not example.tool_documents:
             if not truncate_tool_definition:
                 return None, f"tool_definition_tokens>{max_context_tokens}"
-            doc_ids = doc_ids[:max_context_tokens]
-        doc_chunks = [
-            doc_ids[start : start + max_doc_length]
-            for start in range(0, len(doc_ids), max_doc_length)
-        ]
+            doc_id_groups = [doc_id_groups[0][:max_context_tokens]]
+        doc_chunks = []
+        for doc_ids in doc_id_groups:
+            if len(doc_ids) <= max_doc_length:
+                doc_chunks.append(doc_ids)
+                continue
+            if example.tool_documents and not truncate_tool_definition:
+                return None, f"tool_document_tokens>{max_doc_length}"
+            doc_chunks.extend(
+                doc_ids[start : start + max_doc_length]
+                for start in range(0, len(doc_ids), max_doc_length)
+            )
         if len(doc_chunks) > max_doc_num:
-            return None, f"tool_definition_docs>{max_doc_num}"
+            if not truncate_tool_definition:
+                return None, f"tool_definition_docs>{max_doc_num}"
+            doc_chunks = doc_chunks[:max_doc_num]
         context_input_ids: List[int] = []
         for chunk in doc_chunks:
             context_input_ids.extend(_pad(chunk, max_doc_length, -100))
