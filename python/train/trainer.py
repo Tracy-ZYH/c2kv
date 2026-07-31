@@ -196,6 +196,15 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
     def _gist_attn_impl(self) -> str:
         return getattr(self.model_args, "attn_impl", None) or "flex_attention"
 
+    @staticmethod
+    def _unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+        return model.module if hasattr(model, "module") else model
+
+    @classmethod
+    def _inner_model(cls, model: torch.nn.Module) -> torch.nn.Module:
+        unwrapped = cls._unwrap_model(model)
+        return unwrapped.model if hasattr(unwrapped, "model") else unwrapped
+
     @torch.no_grad()
     def _build_system_kv(
         self, model, system_input_ids: torch.Tensor
@@ -207,13 +216,17 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         same for every sample, keeping downstream position arithmetic scalar. Padded slots
         are masked out via the returned 2-D `system_mask`.
         """
-        device = model.device
+        unwrapped_model = self._unwrap_model(model)
+        inner_model = self._inner_model(model)
+        device = getattr(unwrapped_model, "device", None)
+        if device is None:
+            device = next(unwrapped_model.parameters()).device
         system_input_ids = system_input_ids.to(device)
         real_mask = system_input_ids != -100
         real_lens = real_mask.sum(dim=1)
         batch_size = system_input_ids.shape[0]
         L_sys = int(real_lens.max().item())
-        pad_id = model.model.config.pad_token_id
+        pad_id = inner_model.config.pad_token_id
         if pad_id is None:
             pad_id = 0
         left_ids = system_input_ids.new_full((batch_size, L_sys), pad_id)
@@ -224,14 +237,14 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
                 continue
             left_ids[i, L_sys - n:] = system_input_ids[i][real_mask[i]]
             system_mask[i, L_sys - n:] = 1
-        original_attn_impl = model.model.config._attn_implementation
-        model.model.config._attn_implementation = self._system_attn_impl()
-        was_training = model.training
-        model.eval()
+        original_attn_impl = inner_model.config._attn_implementation
+        inner_model.config._attn_implementation = self._system_attn_impl()
+        was_training = unwrapped_model.training
+        unwrapped_model.eval()
         outputs = model(left_ids, attention_mask=system_mask, use_cache=True, logits_to_keep=1)
-        model.model.config._attn_implementation = original_attn_impl
+        inner_model.config._attn_implementation = original_attn_impl
         if was_training:
-            model.train()
+            unwrapped_model.train()
         return outputs.past_key_values, system_mask, L_sys
 
     def compute_loss(
@@ -257,8 +270,15 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         # build a per-sample system KV cache from variable-length system prompts
         system_input_ids = inputs.pop('system_input_ids')
         system_kv, system_mask, past_length = self._build_system_kv(model, system_input_ids)
-        # prepare inputs for gist inference
-        inputs['context_input_ids'] = inputs['context_input_ids'].reshape((batch_size, -1, self.max_doc_length))
+        # prepare inputs for gist inference. The dataset pads every document slot to
+        # max_doc_length, but dynamic-interleave builds masks with O(seq_len^2), so
+        # trim batch-local padding before calling generate_gist.
+        context_input_ids = inputs['context_input_ids'].reshape((batch_size, -1, self.max_doc_length))
+        doc_lengths = (context_input_ids != -100).sum(dim=2)
+        max_doc_active_length = int(doc_lengths.max().item()) if doc_lengths.numel() else 0
+        if 0 < max_doc_active_length < self.max_doc_length:
+            context_input_ids = context_input_ids[:, :, :max_doc_active_length]
+        inputs['context_input_ids'] = context_input_ids
         inputs['past_key_values'] = system_kv
         inputs['past_attention_mask'] = system_mask
         active_lengths = inputs["attention_mask"].sum(dim=1)
@@ -273,8 +293,18 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         for i, seqlen in enumerate(context_masks.sum(dim=1).tolist()):
             position_ids[i] += past_length + seqlen
         inputs["position_ids"] = position_ids
+        label_mask = inputs["labels"] != -100
+        if label_mask.any():
+            first_label_positions = label_mask.float().argmax(dim=1)
+            first_label_position = int(first_label_positions[label_mask.any(dim=1)].min().item())
+            logits_start = max(0, first_label_position - 1)
+            if logits_start > 0:
+                inputs["labels"] = inputs["labels"][:, logits_start:]
+                inputs["logits_to_keep"] = input_length - logits_start
+        else:
+            logits_start = 0
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
-        model.model.config._attn_implementation = self._gist_attn_impl()
+        self._inner_model(model).config._attn_implementation = self._gist_attn_impl()
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
         label_token_count = int((inputs["labels"] != -100).sum().detach().cpu().item())
         self.log_data.setdefault("label_tokens", []).append(
@@ -284,7 +314,7 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
             raise FloatingPointError(
                 f"Non-finite loss detected: {loss.detach().float().item()}, "
                 f"label_tokens={label_token_count}, "
-                f"attn_impl={model.model.config._attn_implementation}, "
+                f"attn_impl={self._inner_model(model).config._attn_implementation}, "
                 f"max_doc_length={self.max_doc_length}, "
                 f"input_length={input_length}"
             )
@@ -299,6 +329,6 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
         prediction_loss_only: bool,
         ignore_keys: Optional[list[str]] = None,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        model.model.config._attn_implementation = self._gist_attn_impl()
+        self._inner_model(model).config._attn_implementation = self._gist_attn_impl()
         pred = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
         return pred

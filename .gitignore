@@ -236,6 +236,8 @@ data/
 
 # Models and checkpoints
 models/
+!python/models/
+!python/models/npu_attention.py
 checkpoints/
 outputs/
 output/

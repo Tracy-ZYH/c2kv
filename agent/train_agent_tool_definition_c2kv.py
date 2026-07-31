@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,10 +52,16 @@ class AgentToolDefinitionDataArgs:
     min_target_tokens: int = 64
     truncate_tool_definition: bool = True
     require_tool_call: bool = True
+    tool_document_mode: str = "full"
+    hard_negative_num: int = 31
+    hard_negative_router_scope: str = "last_user"
+    shuffle_tool_documents: bool = True
+    balance_subsets: bool = False
+    max_samples_per_subset: Optional[int] = None
     num_proc: int = 8
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     device_type: str = "auto"
-    npu_attn_impl: str = "eager"
+    npu_attn_impl: str = "npu_fusion_attention"
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class AgentToolDefinitionExample:
     has_tool_call: bool
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     tool_documents: Optional[List[str]] = None
+    subset: str = "unknown"
 
 
 def _json_loads(value: Any, default: Any) -> Any:
@@ -110,6 +118,116 @@ def _canonical_tool_definition(value: Any) -> str:
     if isinstance(parsed, str):
         return parsed.strip()
     return _json_dumps(parsed)
+
+
+def _as_tool_list(tool_definition: Any) -> List[Dict[str, Any]]:
+    parsed = _json_loads(tool_definition, [])
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("tools"), list):
+            parsed = parsed["tools"]
+        elif isinstance(parsed.get("functions"), list):
+            parsed = parsed["functions"]
+        else:
+            parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _tool_name(tool: Dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    return str(
+        function.get("name")
+        or tool.get("name")
+        or tool.get("tool_name")
+        or tool.get("function_name")
+        or ""
+    )
+
+
+def _tool_search_text(tool: Dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    fields = [
+        _tool_name(tool),
+        function.get("description", ""),
+        tool.get("description", ""),
+        function.get("parameters", ""),
+        tool.get("parameters", ""),
+        tool.get("input_schema", ""),
+        tool.get("schema", ""),
+    ]
+    return " ".join(
+        item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+        for item in fields
+        if item
+    )
+
+
+def _render_tool_definition(tools: Sequence[Dict[str, Any]]) -> str:
+    return json.dumps(list(tools), ensure_ascii=False, separators=(",", ":"))
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False) if content is not None else ""
+
+
+def _query_text(messages: Sequence[Dict[str, Any]], scope: str) -> str:
+    if scope == "all":
+        return "\n".join(_message_text(message) for message in messages)
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return _message_text(message)
+    return _message_text(messages[-1]) if messages else ""
+
+
+def _tokens(text: str) -> List[str]:
+    return re.findall(r"[a-zA-Z0-9_]+", text.lower())
+
+
+def _rank_tools(tools: Sequence[Dict[str, Any]], query: str) -> List[int]:
+    query_tokens = set(_tokens(query))
+    if not query_tokens:
+        return list(range(len(tools)))
+    scored = []
+    for index, tool in enumerate(tools):
+        name_tokens = set(_tokens(_tool_name(tool)))
+        text_tokens = set(_tokens(_tool_search_text(tool)))
+        name_overlap = len(query_tokens & name_tokens)
+        text_overlap = len(query_tokens & text_tokens)
+        score = 4.0 * name_overlap + float(text_overlap)
+        scored.append((-score, index))
+    scored.sort()
+    return [index for _, index in scored]
+
+
+def _extract_tool_name(text: str) -> Optional[str]:
+    if not text:
+        return None
+    patterns = [
+        r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+        r"Action:\s*(?:<tool_call>)?\s*(\{.*?\})(?:\s*</tool_call>)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.DOTALL)
+        if not match:
+            continue
+        payload = _json_loads(match.group(1), None)
+        if not isinstance(payload, dict):
+            continue
+        function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+        name = (
+            function.get("name")
+            or payload.get("name")
+            or payload.get("tool_name")
+            or payload.get("function_name")
+        )
+        if name:
+            return str(name)
+    match = re.search(r'"name"\s*:\s*"([^"]+)"', text)
+    return match.group(1) if match else None
 
 
 def _render_tool_calls(tool_calls: Any) -> tuple[str, bool]:
@@ -373,11 +491,20 @@ class AgentLLMTracesSource:
 
     def _load_sessions(self, raw: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sessions_by_id: Dict[str, List[Dict[str, Any]]] = {}
+        subset_by_id: Dict[str, str] = {}
         for row_index, row in enumerate(raw):
+            row_subset = str(
+                row.get("benchmark")
+                or row.get("subset")
+                or row.get("dataset")
+                or row.get("task")
+                or "unknown"
+            )
             found_nested_session = False
             for session_id, spans in _iter_sessions(row, row_index):
                 found_nested_session = True
                 sessions_by_id.setdefault(session_id, []).extend(spans)
+                subset_by_id.setdefault(session_id, row_subset)
             if found_nested_session:
                 continue
 
@@ -389,9 +516,14 @@ class AgentLLMTracesSource:
                 or f"row-{row_index}"
             )
             sessions_by_id.setdefault(str(session_id), []).append(dict(row))
+            subset_by_id.setdefault(str(session_id), row_subset)
 
         sessions = [
-            {"session_id": session_id, "spans": self._sort_spans(spans)}
+            {
+                "session_id": session_id,
+                "subset": subset_by_id.get(session_id, "unknown"),
+                "spans": self._sort_spans(spans),
+            }
             for session_id, spans in sessions_by_id.items()
         ]
         session_ids = {item["session_id"] for item in sessions}
@@ -476,12 +608,58 @@ class AgentLLMTracesSource:
             session_id = session["session_id"]
             if session_id not in keep_ids:
                 continue
-            candidates = self._session_examples(session_id, session["spans"])
+            candidates = self._session_examples(
+                session_id,
+                session["spans"],
+                str(session.get("subset") or "unknown"),
+            )
             if self.args.max_samples_per_session and len(candidates) > self.args.max_samples_per_session:
                 candidates = rng.sample(candidates, self.args.max_samples_per_session)
             yield from candidates
 
-    def _session_examples(self, session_id: str, spans: Sequence[Any]) -> List[AgentToolDefinitionExample]:
+    def _build_tool_documents(
+        self,
+        tool_definition: str,
+        messages: Sequence[Message],
+        answer: str,
+        qid: str,
+    ) -> Optional[List[str]]:
+        mode = (self.args.tool_document_mode or "full").lower()
+        if mode in {"full", "none"}:
+            return None
+        if mode != "target_hard_negatives":
+            raise ValueError(f"Unknown tool_document_mode={self.args.tool_document_mode!r}")
+
+        tools = _as_tool_list(tool_definition)
+        if not tools:
+            self.source_skips["no_parseable_tools"] += 1
+            return []
+        target_tool = _extract_tool_name(answer)
+        if not target_tool:
+            self.source_skips["missing_target_tool"] += 1
+            return []
+        target_indices = [
+            index for index, tool in enumerate(tools)
+            if _tool_name(tool) == target_tool
+        ]
+        if not target_indices:
+            self.source_skips["target_tool_not_in_definitions"] += 1
+            return []
+
+        target_index = target_indices[0]
+        query = _query_text(messages, self.args.hard_negative_router_scope)
+        ranked = _rank_tools(tools, query)
+        negative_indices = [
+            index for index in ranked
+            if index != target_index
+        ][: max(0, self.args.hard_negative_num)]
+        selected = [tools[target_index]] + [tools[index] for index in negative_indices]
+        if self.args.shuffle_tool_documents:
+            rng = random.Random(f"{self.args.split_seed}:{qid}:tool_documents")
+            rng.shuffle(selected)
+        return [_render_tool_definition([tool]) for tool in selected]
+
+    def _session_examples(self, session_id: str, spans: Sequence[Any], subset: str = "unknown") -> List[AgentToolDefinitionExample]:
         tool_definition = ""
         candidates = []
         for span_index, span in enumerate(spans):
@@ -517,15 +695,26 @@ class AgentLLMTracesSource:
             if not normalized_messages:
                 self.source_skips["empty_prompt"] += 1
                 continue
+            qid = f"{session_id}:{span_index}"
+            tool_documents = self._build_tool_documents(
+                tool_definition,
+                normalized_messages,
+                answer,
+                qid,
+            )
+            if tool_documents == []:
+                continue
             candidates.append(
                 AgentToolDefinitionExample(
-                    qid=f"{session_id}:{span_index}",
+                    qid=qid,
                     session_id=session_id,
                     tool_definition=tool_definition,
                     input_messages=normalized_messages,
                     answer=answer,
                     has_tool_call=has_tool_call,
                     system_prompt=self.args.system_prompt,
+                    tool_documents=tool_documents,
+                    subset=subset,
                 )
             )
         return candidates
@@ -733,6 +922,33 @@ class AgentToolDefinitionDataset(Dataset):
         }, "ok"
 
 
+def _balance_examples_by_subset(
+    examples: List[AgentToolDefinitionExample],
+    seed: int,
+    max_samples_per_subset: Optional[int],
+) -> List[AgentToolDefinitionExample]:
+    groups: Dict[str, List[AgentToolDefinitionExample]] = {}
+    for example in examples:
+        groups.setdefault(example.subset or "unknown", []).append(example)
+    if not groups:
+        return examples
+    target_count = min(len(items) for items in groups.values())
+    if max_samples_per_subset is not None:
+        target_count = min(target_count, max_samples_per_subset)
+    rng = random.Random(seed)
+    balanced: List[AgentToolDefinitionExample] = []
+    subset_counts = {}
+    for subset, items in sorted(groups.items()):
+        selected = list(items)
+        rng.shuffle(selected)
+        selected = selected[:target_count]
+        subset_counts[subset] = len(selected)
+        balanced.extend(selected)
+    rng.shuffle(balanced)
+    logger.info("Balanced examples by subset: %s", subset_counts)
+    return balanced
+
+
 def main() -> None:
     parser = HfArgumentParser([ModelArgs, TrainingArgs, AgentToolDefinitionDataArgs])
     model_args, training_args, data_args = parser.parse_args_into_dataclasses()
@@ -763,6 +979,17 @@ def main() -> None:
         source = AgentLLMTracesSource(data_args)
         train_examples = list(source.iter_examples("train"))
         eval_examples = list(source.iter_examples("eval"))
+        if data_args.balance_subsets:
+            train_examples = _balance_examples_by_subset(
+                train_examples,
+                seed=training_args.dataset_shuffle_seed,
+                max_samples_per_subset=data_args.max_samples_per_subset,
+            )
+            eval_examples = _balance_examples_by_subset(
+                eval_examples,
+                seed=training_args.dataset_shuffle_seed + 1,
+                max_samples_per_subset=data_args.max_samples_per_subset,
+            )
         logger.info("Source-stage skipped spans by reason=%s", dict(source.source_skips))
         train_session_ids = {example.session_id for example in train_examples}
         eval_session_ids = {example.session_id for example in eval_examples}
@@ -775,6 +1002,11 @@ def main() -> None:
             len(train_session_ids),
             len(eval_examples),
             len(eval_session_ids),
+        )
+        logger.info(
+            "Train subset counts=%s; eval subset counts=%s",
+            dict(Counter(example.subset for example in train_examples)),
+            dict(Counter(example.subset for example in eval_examples)),
         )
         train_dataset = AgentToolDefinitionDataset(
             train_examples,

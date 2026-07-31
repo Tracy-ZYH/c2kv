@@ -15,6 +15,9 @@ from gist_args import ModelArgs
 logger = getLogger(__name__)
 
 
+NPU_FUSION_ATTENTION_IMPL = "npu_fusion_attention"
+
+
 class GistLossFunctionWithRegularization:
     def __init__(self, model: PreTrainedModel, param: str, regularization_strength: float):
         super().__init__()
@@ -137,12 +140,13 @@ def get_model_and_tokenizer(
 
     attn_kwargs = {}
     attn_impl = model_args_dict["attn_impl"]
-    if attn_impl is not None:
+    load_attn_impl = "eager" if attn_impl == NPU_FUSION_ATTENTION_IMPL else attn_impl
+    if load_attn_impl is not None:
         if version.parse(transformers.__version__) <= version.parse("4.36"):
-            if attn_impl == "flash_attention_2":
+            if load_attn_impl == "flash_attention_2":
                 attn_kwargs["use_flash_attention_2"] = True
         else:
-            attn_kwargs["attn_implementation"] = attn_impl
+            attn_kwargs["attn_implementation"] = load_attn_impl
 
     gist_kwargs = {}
     for k, v in model_args_dict.items():
@@ -255,6 +259,12 @@ def get_model_and_tokenizer(
             # NOTE: essential to disable all gradient in-place, so that when calling accelerator.prepare, the forward function will not be wrapped that may consume extra GPU memory
             model.requires_grad_(False)
         # logger.info(model.config)
+    if attn_impl == NPU_FUSION_ATTENTION_IMPL:
+        logger.info("Switching loaded model attention backend to %s", attn_impl)
+        model.config._attn_implementation = attn_impl
+        inner_model = getattr(model, "model", None)
+        if inner_model is not None and hasattr(inner_model, "config"):
+            inner_model.config._attn_implementation = attn_impl
 
     # override the default generation config
     generation_config = model_args.get_generation_config()

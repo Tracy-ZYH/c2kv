@@ -1,4 +1,5 @@
 import math
+import gc
 import torch
 import string
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
@@ -12,6 +13,15 @@ from compress_kv import compress_kv, QueryStorage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _empty_device_cache(device: Any) -> None:
+    gc.collect()
+    device_type = getattr(device, "type", str(device))
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif device_type == "npu" and hasattr(torch, "npu") and torch.npu.is_available():
+        torch.npu.empty_cache()
 
 
 def tokenize_for_reuse(
@@ -220,6 +230,7 @@ class LLMInference:
         max_new_tokens: int = 512,
         return_kv: bool = False,
         role: str | None = "user",
+        logical_past_length: Optional[int] = None,
     ) -> Union[str, Tuple[str, Tuple[Tuple[torch.Tensor, ...], ...]]]:
         """
         使用已有的键值缓存进行解码
@@ -235,6 +246,9 @@ class LLMInference:
 
         # 合并所有past key values
         past_key_values = self._merge_kv_caches(system_prompt_kv, precomputed_kv, original_lengths)
+        system_prompt_kv = None
+        precomputed_kv = None
+        _empty_device_cache(self.device)
         if past_key_values is not None:
             past_ids = []
             if system_prompt_ids is not None:
@@ -242,6 +256,8 @@ class LLMInference:
             if precomputed_ids is not None:
                 past_ids.extend(precomputed_ids)
             past_ids = torch.cat(past_ids).unsqueeze(0)
+            system_prompt_ids = None
+            precomputed_ids = None
             # we don't check this for the compressed KV case
             # assert past_ids.shape[1] == past_key_values[0][0][0].shape[1]
             past_key_values = DynamicCache(ddp_cache_data=past_key_values, config=self.model.config)
@@ -254,6 +270,14 @@ class LLMInference:
         if past_key_values is not None:
             if query_inputs.input_ids[0, 0] == self.tokenizer.bos_token_id:
                 query_inputs["input_ids"] = query_inputs.input_ids[:, 1:]
+            query_length = query_inputs["input_ids"].shape[1]
+            if logical_past_length is not None:
+                query_inputs["position_ids"] = torch.arange(
+                    logical_past_length,
+                    logical_past_length + query_length,
+                    dtype=torch.long,
+                    device=self.device,
+                ).unsqueeze(0)
             query_inputs["input_ids"] = torch.cat([past_ids, query_inputs["input_ids"]], dim=1)
             query_inputs["attention_mask"] = torch.ones_like(query_inputs["input_ids"], dtype=torch.bool)
         
@@ -291,6 +315,7 @@ class LLMInference:
         system_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]],
         precomputed_kv: Optional[Tuple[Tuple[torch.Tensor, ...], ...]],
         original_lengths: List[int],
+        system_logical_length: Optional[int] = None,
     ) -> Optional[Tuple[Tuple[torch.Tensor, ...], ...]]:
         """
         合并多个键值缓存
@@ -317,7 +342,11 @@ class LLMInference:
             layer_full_kv = []
             for kv_i in range(2):
                 layer_kv = [system_layer[kv_i][0]]
-                cumulative_kv_len = int(system_layer[kv_i][0].shape[1])
+                cumulative_kv_len = (
+                    int(system_logical_length)
+                    if system_logical_length is not None
+                    else int(system_layer[kv_i][0].shape[1])
+                )
                 for seqlen, recomp_layer_kv in zip(original_lengths, recomp_layer[kv_i]):
                     if kv_i == 0: # Rotate key cache to have correct RoPE
                         # print(f"cumulative_kv_len: {cumulative_kv_len}")
@@ -522,11 +551,11 @@ class LLMInference:
                 [value.index_copy_(1, rearranged_index, output_value)]
             ))
         
-        original_lengths = len(system_kv.original_lengths + precomputed_kv.original_lengths)
+        original_lengths = system_kv.original_lengths + precomputed_kv.original_lengths
         return BatchedKVInstance(
             input_ids=[full_input_ids],
             past_key_values=tuple(ret_kv),
-            original_lengths=[original_lengths]
+            original_lengths=original_lengths
         )
 
 

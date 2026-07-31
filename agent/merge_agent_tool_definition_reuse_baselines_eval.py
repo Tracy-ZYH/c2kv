@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,15 +26,154 @@ def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _display_mode(row: Dict[str, Any]) -> str:
+    mode = str(row.get("mode"))
+    hybrid_mode = row.get("hybrid_mode")
+    router_strategy = row.get("router_strategy")
+    top_k = row.get("top_k")
+    top_schema_mode = row.get("top_schema_mode", "full")
+    if mode == "hybrid" and hybrid_mode:
+        if hybrid_mode == "hybrid" and router_strategy == "attention":
+            attention_score_mode = row.get("attention_score_mode")
+            attention_cache_mode = row.get("attention_cache_mode", "c2kv")
+            prefix = "att_fullkv_hybrid" if attention_cache_mode == "full" else "att_hybrid"
+            if attention_score_mode:
+                return f"{prefix}_{attention_score_mode}"
+            return prefix
+        if hybrid_mode == "hybrid" and router_strategy == "lex_attention":
+            attention_score_mode = row.get("attention_score_mode")
+            attention_cache_mode = row.get("attention_cache_mode", "c2kv")
+            prefix = "lex_att_fullkv_hybrid" if attention_cache_mode == "full" else "lex_att_hybrid"
+            if attention_score_mode:
+                return f"{prefix}_{attention_score_mode}"
+            return prefix
+        if hybrid_mode == "hybrid" and router_strategy == "att_rerank":
+            attention_score_mode = row.get("attention_score_mode")
+            attention_cache_mode = row.get("attention_cache_mode", "c2kv")
+            prefix = "hybrid_fullkv_att_rerank" if attention_cache_mode == "full" else "hybrid_att_rerank"
+            if attention_score_mode:
+                return f"{prefix}_{attention_score_mode}"
+            return prefix
+        if hybrid_mode == "hybrid" and router_strategy == "random":
+            return "random_hybrid"
+        if hybrid_mode == "hybrid":
+            if top_schema_mode == "compact":
+                return "c2kv_hybrid_compact"
+            if top_k is not None and top_k != 3:
+                return f"c2kv_hybrid_top{top_k}"
+            return "c2kv_hybrid"
+        return str(hybrid_mode)
+    return mode
+
+
+def _group_name(row: Dict[str, Any]) -> str:
+    return f"{_display_mode(row)}@{row.get('ratio')}"
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join((text or "").strip().split())
+
+
+def _has_tool_call(text: str) -> bool:
+    return "<tool_call>" in (text or "") or "Action:" in (text or "")
+
+
+def _text_tokens(text: str) -> List[str]:
+    return re.findall(r"\w+", _normalize_text(text))
+
+
+def _target_has_tool_call(row: Dict[str, Any]) -> bool:
+    if "target_has_tool_call" in row:
+        return bool(row.get("target_has_tool_call"))
+    return bool(row.get("target_tool_name")) or _has_tool_call(row.get("target", ""))
+
+
+def _text_token_f1(target: str, prediction: str) -> float:
+    target_tokens = _text_tokens(target)
+    prediction_tokens = _text_tokens(prediction)
+    if not target_tokens and not prediction_tokens:
+        return 1.0
+    if not target_tokens or not prediction_tokens:
+        return 0.0
+    overlap = sum((Counter(target_tokens) & Counter(prediction_tokens)).values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(target_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _lcs_length(left: List[str], right: List[str]) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_token in left:
+        current = [0]
+        for index, right_token in enumerate(right, start=1):
+            if left_token == right_token:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    return previous[-1]
+
+
+def _rouge_l_f1(target: str, prediction: str) -> float:
+    target_tokens = _text_tokens(target)
+    prediction_tokens = _text_tokens(prediction)
+    if not target_tokens and not prediction_tokens:
+        return 1.0
+    if not target_tokens or not prediction_tokens:
+        return 0.0
+    overlap = _lcs_length(target_tokens, prediction_tokens)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(target_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _row_text_token_f1(row: Dict[str, Any]) -> float:
+    if "text_token_f1" in row:
+        return float(row.get("text_token_f1") or 0.0)
+    return _text_token_f1(row.get("target", ""), row.get("prediction", ""))
+
+
+def _row_rouge_l_f1(row: Dict[str, Any]) -> float:
+    if "rouge_l_f1" in row:
+        return float(row.get("rouge_l_f1") or 0.0)
+    return _rouge_l_f1(row.get("target", ""), row.get("prediction", ""))
+
+
+def _row_compressed_tool_tokens(row: Dict[str, Any]) -> float:
+    if "top_doc_tokens" in row or "rest_gist_tokens" in row:
+        return float(row.get("top_doc_tokens", 0) or 0) + float(row.get("rest_gist_tokens", 0) or 0)
+    if "gist_tokens" in row:
+        return float(row.get("gist_tokens", 0) or 0)
+    if "kept_tool_tokens" in row:
+        return float(row.get("kept_tool_tokens", 0) or 0)
+    ratio = float(row.get("actual_compression_ratio", 0.0) or 0.0)
+    doc_tokens = float(row.get("doc_tokens", 0) or 0)
+    return doc_tokens / ratio if ratio > 0 and doc_tokens > 0 else 0.0
+
+
 def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     summaries = []
-    keys = sorted({(row.get("mode"), row.get("ratio")) for row in rows})
+    keys = sorted({_group_key(row) for row in rows})
     for mode, ratio in keys:
-        group = [row for row in rows if row.get("mode") == mode and row.get("ratio") == ratio]
+        group = [row for row in rows if _group_key(row) == (mode, ratio)]
         valid_rows = [row for row in group if not row.get("skipped")]
         skip_reasons = Counter(row.get("skip_reason", "unknown") for row in group if row.get("skipped"))
         generated_total = sum(row.get("generated_tokens", 0) for row in valid_rows)
-        called = sum(1 for row in valid_rows if row.get("has_tool_call"))
+        called_rows = [row for row in valid_rows if row.get("has_tool_call")]
+        tool_targets = [row for row in valid_rows if _target_has_tool_call(row)]
+        non_tool_targets = [row for row in valid_rows if not _target_has_tool_call(row)]
+        compressed_tool_total = sum(_row_compressed_tool_tokens(row) for row in valid_rows)
+        no_rest_rows = [row for row in valid_rows if row.get("num_rest_tools") == 0]
+        lexical_rank_rows = [row for row in valid_rows if row.get("target_lexical_rank") is not None]
+        attention_rank_rows = [row for row in valid_rows if row.get("target_attention_rank") is not None]
+        final_rank_rows = [row for row in valid_rows if row.get("target_final_rank") is not None]
+        att_rerank_rows = [row for row in valid_rows if row.get("att_rerank_replaced") is not None]
         summaries.append({
             "mode": mode,
             "ratio": ratio,
@@ -41,20 +181,84 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "num_valid": len(valid_rows),
             "num_skipped": len(group) - len(valid_rows),
             "skip_reasons": dict(skip_reasons),
+            "num_tool_targets": len(tool_targets),
+            "num_non_tool_targets": len(non_tool_targets),
             "exact_match": (
                 sum(1 for row in valid_rows if row.get("exact_match")) / len(valid_rows)
                 if valid_rows else 0.0
+            ),
+            "avg_text_token_f1": (
+                sum(_row_text_token_f1(row) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_rouge_l_f1": (
+                sum(_row_rouge_l_f1(row) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "response_type_accuracy": (
+                sum(
+                    1 for row in valid_rows
+                    if row.get("response_type_match", _target_has_tool_call(row) == bool(row.get("has_tool_call")))
+                ) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "target_tool_call_rate": (
+                len(tool_targets) / len(valid_rows) if valid_rows else 0.0
             ),
             "tool_name_accuracy": (
                 sum(1 for row in valid_rows if row.get("tool_name_match")) / len(valid_rows)
                 if valid_rows else 0.0
             ),
+            "tool_name_accuracy_on_tool_targets": (
+                sum(1 for row in tool_targets if row.get("tool_name_match")) / len(tool_targets)
+                if tool_targets else 0.0
+            ),
             "tool_call_rate": (
-                called / len(valid_rows) if valid_rows else 0.0
+                len(called_rows) / len(valid_rows) if valid_rows else 0.0
+            ),
+            "tool_call_rate_on_tool_targets": (
+                sum(1 for row in tool_targets if row.get("has_tool_call")) / len(tool_targets)
+                if tool_targets else 0.0
             ),
             "call_accuracy": (
-                sum(1 for row in valid_rows if row.get("tool_name_match")) / called
-                if called else 0.0
+                sum(1 for row in called_rows if row.get("tool_name_match")) / len(called_rows)
+                if called_rows else 0.0
+            ),
+            "non_tool_exact_match": (
+                sum(1 for row in non_tool_targets if row.get("exact_match")) / len(non_tool_targets)
+                if non_tool_targets else 0.0
+            ),
+            "non_tool_text_token_f1": (
+                sum(_row_text_token_f1(row) for row in non_tool_targets) / len(non_tool_targets)
+                if non_tool_targets else 0.0
+            ),
+            "non_tool_rouge_l_f1": (
+                sum(_row_rouge_l_f1(row) for row in non_tool_targets) / len(non_tool_targets)
+                if non_tool_targets else 0.0
+            ),
+            "non_tool_false_tool_call_rate": (
+                sum(1 for row in non_tool_targets if row.get("has_tool_call")) / len(non_tool_targets)
+                if non_tool_targets else 0.0
+            ),
+            "router_hit_rate": (
+                sum(1 for row in valid_rows if row.get("router_hit")) / len(valid_rows)
+                if any("router_hit" in row for row in valid_rows) else 0.0
+            ),
+            "avg_target_lexical_rank": (
+                sum(float(row.get("target_lexical_rank")) for row in lexical_rank_rows) / len(lexical_rank_rows)
+                if lexical_rank_rows else 0.0
+            ),
+            "avg_target_attention_rank": (
+                sum(float(row.get("target_attention_rank")) for row in attention_rank_rows) / len(attention_rank_rows)
+                if attention_rank_rows else 0.0
+            ),
+            "avg_target_final_rank": (
+                sum(float(row.get("target_final_rank")) for row in final_rank_rows) / len(final_rank_rows)
+                if final_rank_rows else 0.0
+            ),
+            "att_rerank_replacement_rate": (
+                sum(1 for row in att_rerank_rows if row.get("att_rerank_replaced")) / len(att_rerank_rows)
+                if att_rerank_rows else 0.0
             ),
             "avg_doc_tokens": (
                 sum(row.get("doc_tokens", 0) for row in valid_rows) / len(valid_rows)
@@ -70,6 +274,19 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "avg_actual_compression_ratio": (
                 sum(row.get("actual_compression_ratio", 0.0) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
+            ),
+            "token_weighted_actual_compression_ratio": (
+                sum(row.get("doc_tokens", 0) for row in valid_rows) / compressed_tool_total
+                if compressed_tool_total else 0.0
+            ),
+            "avg_num_tools": (
+                sum(row.get("num_tools", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("num_tools" in row for row in valid_rows) else 0.0
+            ),
+            "num_no_rest_tools": len(no_rest_rows),
+            "no_rest_tool_rate": (
+                len(no_rest_rows) / len(valid_rows)
+                if valid_rows and any("num_rest_tools" in row for row in valid_rows) else 0.0
             ),
             "avg_system_prefill_sec": (
                 sum(row.get("system_prefill_sec", 0.0) for row in valid_rows) / len(valid_rows)
@@ -95,6 +312,10 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 sum(row.get("generate_sec", 0.0) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
             ),
+            "avg_attention_router_sec": (
+                sum(row.get("attention_router_sec", 0.0) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("attention_router_sec" in row for row in valid_rows) else 0.0
+            ),
             "avg_tbt_sec": (
                 sum(row.get("tbt_sec", 0.0) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
@@ -112,7 +333,7 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _group_key(row: Dict[str, Any]) -> tuple[Any, Any]:
-    return row.get("mode"), row.get("ratio")
+    return _display_mode(row), row.get("ratio")
 
 
 def _sample_key(row: Dict[str, Any]) -> Optional[str]:
@@ -182,6 +403,63 @@ def _summarize_common_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return _summarize_rows(common_rows)
 
 
+def _load_common_sample_keys(path: Path) -> set[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        if "common_subset" in payload:
+            return set(payload["common_subset"].get("common_sample_keys", []))
+        if "common_sample_keys" in payload:
+            return set(payload.get("common_sample_keys", []))
+    if isinstance(payload, list):
+        return {str(item) for item in payload}
+    raise ValueError(
+        f"Could not find common sample keys in {path}. Expected a merge summary JSON "
+        "with common_subset.common_sample_keys."
+    )
+
+
+def _fixed_subset(rows: List[Dict[str, Any]], sample_keys: set[str], source: Optional[str] = None) -> Dict[str, Any]:
+    keys = sorted({_group_key(row) for row in rows})
+    valid_samples_by_key: Dict[str, set[str]] = {}
+    duplicate_valid_rows_by_key: Dict[str, int] = {}
+    for mode, ratio in keys:
+        group = [row for row in rows if _group_key(row) == (mode, ratio)]
+        valid_sample_counts = Counter(
+            key
+            for row in group
+            if not row.get("skipped")
+            for key in [_sample_key(row)]
+            if key in sample_keys
+        )
+        group_name = f"{mode}@{ratio}"
+        valid_samples_by_key[group_name] = set(valid_sample_counts)
+        duplicate_valid_rows_by_key[group_name] = sum(
+            count - 1 for count in valid_sample_counts.values() if count > 1
+        )
+    subset = {
+        "num_groups": len(valid_samples_by_key),
+        "num_common_samples": len(sample_keys),
+        "valid_samples_by_group": {
+            key: len(value) for key, value in valid_samples_by_key.items()
+        },
+        "missing_valid_samples_by_group": {
+            key: len(sample_keys - value) for key, value in valid_samples_by_key.items()
+        },
+        "duplicate_valid_rows_by_group": duplicate_valid_rows_by_key,
+        "common_sample_keys": sorted(sample_keys),
+    }
+    if source is not None:
+        subset["source"] = source
+    return subset
+
+
+def _summarize_fixed_subset_rows(rows: List[Dict[str, Any]], sample_keys: set[str]) -> List[Dict[str, Any]]:
+    if not sample_keys:
+        return []
+    common_rows = _dedupe_common_rows(rows, sample_keys)
+    return _summarize_rows(common_rows)
+
+
 def _common_fairness_check(common_results: List[Dict[str, Any]], common_subset: Dict[str, Any]) -> Dict[str, Any]:
     expected = common_subset.get("num_common_samples", 0)
     counts = {
@@ -207,21 +485,41 @@ def main() -> None:
     parser.add_argument("--modes")
     parser.add_argument("--ratios")
     parser.add_argument("--cacheblend_recompute_ratio", type=float, default=0.15)
+    parser.add_argument(
+        "--common_subset_file",
+        help=(
+            "Optional previous summary JSON. When set, common_subset_results are "
+            "computed on that file's common_subset.common_sample_keys instead of "
+            "recomputing the intersection across all current groups."
+        ),
+    )
     args = parser.parse_args()
 
     rows: List[Dict[str, Any]] = []
     missing_files = []
+    input_file_rows: Dict[str, int] = {}
+    input_file_groups: Dict[str, Dict[str, int]] = {}
     for input_file in args.input_files:
         path = Path(input_file)
         if not path.exists():
             missing_files.append(str(path))
             continue
-        rows.extend(_read_jsonl(path))
+        file_rows = _read_jsonl(path)
+        rows.extend(file_rows)
+        input_file_rows[str(path)] = len(file_rows)
+        input_file_groups[str(path)] = dict(Counter(_group_name(row) for row in file_rows))
 
     output_path = Path(args.output_file)
     _write_jsonl(output_path, rows)
-    common_subset = _common_subset(rows)
-    common_subset_results = _summarize_common_rows(rows)
+    computed_common_subset = _common_subset(rows)
+    if args.common_subset_file:
+        reference_path = Path(args.common_subset_file)
+        common_sample_keys = _load_common_sample_keys(reference_path)
+        common_subset = _fixed_subset(rows, common_sample_keys, str(reference_path))
+        common_subset_results = _summarize_fixed_subset_rows(rows, common_sample_keys)
+    else:
+        common_subset = computed_common_subset
+        common_subset_results = _summarize_common_rows(rows)
     summary = {
         "model": args.model,
         "base_model": args.base_model,
@@ -232,13 +530,27 @@ def main() -> None:
         "ratios": [item.strip() for item in (args.ratios or "").split(",") if item.strip()],
         "num_rows": len(rows),
         "missing_files": missing_files,
+        "input_file_rows": input_file_rows,
+        "input_file_groups": input_file_groups,
+        "computed_common_subset": computed_common_subset,
         "notes": {
             "epic_leading32": "PyTorch selective recompute with recompute_type=leading-32.",
             "cacheblend_vdiff": f"PyTorch value-difference selective recompute with recompute_type=vdiff-{args.cacheblend_recompute_ratio}; not the vLLM+LMCache expr_cacheblend.py path.",
             "snapkv_reuse": "Uses reuse_pipeline SnapKV compression, currently hard-coded to roughly 4x in compress_kv.",
             "epic_leading32_snapkv": "EPIC leading-32 selective recompute on top of SnapKV-compressed document KV.",
             "cacheblend_vdiff_snapkv": f"Value-difference selective recompute on top of SnapKV-compressed document KV with recompute_type=vdiff-{args.cacheblend_recompute_ratio}.",
-            "common_subset_results": "Metrics recomputed only on qids that are valid for every present mode/ratio group.",
+            "snapkv_hybrid": "Hybrid top-k full tool schemas plus SnapKV-compressed rest tool schemas.",
+            "epic_leading32_snapkv_hybrid": "Hybrid top-k full tool schemas plus EPIC leading-32 selective recompute on SnapKV-compressed rest schemas.",
+            "cacheblend_vdiff_snapkv_hybrid": "Hybrid top-k full tool schemas plus value-difference selective recompute on SnapKV-compressed rest schemas.",
+            "c2kv_aug_hybrid": "All tool schemas C2KV-compressed plus an extra full top-k tool-schema prefix.",
+            "snapkv_aug_hybrid": "All tool schemas SnapKV-compressed plus an extra full top-k tool-schema prefix.",
+            "epic_leading32_snapkv_aug_hybrid": "All tool schemas SnapKV-compressed with EPIC leading-32 selective recompute plus an extra full top-k tool-schema prefix.",
+            "cacheblend_vdiff_snapkv_aug_hybrid": "All tool schemas SnapKV-compressed with value-difference selective recompute plus an extra full top-k tool-schema prefix.",
+            "common_subset_results": (
+                "Metrics recomputed on common_subset.common_sample_keys. If "
+                "common_subset_file is set, these qids come from that reference "
+                "summary; otherwise they are valid for every present mode/ratio group."
+            ),
         },
         "results": _summarize_rows(rows),
         "common_subset": common_subset,

@@ -10,7 +10,7 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-./models/Qwen3-4B-Instruct-2507}"
 DATASET_PATH="${DATASET_PATH:-./datasets/agent-llm-traces}"
 OUTPUT_DIR="${OUTPUT_DIR:-./checkpoints/qwen3-4b-agent-tooldef-subset-npu}"
-NPU_ATTN_IMPL="${NPU_ATTN_IMPL:-eager}"
+NPU_ATTN_IMPL="${NPU_ATTN_IMPL:-npu_fusion_attention}"
 
 SPLIT_NAME="${SPLIT_NAME:-subset_disjoint}"
 EVAL_SUBSETS="${EVAL_SUBSETS:-swebench}"

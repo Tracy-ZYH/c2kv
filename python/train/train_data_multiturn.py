@@ -32,6 +32,20 @@ def _json_loads(value: Any, default: Any) -> Any:
         return default
 
 
+def _tool_list_from_agent_value(value: Any) -> List[Dict[str, Any]]:
+    parsed = _json_loads(value, [])
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("tools"), list):
+            parsed = parsed["tools"]
+        elif isinstance(parsed.get("functions"), list):
+            parsed = parsed["functions"]
+        else:
+            parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
 @dataclass(frozen=True)
 class CompressHistoryExample:
     """One training example for compressing conversation history.
@@ -328,6 +342,418 @@ class OpenSWETracesCompressHistorySource(CompressHistorySource):
                 current_messages=_json_loads(record.get("current_messages"), []),
                 answer=record.get("answer") or "",
             )
+
+
+def _first_value(obj: Dict[str, Any], keys: Sequence[str], default: Any = None) -> Any:
+    for key in keys:
+        if key in obj and obj[key] is not None:
+            return obj[key]
+    return default
+
+
+def _find_agent_parquet_files(path: Path) -> List[Path]:
+    if path.is_file() and path.suffix == ".parquet":
+        return [path]
+    roots = [path / "data", path]
+    files: List[Path] = []
+    for root in roots:
+        if root.is_dir():
+            files = sorted(root.glob("*.parquet"))
+            if not files:
+                files = sorted(root.rglob("*.parquet"))
+        if files:
+            break
+    return files
+
+
+def _iter_agent_rows(data_files: Sequence[Path]) -> Iterator[Dict[str, Any]]:
+    import pyarrow.parquet as pq
+
+    wanted = ["benchmark", "subset", "dataset", "task", "session_id", "trace_id", "id", "spans"]
+    for data_file in data_files:
+        pf = pq.ParquetFile(data_file)
+        available = set(pf.schema_arrow.names)
+        columns = [column for column in wanted if column in available]
+        for batch in pf.iter_batches(batch_size=256, columns=columns):
+            yield from batch.to_pylist()
+
+
+def _span_attributes(span: Any) -> Dict[str, Any]:
+    span = _json_loads(span, span)
+    if not isinstance(span, dict):
+        return {}
+    attributes = span.get("attributes", span)
+    attributes = _json_loads(attributes, attributes)
+    return attributes if isinstance(attributes, dict) else {}
+
+
+def _sort_agent_spans(spans: Sequence[Any]) -> List[Dict[str, Any]]:
+    return sorted(
+        [span for span in spans if isinstance(span, dict)],
+        key=lambda span: (
+            span.get("start_time") or "",
+            span.get("span_id") or "",
+        ),
+    )
+
+
+def _agent_message_parts(message: Message) -> List[Dict[str, Any]]:
+    parts = message.get("parts")
+    parts = _json_loads(parts, parts)
+    if isinstance(parts, dict):
+        return [parts]
+    if isinstance(parts, list):
+        return [part for part in parts if isinstance(part, dict)]
+    return []
+
+
+def _render_agent_tool_calls(tool_calls: Any) -> str:
+    tool_calls = _json_loads(tool_calls, [])
+    if isinstance(tool_calls, dict):
+        tool_calls = [tool_calls]
+    if not isinstance(tool_calls, list):
+        return ""
+    rendered = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        if call.get("type") not in (None, "tool_call", "function_call") and "function" not in call:
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = (
+            function.get("name")
+            or call.get("name")
+            or call.get("tool_name")
+            or call.get("function_name")
+            or ""
+        )
+        arguments = (
+            function.get("arguments")
+            or call.get("arguments")
+            or call.get("args")
+            or call.get("input")
+            or {}
+        )
+        rendered.append("<tool_call>\n" + _json_dumps({"name": name, "arguments": arguments}) + "\n</tool_call>")
+    return "\n".join(rendered)
+
+
+def _agent_message_content_to_text(message: Message) -> str:
+    content = message.get("content", "")
+    if not content and _agent_message_parts(message):
+        content = _agent_message_parts(message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in ("tool_call", "function_call"):
+                    continue
+                if "text" in item:
+                    parts.append(str(item["text"]))
+                elif "content" in item:
+                    parts.append(str(item["content"]))
+                else:
+                    parts.append(_json_dumps(item))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return _json_dumps(content)
+
+
+def _normal_agent_message(message: Message) -> Optional[Message]:
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role") or message.get("type") or "user"
+    if role == "tool":
+        role = "user"
+    content_parts = []
+    content = _agent_message_content_to_text(message)
+    if content:
+        content_parts.append(content)
+    tool_calls_text = _render_agent_tool_calls(
+        message.get("tool_calls")
+        or message.get("toolCalls")
+        or message.get("function_call")
+        or _agent_message_parts(message)
+    )
+    if tool_calls_text:
+        content_parts.append("Action:\n" + tool_calls_text)
+    if not content_parts and role != "assistant":
+        return None
+    return {"role": role, "content": "\n\n".join(content_parts)}
+
+
+def _render_agent_output_messages(value: Any, max_answer_chars: Optional[int]) -> tuple[str, bool]:
+    messages = _json_loads(value, [])
+    if isinstance(messages, dict):
+        messages = [messages]
+    if not isinstance(messages, list):
+        messages = [{"role": "assistant", "content": str(messages)}]
+
+    rendered_messages: List[str] = []
+    has_tool_call = False
+    for message in messages:
+        if not isinstance(message, dict):
+            if message:
+                rendered_messages.append(str(message))
+            continue
+        parts = []
+        reasoning = (
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or message.get("thought")
+            or message.get("thinking")
+            or message.get("cot")
+            or ""
+        )
+        if reasoning:
+            parts.append("Thought:\n" + str(reasoning).strip())
+        content = _agent_message_content_to_text(message).strip()
+        if content:
+            parts.append(content)
+        tool_calls_text = _render_agent_tool_calls(
+            message.get("tool_calls")
+            or message.get("toolCalls")
+            or message.get("function_call")
+            or _agent_message_parts(message)
+        )
+        if tool_calls_text:
+            parts.append("Action:\n" + tool_calls_text)
+        has_tool_call = has_tool_call or bool(tool_calls_text)
+        rendered = "\n\n".join(part for part in parts if part).strip()
+        if rendered:
+            rendered_messages.append(rendered)
+    answer = "\n\n".join(rendered_messages).strip()
+    if max_answer_chars is not None and len(answer) > max_answer_chars:
+        answer = answer[:max_answer_chars].rstrip()
+    marker_text = answer.lower()
+    has_tool_call = has_tool_call or any(
+        marker in marker_text
+        for marker in ("<tool_call>", "action:", "function_call", "tool call")
+    )
+    return answer, has_tool_call
+
+
+def _agent_system_prompt(messages: Sequence[Message]) -> str:
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "system":
+            content = _agent_message_content_to_text(message).strip()
+            if content:
+                return content
+    return DEFAULT_SYSTEM_PROMPT
+
+
+def _agent_history_turn_docs(messages: Sequence[Message]) -> List[Message]:
+    docs: List[Message] = []
+    current_user: Optional[str] = None
+    outputs: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_user, outputs
+        if current_user is None and not outputs:
+            return
+        parts = ["Previous turn"]
+        if current_user:
+            parts.extend(["[User query]", current_user.strip()])
+        if outputs:
+            parts.extend(["[Assistant output]", "\n\n".join(item.strip() for item in outputs if item.strip())])
+        docs.append({"role": "user", "content": "\n".join(parts).strip()})
+        current_user = None
+        outputs = []
+
+    for message in messages:
+        role = message.get("role", "user")
+        content = str(message.get("content") or "").strip()
+        if not content and role != "assistant":
+            continue
+        if role == "user":
+            flush()
+            current_user = content
+        elif role == "assistant":
+            outputs.append(content)
+        else:
+            outputs.append(f"[{role}]\n{content}")
+    flush()
+    return docs
+
+
+class AgentLLMTracesCompressHistorySource(CompressHistorySource):
+    """Turn-level history compression source for agent-llm-traces.
+
+    For every LLM span, the current prompt is the last user message in that
+    span's input.  Earlier input messages are grouped into turn-level documents,
+    each containing a previous user query and its assistant/tool output.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        split: str = "train",
+        eval_ratio: float = 0.1,
+        split_seed: int = 42,
+        split_manifest_file: Optional[str] = None,
+        split_manifest_name: str = "subset_disjoint",
+        max_samples_per_session: Optional[int] = 4,
+        max_records: Optional[int] = None,
+        require_tool_call: bool = False,
+        max_input_chars: Optional[int] = None,
+        max_answer_chars: Optional[int] = None,
+        include_tools: bool = False,
+    ) -> None:
+        self.path = Path(path)
+        self.split = split
+        self.eval_ratio = eval_ratio
+        self.split_seed = split_seed
+        self.split_manifest_file = split_manifest_file
+        self.split_manifest_name = split_manifest_name
+        self.max_samples_per_session = max_samples_per_session
+        self.max_records = max_records
+        self.require_tool_call = require_tool_call
+        self.max_input_chars = max_input_chars
+        self.max_answer_chars = max_answer_chars
+        self.include_tools = include_tools
+        self.records = self._load_records()
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __iter__(self) -> Iterator[CompressHistoryExample]:
+        yield from self.records
+
+    def _load_records(self) -> List[CompressHistoryExample]:
+        data_files = _find_agent_parquet_files(self.path)
+        if not data_files:
+            raise FileNotFoundError(f"No parquet files found under {self.path}")
+        if self.split_manifest_file:
+            return self._load_records_from_manifest(data_files)
+        sessions = []
+        for row_index, row in enumerate(_iter_agent_rows(data_files)):
+            session_id = str(
+                row.get("session_id")
+                or row.get("trace_id")
+                or row.get("id")
+                or f"row-{row_index}"
+            )
+            subset = str(row.get("benchmark") or row.get("subset") or row.get("dataset") or row.get("task") or "unknown")
+            spans = _sort_agent_spans(_json_loads(row.get("spans"), row.get("spans")) or [])
+            sessions.append({"session_id": session_id, "subset": subset, "spans": spans})
+
+        train_ids, eval_ids = self._split_session_ids(sessions)
+        keep_ids = train_ids if self.split == "train" else eval_ids
+        rng = random.Random(self.split_seed + (0 if self.split == "train" else 1))
+        records: List[CompressHistoryExample] = []
+        for session in sessions:
+            if session["session_id"] not in keep_ids:
+                continue
+            examples = self._session_examples(session["session_id"], session["spans"])
+            if self.max_samples_per_session and len(examples) > self.max_samples_per_session:
+                examples = rng.sample(examples, self.max_samples_per_session)
+            records.extend(examples)
+            if self.max_records is not None and len(records) >= self.max_records:
+                return records[: self.max_records]
+        return records
+
+    def _load_records_from_manifest(self, data_files: Sequence[Path]) -> List[CompressHistoryExample]:
+        manifest = json.loads(Path(self.split_manifest_file).read_text(encoding="utf-8"))
+        if "train_session_ids" in manifest and "eval_session_ids" in manifest:
+            selected = manifest
+        else:
+            selected = manifest[self.split_manifest_name]
+        keep_ids = {
+            str(item)
+            for item in selected.get(
+                "train_session_ids" if self.split == "train" else "eval_session_ids",
+                [],
+            )
+        }
+        rng = random.Random(self.split_seed + (0 if self.split == "train" else 1))
+        records: List[CompressHistoryExample] = []
+        for row_index, row in enumerate(_iter_agent_rows(data_files)):
+            session_id = str(
+                row.get("session_id")
+                or row.get("trace_id")
+                or row.get("id")
+                or f"row-{row_index}"
+            )
+            if session_id not in keep_ids:
+                continue
+            spans = _sort_agent_spans(_json_loads(row.get("spans"), row.get("spans")) or [])
+            examples = self._session_examples(session_id, spans)
+            if self.max_samples_per_session and len(examples) > self.max_samples_per_session:
+                examples = rng.sample(examples, self.max_samples_per_session)
+            records.extend(examples)
+            if self.max_records is not None and len(records) >= self.max_records:
+                return records[: self.max_records]
+        return records
+
+    def _split_session_ids(self, sessions: Sequence[Dict[str, Any]]) -> tuple[set[str], set[str]]:
+        if self.split_manifest_file:
+            manifest = json.loads(Path(self.split_manifest_file).read_text(encoding="utf-8"))
+            if "train_session_ids" in manifest and "eval_session_ids" in manifest:
+                selected = manifest
+            else:
+                selected = manifest[self.split_manifest_name]
+            available = {session["session_id"] for session in sessions}
+            train_ids = {str(item) for item in selected.get("train_session_ids", [])} & available
+            eval_ids = {str(item) for item in selected.get("eval_session_ids", [])} & available
+            return train_ids, eval_ids
+
+        session_ids = sorted(session["session_id"] for session in sessions)
+        rng = random.Random(self.split_seed)
+        rng.shuffle(session_ids)
+        eval_count = max(1, int(round(len(session_ids) * self.eval_ratio))) if session_ids else 0
+        eval_ids = set(session_ids[:eval_count])
+        train_ids = set(session_ids[eval_count:])
+        return train_ids, eval_ids
+
+    def _session_examples(self, session_id: str, spans: Sequence[Any]) -> List[CompressHistoryExample]:
+        examples = []
+        tools: List[Dict[str, Any]] = []
+        for span_index, span in enumerate(spans):
+            attributes = _span_attributes(span)
+            if self.include_tools and not tools:
+                tools = _tool_list_from_agent_value(attributes.get("gen_ai.tool.definitions"))
+            raw_input_messages = _json_loads(attributes.get("gen_ai.input.messages"), [])
+            output_messages = attributes.get("gen_ai.output.messages")
+            if not raw_input_messages or output_messages is None:
+                continue
+            if self.max_input_chars is not None and len(str(raw_input_messages)) > self.max_input_chars:
+                continue
+            system_prompt = _agent_system_prompt(_json_loads(raw_input_messages, []))
+            messages = [
+                item
+                for item in (_normal_agent_message(message) for message in _json_loads(raw_input_messages, []))
+                if item is not None and item.get("role") != "system"
+            ]
+            last_user_index = next(
+                (index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "user"),
+                None,
+            )
+            if last_user_index is None:
+                continue
+            history_docs = _agent_history_turn_docs(messages[:last_user_index])
+            current_messages = messages[last_user_index:]
+            answer, has_tool_call = _render_agent_output_messages(output_messages, self.max_answer_chars)
+            if self.require_tool_call and not has_tool_call:
+                continue
+            if not history_docs or not current_messages or not answer:
+                continue
+            examples.append(
+                CompressHistoryExample(
+                    qid=f"{session_id}:{span_index}",
+                    history_messages=history_docs,
+                    current_messages=current_messages,
+                    answer=answer,
+                    system_prompt=system_prompt,
+                    tools=list(tools) if self.include_tools else [],
+                )
+            )
+        return examples
 
 
 def _chat_template_ids(
@@ -673,6 +1099,8 @@ def load_compress_history_source(source_type: str, path: str) -> CompressHistory
         return JsonlCompressHistorySource(path)
     if source_type == "open_swe":
         return OpenSWETracesCompressHistorySource(path)
+    if source_type == "agent_llm_traces":
+        return AgentLLMTracesCompressHistorySource(path)
     raise NotImplementedError(
         f"Unsupported compress-history source {source_type!r}. "
         "Implement CompressHistorySource for the chosen dataset."
@@ -690,6 +1118,8 @@ def get_compress_history_dataset(
         source = JsonlCompressHistorySource(path)
     elif source_type == "open_swe":
         source = OpenSWETracesCompressHistorySource(path, **(source_kwargs or {}))
+    elif source_type == "agent_llm_traces":
+        source = AgentLLMTracesCompressHistorySource(path, **(source_kwargs or {}))
     else:
         source = load_compress_history_source(source_type, path)
     return CompressHistoryDataset(source, tokenizer=tokenizer, **kwargs)

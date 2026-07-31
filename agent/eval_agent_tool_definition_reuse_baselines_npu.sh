@@ -12,13 +12,15 @@ DATASET_PATH="${DATASET_PATH:-./datasets/agent-llm-traces}"
 OUTPUT_FILE="${OUTPUT_FILE:-./outputs/agent_tooldef_reuse_baselines_eval_npu.jsonl}"
 SPLIT="${SPLIT:-eval}"
 
-COMPARE_MODES="${COMPARE_MODES:-full,snapkv_reuse,epic_leading32_snapkv,cacheblend_vdiff_snapkv,c2kv,hybrid}"
+COMPARE_MODES="${COMPARE_MODES:-full,snapkv_reuse,epic_leading32_snapkv,cacheblend_vdiff_snapkv,c2kv,hybrid,snapkv_hybrid,epic_leading32_snapkv_hybrid,cacheblend_vdiff_snapkv_hybrid}"
 RATIOS="${RATIOS:-4}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-0}"
 HYBRID_TOP_K="${HYBRID_TOP_K:-3}"
 CACHEBLEND_RECOMPUTE_RATIO="${CACHEBLEND_RECOMPUTE_RATIO:-0.15}"
 SELECTION_FILTER="${SELECTION_FILTER:-c2kv}"
+MIN_NUM_TOOLS="${MIN_NUM_TOOLS:-0}"
 STRICT_4X_BASELINES="${STRICT_4X_BASELINES:-True}"
+COMMON_SUBSET_FILE="${COMMON_SUBSET_FILE:-}"
 
 SPLIT_MANIFEST_FILE="${SPLIT_MANIFEST_FILE:-}"
 SPLIT_NAME="${SPLIT_NAME:-toolset_disjoint}"
@@ -27,9 +29,13 @@ MAX_DOC_NUM="${MAX_DOC_NUM:-10}"
 MAX_TOOL_DEFINITION_TOKENS="${MAX_TOOL_DEFINITION_TOKENS:-10000}"
 MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-0}"
 MAX_BASELINE_INPUT_TOKENS="${MAX_BASELINE_INPUT_TOKENS:-0}"
+MAX_HYBRID_DECODE_TOKENS="${MAX_HYBRID_DECODE_TOKENS:-0}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 NPU_ATTN_IMPL="${NPU_ATTN_IMPL:-eager}"
 PARALLEL_EVAL="${PARALLEL_EVAL:-True}"
+DEBUG_HYBRID_TOKENS="${DEBUG_HYBRID_TOKENS:-False}"
+DUMP_HYBRID_DEFINITIONS="${DUMP_HYBRID_DEFINITIONS:-False}"
+DEBUG_DEFINITION_CHARS="${DEBUG_DEFINITION_CHARS:-4000}"
 OUTPUT_STEM="${OUTPUT_FILE%.jsonl}"
 TMP_DIR="${TMP_DIR:-${OUTPUT_STEM}.parts}"
 
@@ -49,10 +55,23 @@ echo "COMPARE_MODES=${COMPARE_MODES}"
 echo "RATIOS=${RATIOS}"
 echo "MAX_EXAMPLES=${MAX_EXAMPLES}"
 echo "SELECTION_FILTER=${SELECTION_FILTER}"
+echo "MIN_NUM_TOOLS=${MIN_NUM_TOOLS}"
 echo "STRICT_4X_BASELINES=${STRICT_4X_BASELINES}"
+echo "COMMON_SUBSET_FILE=${COMMON_SUBSET_FILE}"
 echo "MAX_PROMPT_TOKENS=${MAX_PROMPT_TOKENS}"
 echo "MAX_BASELINE_INPUT_TOKENS=${MAX_BASELINE_INPUT_TOKENS}"
+echo "MAX_HYBRID_DECODE_TOKENS=${MAX_HYBRID_DECODE_TOKENS}"
+echo "DEBUG_HYBRID_TOKENS=${DEBUG_HYBRID_TOKENS}"
+echo "DUMP_HYBRID_DEFINITIONS=${DUMP_HYBRID_DEFINITIONS}"
 echo "PARALLEL_EVAL=${PARALLEL_EVAL}"
+
+DEBUG_ARGS=()
+if [[ "${DEBUG_HYBRID_TOKENS}" == "True" || "${DEBUG_HYBRID_TOKENS}" == "true" || "${DEBUG_HYBRID_TOKENS}" == "1" ]]; then
+  DEBUG_ARGS+=(--debug_hybrid_tokens)
+fi
+if [[ "${DUMP_HYBRID_DEFINITIONS}" == "True" || "${DUMP_HYBRID_DEFINITIONS}" == "true" || "${DUMP_HYBRID_DEFINITIONS}" == "1" ]]; then
+  DEBUG_ARGS+=(--dump_hybrid_definitions --debug_definition_chars "${DEBUG_DEFINITION_CHARS}")
+fi
 
 if [[ "${STRICT_4X_BASELINES}" == "True" || "${STRICT_4X_BASELINES}" == "true" || "${STRICT_4X_BASELINES}" == "1" ]]; then
   IFS=',' read -ra _strict_modes <<< "${COMPARE_MODES}"
@@ -83,15 +102,18 @@ if [[ "${PARALLEL_EVAL}" != "True" && "${PARALLEL_EVAL}" != "true" && "${PARALLE
     --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \
     --max_examples "${MAX_EXAMPLES}" \
     --selection_filter "${SELECTION_FILTER}" \
+    --min_num_tools "${MIN_NUM_TOOLS}" \
     --max_doc_length "${MAX_DOC_LENGTH}" \
     --max_doc_num "${MAX_DOC_NUM}" \
     --max_tool_definition_tokens "${MAX_TOOL_DEFINITION_TOKENS}" \
     --max_prompt_tokens "${MAX_PROMPT_TOKENS}" \
     --max_baseline_input_tokens "${MAX_BASELINE_INPUT_TOKENS}" \
+    --max_hybrid_decode_tokens "${MAX_HYBRID_DECODE_TOKENS}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --system_attn_impl "${NPU_ATTN_IMPL}" \
     --gist_attn_impl "${NPU_ATTN_IMPL}" \
     --generate_attn_impl "${NPU_ATTN_IMPL}" \
+    "${DEBUG_ARGS[@]}" \
     --truncate_tool_definition False \
     --require_tool_call True
   exit 0
@@ -112,7 +134,7 @@ for mode in "${_modes[@]}"; do
   case_ratios=("${_ratios[@]}")
   if [[ "${mode}" == "full" || "${mode}" == "reuse" || "${mode}" == "epic_leading32" || "${mode}" == "cacheblend_vdiff" ]]; then
     case_ratios=("1")
-  elif [[ "${mode}" == "snapkv_reuse" || "${mode}" == "epic_leading32_snapkv" || "${mode}" == "cacheblend_vdiff_snapkv" ]]; then
+  elif [[ "${mode}" == "snapkv_reuse" || "${mode}" == "epic_leading32_snapkv" || "${mode}" == "cacheblend_vdiff_snapkv" || "${mode}" == "snapkv_hybrid" || "${mode}" == "epic_leading32_snapkv_hybrid" || "${mode}" == "cacheblend_vdiff_snapkv_hybrid" || "${mode}" == "c2kv_aug_hybrid" || "${mode}" == "snapkv_aug_hybrid" || "${mode}" == "epic_leading32_snapkv_aug_hybrid" || "${mode}" == "cacheblend_vdiff_snapkv_aug_hybrid" ]]; then
     case_ratios=("4")
   fi
   for ratio in "${case_ratios[@]}"; do
@@ -144,15 +166,18 @@ for mode in "${_modes[@]}"; do
         --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \
         --max_examples "${MAX_EXAMPLES}" \
         --selection_filter "${SELECTION_FILTER}" \
+        --min_num_tools "${MIN_NUM_TOOLS}" \
         --max_doc_length "${MAX_DOC_LENGTH}" \
         --max_doc_num "${MAX_DOC_NUM}" \
         --max_tool_definition_tokens "${MAX_TOOL_DEFINITION_TOKENS}" \
         --max_prompt_tokens "${MAX_PROMPT_TOKENS}" \
         --max_baseline_input_tokens "${MAX_BASELINE_INPUT_TOKENS}" \
+        --max_hybrid_decode_tokens "${MAX_HYBRID_DECODE_TOKENS}" \
         --max_new_tokens "${MAX_NEW_TOKENS}" \
         --system_attn_impl "${NPU_ATTN_IMPL}" \
         --gist_attn_impl "${NPU_ATTN_IMPL}" \
         --generate_attn_impl "${NPU_ATTN_IMPL}" \
+        "${DEBUG_ARGS[@]}" \
         --truncate_tool_definition False \
         --require_tool_call True
     ) > "${case_log}" 2>&1 &
@@ -166,6 +191,11 @@ done
 
 wait
 
+MERGE_ARGS=()
+if [[ -n "${COMMON_SUBSET_FILE}" ]]; then
+  MERGE_ARGS+=(--common_subset_file "${COMMON_SUBSET_FILE}")
+fi
+
 python agent/merge_agent_tool_definition_reuse_baselines_eval.py \
   --output_file "${OUTPUT_FILE}" \
   --model "${MODEL_PATH}" \
@@ -176,6 +206,7 @@ python agent/merge_agent_tool_definition_reuse_baselines_eval.py \
   --modes "${COMPARE_MODES}" \
   --ratios "${RATIOS}" \
   --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \
+  "${MERGE_ARGS[@]}" \
   --input_files "${CASE_OUTPUTS[@]}"
 
 echo "Shard summaries:"

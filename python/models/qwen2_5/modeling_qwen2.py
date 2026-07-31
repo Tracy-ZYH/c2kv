@@ -2,6 +2,7 @@
 #           This file was vendored from transformers.models.qwen2.modeling_qwen2 (v5.8.0) and
 #           extended with C2KV gist hooks (gist_q/k/v projections, generate_gist, context_input_ids).
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+import os
 from collections.abc import Callable
 from typing import List, Optional, Tuple, Union
 
@@ -34,6 +35,7 @@ from ..gist_utils import (
     gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast,
     get_apply_gist_residual_func, GIST_GRADIENT_CHECKPOINTING,
 )
+from ..npu_attention import npu_fusion_attention_forward
 
 
 class Qwen2MLP(nn.Module):
@@ -219,9 +221,12 @@ class Qwen2Attention(nn.Module):
             else:
                 key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
-            self.config._attn_implementation, eager_attention_forward
-        )
+        if self.config._attn_implementation == "npu_fusion_attention":
+            attention_interface = npu_fusion_attention_forward
+        else:
+            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+                self.config._attn_implementation, eager_attention_forward
+            )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -277,9 +282,12 @@ class Qwen2Attention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
-            self.config._attn_implementation, eager_attention_forward
-        )
+        if self.config._attn_implementation == "npu_fusion_attention":
+            attention_interface = npu_fusion_attention_forward
+        else:
+            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+                self.config._attn_implementation, eager_attention_forward
+            )
 
         attn_output, _ = attention_interface(
             self,
@@ -520,6 +528,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         gist_key_values = []
         if self.training and GIST_GRADIENT_CHECKPOINTING:
+            use_reentrant = os.environ.get("C2KV_GIST_CHECKPOINT_USE_REENTRANT", "true").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
             cos, sin = position_embeddings
             for decoder_layer in self.layers[: self.config.num_hidden_layers]:
                 def _make_ckpt_fn(layer):
@@ -531,7 +544,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     return _fn
                 hidden_states, gist_k, gist_v = torch.utils.checkpoint.checkpoint(
                     _make_ckpt_fn(decoder_layer), hidden_states,
-                    use_reentrant=True,
+                    use_reentrant=use_reentrant,
                 )
                 gist_key_values.append((gist_k, gist_v))
         else:

@@ -16,6 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from collections.abc import Callable
 from typing import List, Optional, Tuple, Union
 
@@ -50,6 +51,7 @@ from ..gist_utils import (
     gen_gist_proj, init_gist_proj, init_gist_embed, GistModelOutputWithPast,
     get_apply_gist_residual_func, GIST_GRADIENT_CHECKPOINTING,
 )
+from ..npu_attention import npu_fusion_attention_forward
 
 
 logger = logging.get_logger(__name__)
@@ -270,9 +272,12 @@ class LlamaAttention(nn.Module):
             else:
                 key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
-            self.config._attn_implementation, eager_attention_forward
-        )
+        if self.config._attn_implementation == "npu_fusion_attention":
+            attention_interface = npu_fusion_attention_forward
+        else:
+            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+                self.config._attn_implementation, eager_attention_forward
+            )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -327,9 +332,12 @@ class LlamaAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
-            self.config._attn_implementation, eager_attention_forward
-        )
+        if self.config._attn_implementation == "npu_fusion_attention":
+            attention_interface = npu_fusion_attention_forward
+        else:
+            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+                self.config._attn_implementation, eager_attention_forward
+            )
         attention_kwargs = {}
         if self.config._attn_implementation == "flex_attention":
             attention_kwargs["kernel_options"] = {"FORCE_USE_FLEX_ATTENTION": True}
@@ -544,6 +552,11 @@ class LlamaModel(LlamaPreTrainedModel):
 
         gist_key_values = []
         if self.training and GIST_GRADIENT_CHECKPOINTING:
+            use_reentrant = os.environ.get("C2KV_GIST_CHECKPOINT_USE_REENTRANT", "true").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
             cos, sin = position_embeddings
             for decoder_layer in self.layers[: self.config.num_hidden_layers]:
                 def _make_ckpt_fn(layer):
@@ -555,7 +568,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     return _fn
                 hidden_states, gist_k, gist_v = torch.utils.checkpoint.checkpoint(
                     _make_ckpt_fn(decoder_layer), hidden_states,
-                    use_reentrant=True,
+                    use_reentrant=use_reentrant,
                 )
                 gist_key_values.append((gist_k, gist_v))
         else:

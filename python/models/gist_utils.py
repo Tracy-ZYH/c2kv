@@ -1,5 +1,6 @@
 import torch
 import math
+import os
 import random
 from dataclasses import dataclass
 from typing import Tuple, Optional, Callable, List, Union
@@ -10,6 +11,20 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 GIST_GRADIENT_CHECKPOINTING = False
+
+
+def _sample_dynamic_gist_ratio() -> int:
+    configured = os.environ.get("C2KV_GIST_TRAIN_RATIOS")
+    if not configured:
+        return random.choice([2, 4, 8])
+    ratios = [
+        int(item.strip())
+        for item in configured.split(",")
+        if item.strip()
+    ]
+    if not ratios:
+        return random.choice([2, 4, 8])
+    return random.choice(ratios)
 
 
 @dataclass
@@ -433,6 +448,102 @@ def get_apply_gist_residual_func(config: GistConfigMixin, layer_idx: int = 0) ->
         return lambda tokens_tensor, gist_tensor, **kwargs: _apply_gist_residual_interleave(tokens_tensor, gist_tensor, ratio=kwargs["ratio"])
     return lambda tokens_tensor, gist_tensor, **kwargs: gist_tensor
 
+
+def _pad_gist_outputs(
+    past_key_values,
+    gist_mask: torch.Tensor,
+    pos_ids: torch.Tensor,
+    target_gist_len: int,
+):
+    gist_pad_len = target_gist_len - gist_mask.shape[1]
+    if gist_pad_len > 0:
+        gist_mask = torch.cat(
+            [gist_mask, gist_mask.new_zeros((gist_mask.shape[0], gist_pad_len))],
+            dim=1,
+        )
+        pos_ids = torch.cat(
+            [pos_ids, pos_ids.new_zeros((pos_ids.shape[0], gist_pad_len))],
+            dim=1,
+        )
+    padded_kv = []
+    for key, value in past_key_values:
+        kv_pad_len = target_gist_len - key.shape[2]
+        if kv_pad_len > 0:
+            key = torch.cat(
+                [key, key.new_zeros((key.shape[0], key.shape[1], kv_pad_len, key.shape[-1]))],
+                dim=2,
+            )
+            value = torch.cat(
+                [value, value.new_zeros((value.shape[0], value.shape[1], kv_pad_len, value.shape[-1]))],
+                dim=2,
+            )
+        padded_kv.append((key, value))
+    return tuple(padded_kv), gist_mask, pos_ids
+
+
+def _generate_gist_for_context_docs(
+    model: PreTrainedModel,
+    input_ids: torch.LongTensor,
+    gist_attn_mask: torch.Tensor,
+    generate_gist_kwargs: dict,
+):
+    microbatch = max(1, int(os.environ.get("C2KV_GIST_DOC_MICROBATCH", "1")))
+    output_chunks = []
+    mask_chunks = []
+    pos_chunks = []
+    max_gist_len = 0
+
+    for start in range(0, input_ids.shape[0], microbatch):
+        end = min(start + microbatch, input_ids.shape[0])
+        mb_input_ids = input_ids[start:end]
+        mb_attn_mask = gist_attn_mask[start:end]
+        active_len = int(mb_attn_mask.sum(dim=1).max().item())
+        if 0 < active_len < mb_input_ids.shape[1]:
+            mb_input_ids = mb_input_ids[:, :active_len]
+            mb_attn_mask = mb_attn_mask[:, :active_len]
+        outputs, gist_mask, pos_ids = model.generate_gist(
+            mb_input_ids,
+            mb_attn_mask,
+            **generate_gist_kwargs,
+        )
+        max_gist_len = max(max_gist_len, gist_mask.shape[1])
+        output_chunks.append(outputs.past_key_values)
+        mask_chunks.append(gist_mask)
+        pos_chunks.append(pos_ids)
+
+    padded = [
+        _pad_gist_outputs(
+            past_key_values,
+            mask,
+            pos,
+            max_gist_len,
+        )
+        for past_key_values, mask, pos in zip(
+            output_chunks,
+            mask_chunks,
+            pos_chunks,
+        )
+    ]
+    padded_kvs, padded_masks, padded_pos = zip(*padded)
+    layer_num = len(padded_kvs[0])
+    merged_kv = []
+    for layer_idx in range(layer_num):
+        keys = torch.cat([kv[layer_idx][0] for kv in padded_kvs], dim=0)
+        values = torch.cat([kv[layer_idx][1] for kv in padded_kvs], dim=0)
+        merged_kv.append((keys, values))
+
+    class _ContextGistOutputs:
+        pass
+
+    merged_outputs = _ContextGistOutputs()
+    merged_outputs.past_key_values = tuple(merged_kv)
+    first_key = merged_outputs.past_key_values[0][0]
+    merged_outputs.last_hidden_state = first_key.new_empty(
+        (input_ids.shape[0], max_gist_len, 1)
+    )
+    return merged_outputs, torch.cat(list(padded_masks), dim=0), torch.cat(list(padded_pos), dim=0)
+
+
 def process_context_input_ids(
     model: PreTrainedModel,
     context_input_ids: torch.LongTensor,
@@ -449,7 +560,7 @@ def process_context_input_ids(
     # reshape context_input_ids and generate gist
     batch_size, chunk_num, seq_len = context_input_ids.shape
     valid_chunk_mask = (context_input_ids != -100).any(dim=2)
-    if not valid_chunk_mask.all():
+    if reconstruct_kwargs is None or not valid_chunk_mask.all():
         flat_context_input_ids = context_input_ids.reshape(batch_size * chunk_num, seq_len)
         flat_valid_mask = valid_chunk_mask.reshape(-1)
         valid_indices = flat_valid_mask.nonzero(as_tuple=False).squeeze(1)
@@ -468,8 +579,13 @@ def process_context_input_ids(
         input_ids[~gist_attn_mask] = model.gist_token_id
         generate_gist_kwargs = {}
         if model.config.gist_type == "dynamic-interleave":
-            generate_gist_kwargs["ratio"] = random.choice([2, 4, 8])
-        outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask, **generate_gist_kwargs)
+            generate_gist_kwargs["ratio"] = _sample_dynamic_gist_ratio()
+        outputs, gist_mask, pos_ids = _generate_gist_for_context_docs(
+            model,
+            input_ids,
+            gist_attn_mask,
+            generate_gist_kwargs,
+        )
         if reconstruct_kwargs is not None and model.training:
             raise NotImplementedError("Reconstruction loss is not supported with padded empty context chunks.")
 
@@ -538,8 +654,13 @@ def process_context_input_ids(
     input_ids[~gist_attn_mask] = model.gist_token_id
     generate_gist_kwargs = {}
     if model.config.gist_type == "dynamic-interleave":
-        generate_gist_kwargs["ratio"] = random.choice([2, 4, 8])
-    outputs, gist_mask, pos_ids = model.generate_gist(input_ids, gist_attn_mask, **generate_gist_kwargs)
+        generate_gist_kwargs["ratio"] = _sample_dynamic_gist_ratio()
+    outputs, gist_mask, pos_ids = _generate_gist_for_context_docs(
+        model,
+        input_ids,
+        gist_attn_mask,
+        generate_gist_kwargs,
+    )
     # do reconstruction if reconstruct_kwargs is given
     reconstruct_loss = None
     if reconstruct_kwargs is not None and model.training:

@@ -78,7 +78,7 @@ class UnifiedNextActionDataArgs:
     truncate_tool_definition: bool = True
     min_target_tokens: int = 32
     device_type: str = "auto"
-    npu_attn_impl: str = "eager"
+    npu_attn_impl: str = "npu_fusion_attention"
     output_manifest_file: str = "./outputs/unified_next_action_split_manifest.json"
 
 
