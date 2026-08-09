@@ -54,6 +54,22 @@ def _display_mode(row: Dict[str, Any]) -> str:
             if attention_score_mode:
                 return f"{prefix}_{attention_score_mode}"
             return prefix
+        if hybrid_mode == "hybrid" and router_strategy in {"vote_all", "stable_vote", "conservative_vote"}:
+            attention_score_mode = row.get("attention_score_mode")
+            attention_cache_mode = row.get("attention_cache_mode", "c2kv")
+            prefix = router_strategy
+            if attention_cache_mode == "full":
+                prefix = f"fullkv_{prefix}"
+            if attention_score_mode:
+                return f"{prefix}_{attention_score_mode}"
+            return prefix
+        if hybrid_mode == "hybrid" and router_strategy in {
+            "lex_top3_original_order",
+            "lex_top3_plus_stable1_full",
+            "lex_top3_plus_stable1_c2kv2",
+            "lex_top3_plus_stable1_name_desc_full",
+        }:
+            return str(router_strategy)
         if hybrid_mode == "hybrid" and router_strategy == "random":
             return "random_hybrid"
         if hybrid_mode == "hybrid":
@@ -146,6 +162,8 @@ def _row_rouge_l_f1(row: Dict[str, Any]) -> float:
 
 
 def _row_compressed_tool_tokens(row: Dict[str, Any]) -> float:
+    if "compressed_tool_tokens" in row:
+        return float(row.get("compressed_tool_tokens", 0) or 0)
     if "top_doc_tokens" in row or "rest_gist_tokens" in row:
         return float(row.get("top_doc_tokens", 0) or 0) + float(row.get("rest_gist_tokens", 0) or 0)
     if "gist_tokens" in row:
@@ -155,6 +173,71 @@ def _row_compressed_tool_tokens(row: Dict[str, Any]) -> float:
     ratio = float(row.get("actual_compression_ratio", 0.0) or 0.0)
     doc_tokens = float(row.get("doc_tokens", 0) or 0)
     return doc_tokens / ratio if ratio > 0 and doc_tokens > 0 else 0.0
+
+
+def _row_tool_original_tokens(row: Dict[str, Any]) -> float:
+    if "tool_original_tokens" in row:
+        return float(row.get("tool_original_tokens", 0) or 0)
+    if any(key in row for key in ("full_tool_tokens", "c2kv2_doc_tokens", "c2kv4_doc_tokens")):
+        full_schema_tokens = (
+            float(row.get("full_schema_tool_tokens", 0) or 0)
+            if "full_schema_tool_tokens" in row
+            else float(row.get("full_tool_tokens", 0) or 0)
+            - float(row.get("stable_summary_full_tokens", 0) or 0)
+        )
+        return (
+            full_schema_tokens
+            + float(row.get("c2kv2_doc_tokens", 0) or 0)
+            + float(row.get("c2kv4_doc_tokens", 0) or 0)
+        )
+    return float(row.get("doc_tokens", 0) or 0)
+
+
+def _row_actual_compression_ratio(row: Dict[str, Any]) -> float:
+    original_tokens = _row_tool_original_tokens(row)
+    compressed_tokens = _row_compressed_tool_tokens(row)
+    if original_tokens > 0 and compressed_tokens > 0:
+        return original_tokens / compressed_tokens
+    return float(row.get("actual_compression_ratio", 0.0) or 0.0)
+
+
+def _row_response_type_match(row: Dict[str, Any]) -> bool:
+    return bool(row.get("response_type_match", _target_has_tool_call(row) == bool(row.get("has_tool_call"))))
+
+
+def _basic_metric_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    called_rows = [row for row in rows if row.get("has_tool_call")]
+    return {
+        "num_samples": len(rows),
+        "exact_match": (
+            sum(1 for row in rows if row.get("exact_match")) / len(rows)
+            if rows else 0.0
+        ),
+        "avg_text_token_f1": (
+            sum(_row_text_token_f1(row) for row in rows) / len(rows)
+            if rows else 0.0
+        ),
+        "avg_rouge_l_f1": (
+            sum(_row_rouge_l_f1(row) for row in rows) / len(rows)
+            if rows else 0.0
+        ),
+        "response_type_accuracy": (
+            sum(1 for row in rows if _row_response_type_match(row)) / len(rows)
+            if rows else 0.0
+        ),
+        "tool_name_accuracy": (
+            sum(1 for row in rows if row.get("tool_name_match")) / len(rows)
+            if rows else 0.0
+        ),
+        "tool_call_rate": (
+            len(called_rows) / len(rows)
+            if rows else 0.0
+        ),
+        "call_accuracy": (
+            sum(1 for row in called_rows if row.get("tool_name_match")) / len(called_rows)
+            if called_rows else 0.0
+        ),
+    }
 
 
 def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -174,6 +257,13 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         attention_rank_rows = [row for row in valid_rows if row.get("target_attention_rank") is not None]
         final_rank_rows = [row for row in valid_rows if row.get("target_final_rank") is not None]
         att_rerank_rows = [row for row in valid_rows if row.get("att_rerank_replaced") is not None]
+        router_hit_rows = [row for row in valid_rows if row.get("router_hit")]
+        lexical_hit_rows = [row for row in valid_rows if row.get("lexical_top3_hit")]
+        attention_promotion_rows = [
+            row for row in valid_rows
+            if not row.get("lexical_top3_hit") and row.get("stable_candidate_hit")
+        ]
+        final_miss_rows = [row for row in valid_rows if row.get("final_recovery_hit") is False]
         summaries.append({
             "mode": mode,
             "ratio": ratio,
@@ -244,6 +334,70 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 sum(1 for row in valid_rows if row.get("router_hit")) / len(valid_rows)
                 if any("router_hit" in row for row in valid_rows) else 0.0
             ),
+            "lexical_recall_at_1": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_1")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_1" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_3": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_3")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_3" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_5": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_5")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_5" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_10": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_10")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_10" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_20": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_20")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_20" in row for row in valid_rows) else 0.0
+            ),
+            "promotion_gain_count": sum(1 for row in valid_rows if row.get("promotion_gain")),
+            "demotion_loss_count": sum(1 for row in valid_rows if row.get("demotion_loss")),
+            "delta_hit_at_3": (
+                (
+                    sum(1 for row in valid_rows if row.get("promotion_gain"))
+                    - sum(1 for row in valid_rows if row.get("demotion_loss"))
+                ) / len(valid_rows)
+                if valid_rows and any("promotion_gain" in row for row in valid_rows) else 0.0
+            ),
+            "hit_utilization": (
+                sum(1 for row in router_hit_rows if row.get("tool_name_match")) / len(router_hit_rows)
+                if router_hit_rows else 0.0
+            ),
+            "lexical_hit_utilization": (
+                sum(1 for row in lexical_hit_rows if row.get("tool_name_match")) / len(lexical_hit_rows)
+                if lexical_hit_rows else 0.0
+            ),
+            "attention_promotion_utilization": (
+                sum(1 for row in attention_promotion_rows if row.get("tool_name_match")) / len(attention_promotion_rows)
+                if attention_promotion_rows else 0.0
+            ),
+            "miss_recovery_rate": (
+                sum(1 for row in final_miss_rows if row.get("tool_name_match")) / len(final_miss_rows)
+                if final_miss_rows else 0.0
+            ),
+            "stable_candidate_hit_rate": (
+                sum(1 for row in valid_rows if row.get("stable_candidate_hit")) / len(valid_rows)
+                if valid_rows and any("stable_candidate_hit" in row for row in valid_rows) else 0.0
+            ),
+            "avg_stable_candidate_lexical_rank": (
+                sum(
+                    float(row.get("stable_candidate_lexical_rank"))
+                    for row in valid_rows
+                    if row.get("stable_candidate_lexical_rank") is not None
+                )
+                / sum(1 for row in valid_rows if row.get("stable_candidate_lexical_rank") is not None)
+                if valid_rows and any(row.get("stable_candidate_lexical_rank") is not None for row in valid_rows)
+                else 0.0
+            ),
+            "recovery_group_results": {
+                "lexical_top3_hit": _basic_metric_summary(lexical_hit_rows),
+                "stable_candidate_promotion": _basic_metric_summary(attention_promotion_rows),
+                "final_recovery_miss": _basic_metric_summary(final_miss_rows),
+            },
             "avg_target_lexical_rank": (
                 sum(float(row.get("target_lexical_rank")) for row in lexical_rank_rows) / len(lexical_rank_rows)
                 if lexical_rank_rows else 0.0
@@ -261,7 +415,7 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if att_rerank_rows else 0.0
             ),
             "avg_doc_tokens": (
-                sum(row.get("doc_tokens", 0) for row in valid_rows) / len(valid_rows)
+                sum(_row_tool_original_tokens(row) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
             ),
             "avg_prompt_tokens": (
@@ -272,12 +426,60 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 generated_total / len(valid_rows) if valid_rows else 0.0
             ),
             "avg_actual_compression_ratio": (
-                sum(row.get("actual_compression_ratio", 0.0) for row in valid_rows) / len(valid_rows)
+                sum(_row_actual_compression_ratio(row) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
             ),
             "token_weighted_actual_compression_ratio": (
-                sum(row.get("doc_tokens", 0) for row in valid_rows) / compressed_tool_total
+                sum(_row_tool_original_tokens(row) for row in valid_rows) / compressed_tool_total
                 if compressed_tool_total else 0.0
+            ),
+            "avg_full_tool_tokens": (
+                sum(row.get("full_tool_tokens", row.get("top_doc_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_full_schema_tool_tokens": (
+                sum(row.get("full_schema_tool_tokens", row.get("full_tool_tokens", row.get("top_doc_tokens", 0))) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_stable_summary_full_tokens": (
+                sum(row.get("stable_summary_full_tokens", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_tool_original_tokens": (
+                sum(_row_tool_original_tokens(row) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_tool_kv_tokens": (
+                sum(row.get("tool_kv_tokens", _row_compressed_tool_tokens(row)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_combined_full_doc_tokens": (
+                sum(row.get("combined_full_doc_tokens", row.get("doc_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("combined_full_doc_tokens" in row for row in valid_rows) else 0.0
+            ),
+            "avg_combined_full_doc_actual_compression_ratio": (
+                sum(row.get("combined_full_doc_actual_compression_ratio", 0.0) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("combined_full_doc_actual_compression_ratio" in row for row in valid_rows) else 0.0
+            ),
+            "avg_c2kv2_doc_tokens": (
+                sum(row.get("c2kv2_doc_tokens", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_c2kv2_gist_tokens": (
+                sum(row.get("c2kv2_gist_tokens", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_c2kv4_doc_tokens": (
+                sum(row.get("c2kv4_doc_tokens", row.get("rest_doc_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_c2kv4_gist_tokens": (
+                sum(row.get("c2kv4_gist_tokens", row.get("rest_gist_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_final_kv_length": (
+                sum(row.get("final_kv_length", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("final_kv_length" in row for row in valid_rows) else 0.0
             ),
             "avg_num_tools": (
                 sum(row.get("num_tools", 0) for row in valid_rows) / len(valid_rows)
@@ -473,6 +675,16 @@ def _common_fairness_check(common_results: List[Dict[str, Any]], common_subset: 
     }
 
 
+def _compact_common_subset(payload: Dict[str, Any], include_keys: bool) -> Dict[str, Any]:
+    if include_keys or "common_sample_keys" not in payload:
+        return payload
+    compact = dict(payload)
+    compact["common_sample_keys_omitted"] = True
+    compact["num_common_sample_keys_omitted"] = len(payload.get("common_sample_keys") or [])
+    compact.pop("common_sample_keys", None)
+    return compact
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Merge agent tool-definition reuse baseline eval shards.")
     parser.add_argument("--output_file", required=True)
@@ -482,6 +694,7 @@ def main() -> None:
     parser.add_argument("--reuse_model")
     parser.add_argument("--dataset_path")
     parser.add_argument("--split", default="eval")
+    parser.add_argument("--tool_document_eval_mode", default="full")
     parser.add_argument("--modes")
     parser.add_argument("--ratios")
     parser.add_argument("--cacheblend_recompute_ratio", type=float, default=0.15)
@@ -492,6 +705,11 @@ def main() -> None:
             "computed on that file's common_subset.common_sample_keys instead of "
             "recomputing the intersection across all current groups."
         ),
+    )
+    parser.add_argument(
+        "--include_common_sample_keys",
+        action="store_true",
+        help="Include full common_sample_keys lists in the summary JSON. Hidden by default because they are long.",
     )
     args = parser.parse_args()
 
@@ -520,19 +738,28 @@ def main() -> None:
     else:
         common_subset = computed_common_subset
         common_subset_results = _summarize_common_rows(rows)
+    computed_common_subset_for_output = _compact_common_subset(
+        computed_common_subset,
+        args.include_common_sample_keys,
+    )
+    common_subset_for_output = _compact_common_subset(
+        common_subset,
+        args.include_common_sample_keys,
+    )
     summary = {
         "model": args.model,
         "base_model": args.base_model,
         "reuse_model": args.reuse_model,
         "dataset_path": args.dataset_path,
         "split": args.split,
+        "tool_document_eval_mode": args.tool_document_eval_mode,
         "modes": [item.strip() for item in (args.modes or "").split(",") if item.strip()],
         "ratios": [item.strip() for item in (args.ratios or "").split(",") if item.strip()],
         "num_rows": len(rows),
         "missing_files": missing_files,
         "input_file_rows": input_file_rows,
         "input_file_groups": input_file_groups,
-        "computed_common_subset": computed_common_subset,
+        "computed_common_subset": computed_common_subset_for_output,
         "notes": {
             "epic_leading32": "PyTorch selective recompute with recompute_type=leading-32.",
             "cacheblend_vdiff": f"PyTorch value-difference selective recompute with recompute_type=vdiff-{args.cacheblend_recompute_ratio}; not the vLLM+LMCache expr_cacheblend.py path.",
@@ -547,13 +774,15 @@ def main() -> None:
             "epic_leading32_snapkv_aug_hybrid": "All tool schemas SnapKV-compressed with EPIC leading-32 selective recompute plus an extra full top-k tool-schema prefix.",
             "cacheblend_vdiff_snapkv_aug_hybrid": "All tool schemas SnapKV-compressed with value-difference selective recompute plus an extra full top-k tool-schema prefix.",
             "common_subset_results": (
-                "Metrics recomputed on common_subset.common_sample_keys. If "
+                "Metrics recomputed on the internal common sample keys. If "
                 "common_subset_file is set, these qids come from that reference "
-                "summary; otherwise they are valid for every present mode/ratio group."
+                "summary; otherwise they are valid for every present mode/ratio group. "
+                "Full common_sample_keys are omitted from output unless "
+                "--include_common_sample_keys is set."
             ),
         },
         "results": _summarize_rows(rows),
-        "common_subset": common_subset,
+        "common_subset": common_subset_for_output,
         "common_subset_results": common_subset_results,
         "common_subset_fairness_check": _common_fairness_check(common_subset_results, common_subset),
     }

@@ -109,6 +109,67 @@ def _tool_search_text(tool: Dict[str, Any]) -> str:
     )
 
 
+def _text_tokens(text: str) -> List[str]:
+    return re.findall(r"\w+", _normalize_text(text))
+
+
+def _text_token_f1(target: str, prediction: str) -> float:
+    target_tokens = _text_tokens(target)
+    prediction_tokens = _text_tokens(prediction)
+    if not target_tokens and not prediction_tokens:
+        return 1.0
+    if not target_tokens or not prediction_tokens:
+        return 0.0
+    overlap = sum((Counter(target_tokens) & Counter(prediction_tokens)).values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(target_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _lcs_length(left: Sequence[str], right: Sequence[str]) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_token in left:
+        current = [0]
+        for index, right_token in enumerate(right, start=1):
+            if left_token == right_token:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    return previous[-1]
+
+
+def _rouge_l_f1(target: str, prediction: str) -> float:
+    target_tokens = _text_tokens(target)
+    prediction_tokens = _text_tokens(prediction)
+    if not target_tokens and not prediction_tokens:
+        return 1.0
+    if not target_tokens or not prediction_tokens:
+        return 0.0
+    overlap = _lcs_length(target_tokens, prediction_tokens)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(target_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _row_text_token_f1(row: Dict[str, Any]) -> float:
+    if "text_token_f1" in row:
+        return float(row.get("text_token_f1") or 0.0)
+    return _text_token_f1(row.get("target", ""), row.get("prediction", ""))
+
+
+def _row_rouge_l_f1(row: Dict[str, Any]) -> float:
+    if "rouge_l_f1" in row:
+        return float(row.get("rouge_l_f1") or 0.0)
+    return _rouge_l_f1(row.get("target", ""), row.get("prediction", ""))
+
+
 def _compact_parameters(parameters: Any) -> Any:
     if not isinstance(parameters, dict):
         return parameters
@@ -228,7 +289,77 @@ def _add_hybrid_debug_fields(
 
 
 def _row_compressed_tool_tokens(row: Dict[str, Any]) -> float:
+    if "compressed_tool_tokens" in row:
+        return float(row.get("compressed_tool_tokens", 0) or 0)
     return float(row.get("top_doc_tokens", 0) or 0) + float(row.get("rest_gist_tokens", 0) or 0)
+
+
+def _row_tool_original_tokens(row: Dict[str, Any]) -> float:
+    if "tool_original_tokens" in row:
+        return float(row.get("tool_original_tokens", 0) or 0)
+    if any(key in row for key in ("full_tool_tokens", "c2kv2_doc_tokens", "c2kv4_doc_tokens")):
+        full_schema_tokens = (
+            float(row.get("full_schema_tool_tokens", 0) or 0)
+            if "full_schema_tool_tokens" in row
+            else float(row.get("full_tool_tokens", 0) or 0)
+            - float(row.get("stable_summary_full_tokens", 0) or 0)
+        )
+        return (
+            full_schema_tokens
+            + float(row.get("c2kv2_doc_tokens", 0) or 0)
+            + float(row.get("c2kv4_doc_tokens", 0) or 0)
+        )
+    return float(row.get("doc_tokens", 0) or 0)
+
+
+def _row_actual_compression_ratio(row: Dict[str, Any]) -> float:
+    original_tokens = _row_tool_original_tokens(row)
+    compressed_tokens = _row_compressed_tool_tokens(row)
+    if original_tokens > 0 and compressed_tokens > 0:
+        return original_tokens / compressed_tokens
+    return float(row.get("actual_compression_ratio", 0.0) or 0.0)
+
+
+def _row_response_type_match(row: Dict[str, Any]) -> bool:
+    if "response_type_match" in row:
+        return bool(row.get("response_type_match"))
+    target_has_tool_call = bool(row.get("target_tool_name")) or "<tool_call>" in row.get("target", "") or "Action:" in row.get("target", "")
+    return target_has_tool_call == bool(row.get("has_tool_call"))
+
+
+def _basic_metric_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    called_rows = [row for row in rows if row.get("has_tool_call")]
+    return {
+        "num_samples": len(rows),
+        "exact_match": (
+            sum(1 for row in rows if row.get("exact_match")) / len(rows)
+            if rows else 0.0
+        ),
+        "avg_text_token_f1": (
+            sum(_row_text_token_f1(row) for row in rows) / len(rows)
+            if rows else 0.0
+        ),
+        "avg_rouge_l_f1": (
+            sum(_row_rouge_l_f1(row) for row in rows) / len(rows)
+            if rows else 0.0
+        ),
+        "response_type_accuracy": (
+            sum(1 for row in rows if _row_response_type_match(row)) / len(rows)
+            if rows else 0.0
+        ),
+        "tool_name_accuracy": (
+            sum(1 for row in rows if row.get("tool_name_match")) / len(rows)
+            if rows else 0.0
+        ),
+        "tool_call_rate": (
+            len(called_rows) / len(rows)
+            if rows else 0.0
+        ),
+        "call_accuracy": (
+            sum(1 for row in called_rows if row.get("tool_name_match")) / len(called_rows)
+            if called_rows else 0.0
+        ),
+    }
 
 
 def _message_text(message: Dict[str, Any]) -> str:
@@ -311,6 +442,244 @@ def _rerank_lexical_pool_by_attention(
     pool.sort(key=lambda index: (-attention_scores[index], pool_ranks[index]))
     pool_set = set(pool)
     return pool + [index for index in lexical_ranked if index not in pool_set]
+
+
+DEFAULT_STABLE_RETRIEVAL_HEADS = (
+    (23, 10),
+    (20, 15),
+    (21, 11),
+    (22, 4),
+    (15, 9),
+    (21, 18),
+    (23, 13),
+    (17, 4),
+    (18, 15),
+    (20, 16),
+    (24, 13),
+    (19, 12),
+    (18, 19),
+    (19, 13),
+    (13, 2),
+    (17, 27),
+)
+
+
+def _parse_stable_heads(spec: str) -> List[tuple[int, int]]:
+    if not spec:
+        return list(DEFAULT_STABLE_RETRIEVAL_HEADS)
+    heads: List[tuple[int, int]] = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            layer, head = item.split(":", 1)
+        elif "." in item:
+            layer, head = item.split(".", 1)
+        else:
+            raise ValueError(f"Invalid stable head {item!r}; expected layer:head")
+        heads.append((int(layer), int(head)))
+    return heads
+
+
+def _normalized_entropy_confidence(scores: Sequence[float]) -> float:
+    positives = [max(0.0, float(score)) for score in scores]
+    total = sum(positives)
+    if total <= 0.0 or len(positives) <= 1:
+        return 0.0
+    probs = [score / total for score in positives if score > 0.0]
+    if not probs:
+        return 0.0
+    entropy = -sum(prob * torch.log(torch.tensor(prob)).item() for prob in probs)
+    max_entropy = torch.log(torch.tensor(float(len(positives)))).item()
+    if max_entropy <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - entropy / max_entropy))
+
+
+def _select_vote_heads(
+    head_rankings: Sequence[Dict[str, Any]],
+    pool: Sequence[int],
+    *,
+    stable: bool,
+    stable_heads: Sequence[tuple[int, int]],
+    stable_head_count: int,
+) -> List[Dict[str, Any]]:
+    if not stable:
+        return [dict(head, vote_weight=1.0) for head in head_rankings]
+    lookup = {(int(head.get("layer")), int(head.get("head"))): head for head in head_rankings}
+    selected = [dict(lookup[key], vote_weight=1.0) for key in stable_heads if key in lookup]
+    if selected:
+        return selected[:stable_head_count]
+
+    def pool_margin(head: Dict[str, Any]) -> float:
+        scores_by_index = head.get("scores_by_index") or {}
+        values = sorted(
+            [float(scores_by_index.get(index, 0.0) or 0.0) for index in pool],
+            reverse=True,
+        )
+        if len(values) <= 1:
+            return values[0] if values else 0.0
+        return values[0] - values[1]
+
+    fallback = sorted(head_rankings, key=pool_margin, reverse=True)[:stable_head_count]
+    return [
+        dict(head, vote_weight=max(pool_margin(head), 1e-8))
+        for head in fallback
+    ]
+
+
+def _rank_lexical_pool_by_head_rrf(
+    lexical_ranked: Sequence[int],
+    head_rankings: Sequence[Dict[str, Any]],
+    *,
+    top_k: int,
+    pool_size: int,
+    rrf_k: float,
+    stable: bool,
+    stable_heads: Sequence[tuple[int, int]],
+    stable_head_count: int,
+) -> tuple[List[int], Dict[str, Any]]:
+    pool_size = max(top_k, min(pool_size, len(lexical_ranked)))
+    pool = list(lexical_ranked[:pool_size])
+    pool_set = set(pool)
+    selected_heads = _select_vote_heads(
+        head_rankings,
+        pool,
+        stable=stable,
+        stable_heads=stable_heads,
+        stable_head_count=stable_head_count,
+    )
+    rrf_scores = {index: 0.0 for index in pool}
+    confidence_values = []
+    head_votes = []
+    for head in selected_heads:
+        ranked = [index for index in (head.get("ranked_indices") or []) if index in pool_set]
+        scores_by_index = head.get("scores_by_index") or {}
+        confidence = _normalized_entropy_confidence([
+            float(scores_by_index.get(index, 0.0) or 0.0)
+            for index in pool
+        ])
+        weight = float(head.get("vote_weight", 1.0) or 1.0)
+        confidence_values.append(confidence)
+        for rank, index in enumerate(ranked, start=1):
+            rrf_scores[index] += weight * confidence / (rrf_k + rank)
+        if ranked:
+            head_votes.append({
+                "layer": head.get("layer"),
+                "head": head.get("head"),
+                "top_tool_index": ranked[0],
+                "weight": round(weight, 8),
+                "confidence": round(confidence, 6),
+            })
+    lexical_pool_rank = {index: rank for rank, index in enumerate(pool)}
+    voted_pool = sorted(pool, key=lambda index: (-rrf_scores[index], lexical_pool_rank[index]))
+    voted_set = set(voted_pool)
+    debug = {
+        "vote_pool_size": pool_size,
+        "vote_num_heads": len(selected_heads),
+        "vote_stable": stable,
+        "vote_rrf_k": rrf_k,
+        "vote_avg_confidence": (
+            sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+        ),
+        "vote_top_indices": voted_pool[:top_k],
+        "vote_top_scores": [round(rrf_scores[index], 8) for index in voted_pool[:top_k]],
+        "vote_head_votes": head_votes[:20],
+    }
+    return voted_pool + [index for index in lexical_ranked if index not in voted_set], debug
+
+
+def _select_stable_extra_candidate(
+    lexical_ranked: Sequence[int],
+    head_rankings: Sequence[Dict[str, Any]],
+    *,
+    base_top_k: int,
+    pool_size: int,
+    rrf_k: float,
+    stable_heads: Sequence[tuple[int, int]],
+    stable_head_count: int,
+) -> tuple[Optional[int], Optional[int], Dict[str, Any]]:
+    pool_size = max(base_top_k + 1, min(pool_size, len(lexical_ranked)))
+    candidates = list(lexical_ranked[base_top_k:pool_size])
+    if not candidates:
+        return None, None, {
+            "stable_plus_pool_size": pool_size,
+            "stable_plus_num_candidates": 0,
+            "reason": "empty_candidate_pool",
+        }
+    voted_ranked, debug = _rank_lexical_pool_by_head_rrf(
+        candidates,
+        head_rankings,
+        top_k=1,
+        pool_size=len(candidates),
+        rrf_k=rrf_k,
+        stable=True,
+        stable_heads=stable_heads,
+        stable_head_count=stable_head_count,
+    )
+    candidate = voted_ranked[0] if voted_ranked else None
+    lexical_rank = list(lexical_ranked).index(candidate) + 1 if candidate is not None else None
+    debug.update({
+        "stable_plus_pool_size": pool_size,
+        "stable_plus_candidate_indices": candidates,
+        "stable_plus_candidate_index": candidate,
+        "stable_plus_candidate_lexical_rank": lexical_rank,
+    })
+    return candidate, lexical_rank, debug
+
+
+def _parameter_names(parameters: Any) -> List[str]:
+    if not isinstance(parameters, dict):
+        return []
+    names = []
+    properties = parameters.get("properties")
+    if isinstance(properties, dict):
+        names.extend(str(name) for name in properties.keys())
+    required = parameters.get("required")
+    if isinstance(required, list):
+        for name in required:
+            name = str(name)
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _tool_router_summary(tool: Dict[str, Any]) -> Dict[str, Any]:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    parameters = (
+        function.get("parameters")
+        or tool.get("parameters")
+        or tool.get("input_schema")
+        or tool.get("schema")
+    )
+    summary = {
+        "tool_name": _tool_name(tool),
+        "description": function.get("description") or tool.get("description") or "",
+        "parameter_names": _parameter_names(parameters),
+    }
+    return summary
+
+
+def _conservative_vote_replacement(
+    lexical_ranked: Sequence[int],
+    voted_ranked: Sequence[int],
+    top_k: int,
+) -> tuple[List[int], Dict[str, Any]]:
+    if top_k < 3 or len(lexical_ranked) < top_k:
+        return list(lexical_ranked), {"accepted": False, "reason": "top_k<3"}
+    fixed = list(lexical_ranked[:2])
+    replacement = next((index for index in voted_ranked if index not in set(fixed)), lexical_ranked[2])
+    accepted = replacement != lexical_ranked[2]
+    selected = fixed + [replacement]
+    selected_set = set(selected)
+    final = selected + [index for index in lexical_ranked if index not in selected_set]
+    return final, {
+        "accepted": accepted,
+        "replace_tool_index": lexical_ranked[2],
+        "candidate_tool_index": replacement,
+        "candidate_lexical_rank": list(lexical_ranked).index(replacement) + 1,
+    }
 
 
 def _att_rerank_replacement(
@@ -487,6 +856,173 @@ def _clear_device_cache(device: str) -> None:
         torch.npu.empty_cache()
 
 
+def _sync_device(device: Any) -> None:
+    device_type = getattr(device, "type", str(device))
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device_type == "npu" and hasattr(torch, "npu") and torch.npu.is_available():
+        torch.npu.synchronize()
+
+
+@torch.inference_mode()
+def _prefill_tokens_with_cache_maybe_gist(
+    model: Any,
+    input_ids: torch.Tensor,
+    past_key_values: Any,
+    past_length: int,
+    attn_impl: str,
+    *,
+    use_gist: bool,
+) -> tuple[Any, int, float]:
+    if input_ids.shape[1] == 0:
+        return past_key_values, 0, 0.0
+    original_attn_impl = model.model.config._attn_implementation
+    model.model.config._attn_implementation = attn_impl
+    input_length = input_ids.shape[1]
+    cache_length = (
+        past_key_values.get_seq_length()
+        if past_key_values is not None and hasattr(past_key_values, "get_seq_length")
+        else past_length
+    )
+    attention_mask = torch.ones(
+        (input_ids.shape[0], cache_length + input_length),
+        dtype=torch.long,
+        device=input_ids.device,
+    )
+    position_ids = torch.arange(
+        past_length,
+        past_length + input_length,
+        dtype=torch.long,
+        device=input_ids.device,
+    ).unsqueeze(0)
+    kwargs = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "position_ids": position_ids,
+        "past_key_values": past_key_values,
+        "use_cache": True,
+        "logits_to_keep": 1,
+    }
+    if use_gist:
+        kwargs["use_gist"] = True
+    _sync_device(input_ids.device)
+    start = time.perf_counter()
+    outputs = model(**kwargs)
+    _sync_device(input_ids.device)
+    elapsed = time.perf_counter() - start
+    model.model.config._attn_implementation = original_attn_impl
+    return outputs.past_key_values, input_length, elapsed
+
+
+def _tool_single_doc_ids(
+    tokenizer: Any,
+    tool: Dict[str, Any],
+    *,
+    label: str = "Tool definition",
+    schema_mode: str = "full",
+) -> List[int]:
+    tool_doc = {
+        "role": "user",
+        "content": f"{label}:\n" + _render_tool_definition([tool], schema_mode),
+    }
+    return _chat_template_ids(tokenizer, [tool_doc])
+
+
+def _summary_single_doc_ids(tokenizer: Any, tool: Dict[str, Any], tool_index: int) -> List[int]:
+    summary_doc = {
+        "role": "user",
+        "content": (
+            f"Router summary for original tool index {tool_index}:\n"
+            + json.dumps(_tool_router_summary(tool), ensure_ascii=False, separators=(",", ":"))
+        ),
+    }
+    return _chat_template_ids(tokenizer, [summary_doc])
+
+
+@torch.inference_mode()
+def _append_full_tool_segment(
+    model: Any,
+    tokenizer: Any,
+    prefix_cache: Any,
+    logical_length: int,
+    tool: Dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    use_gist: bool,
+    label: str = "Tool definition",
+) -> tuple[Any, int, float]:
+    ids = _tool_single_doc_ids(tokenizer, tool, label=label)
+    input_ids = torch.tensor([ids], dtype=torch.long, device=model.device)
+    cache, length, elapsed = _prefill_tokens_with_cache_maybe_gist(
+        model,
+        input_ids,
+        past_key_values=prefix_cache,
+        past_length=logical_length,
+        attn_impl=args.generate_attn_impl,
+        use_gist=use_gist,
+    )
+    return cache, length, elapsed
+
+
+@torch.inference_mode()
+def _append_full_summary_segment(
+    model: Any,
+    tokenizer: Any,
+    prefix_cache: Any,
+    logical_length: int,
+    tool: Dict[str, Any],
+    tool_index: int,
+    args: argparse.Namespace,
+    *,
+    use_gist: bool,
+) -> tuple[Any, int, float]:
+    ids = _summary_single_doc_ids(tokenizer, tool, tool_index)
+    input_ids = torch.tensor([ids], dtype=torch.long, device=model.device)
+    cache, length, elapsed = _prefill_tokens_with_cache_maybe_gist(
+        model,
+        input_ids,
+        past_key_values=prefix_cache,
+        past_length=logical_length,
+        attn_impl=args.generate_attn_impl,
+        use_gist=use_gist,
+    )
+    return cache, length, elapsed
+
+
+@torch.inference_mode()
+def _append_c2kv_tool_segment(
+    model: Any,
+    tokenizer: Any,
+    prefix_cache: Any,
+    logical_length: int,
+    tool: Dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    ratio: int,
+) -> tuple[Any, int, int, int, float, float, float, Optional[str]]:
+    definition = _render_tool_definition([tool])
+    context_input_ids, doc_tokens, doc_chunks, skip_reason = _build_tool_chunks(
+        tokenizer,
+        definition,
+        max_doc_length=args.max_doc_length,
+        max_doc_num=args.max_doc_num,
+        max_tool_definition_tokens=args.max_tool_definition_tokens,
+        truncate_tool_definition=args.truncate_tool_definition,
+        document_mode="per_tool",
+    )
+    if context_input_ids is None:
+        return prefix_cache, 0, doc_tokens, doc_chunks, 0.0, 0.0, 0.0, skip_reason
+    cache, length, gist_tokens, actual_ratio, compress_sec, blend_sec = _build_tool_cache(
+        model,
+        context_input_ids,
+        prefix_cache,
+        logical_length,
+        args.gist_attn_impl,
+        ratio,
+    )
+    return cache, length, doc_tokens, doc_chunks, gist_tokens, actual_ratio, compress_sec + blend_sec, None
+
+
 @torch.inference_mode()
 def _rank_tools_by_attention(
     model: Any,
@@ -531,6 +1067,7 @@ def _rank_tools_by_attention(
             max_doc_num=args.max_doc_num,
             max_tool_definition_tokens=args.max_tool_definition_tokens,
             truncate_tool_definition=args.truncate_tool_definition,
+            document_mode=args.tool_document_eval_mode,
         )
         if context_input_ids is None:
             raise ValueError(f"attention_router_{skip_reason}")
@@ -582,6 +1119,10 @@ def _rank_tools_by_attention(
             score = tool_attn.sum(dim=-1).mean()
         elif args.attention_router_score_mode == "sqrt_len":
             score = tool_attn.sum(dim=-1).mean() / (span_len ** 0.5)
+        elif args.attention_router_score_mode == "top4_mean":
+            flat = tool_attn.reshape(-1)
+            top_n = min(max(1, args.attention_router_span_top_tokens), flat.numel())
+            score = torch.topk(flat, top_n).values.mean()
         else:
             score = tool_attn.mean()
         return float(score.item())
@@ -662,6 +1203,433 @@ def _rank_tools_by_attention(
     return ranked, scores, system_prefill_sec + tool_compress_sec + blend_sec, head_rankings
 
 
+STABLE_PLUS_STRATEGIES = {
+    "lex_top3_original_order",
+    "lex_top3_plus_stable1_full",
+    "lex_top3_plus_stable1_c2kv2",
+    "lex_top3_plus_stable1_name_desc_full",
+}
+
+
+@torch.inference_mode()
+def _generate_one_stable_plus_hybrid(
+    model: Any,
+    tokenizer: Any,
+    example: Any,
+    args: argparse.Namespace,
+    top_k: int,
+    ratio: int,
+) -> Dict[str, Any]:
+    total_start = time.perf_counter()
+    tools = _as_tool_list(example.tool_definition)
+    if not tools:
+        return {
+            "qid": example.qid,
+            "session_id": example.session_id,
+            "mode": "hybrid",
+            "hybrid_mode": getattr(args, "hybrid_mode", "hybrid"),
+            "router_strategy": args.router_strategy,
+            "top_k": top_k,
+            "ratio": ratio,
+            "skipped": True,
+            "skip_reason": "no_parseable_tools",
+        }
+
+    query = _query_text(example.input_messages, args.router_scope)
+    target = example.answer.strip()
+    target_tool = _extract_tool_name(target)
+    lexical_ranked = _rank_tools(tools, query)
+    if args.router_strategy == "lex_top3_original_order":
+        attention_ranked: List[int] = []
+        attention_router_sec = 0.0
+        stable_candidate = None
+        stable_candidate_lexical_rank = None
+        vote_debug = {
+            "reason": "lexical_only_original_order_baseline",
+            "stable_plus_pool_size": 0,
+            "stable_plus_num_candidates": 0,
+        }
+    else:
+        attention_ranked, _, attention_router_sec, head_rankings = _rank_tools_by_attention(
+            model, tokenizer, example, args, tools, ratio
+        )
+        stable_candidate, stable_candidate_lexical_rank, vote_debug = _select_stable_extra_candidate(
+            lexical_ranked,
+            head_rankings,
+            base_top_k=top_k,
+            pool_size=args.attention_router_lexical_pool,
+            rrf_k=args.attention_rrf_k,
+            stable_heads=_parse_stable_heads(args.attention_stable_heads),
+            stable_head_count=args.attention_stable_head_count,
+        )
+    lexical_top_indices = set(lexical_ranked[:top_k])
+    stable_set = {stable_candidate} if stable_candidate is not None else set()
+    recovered_indices = lexical_top_indices | stable_set
+    lexical_top3_tool_names = [_tool_name(tools[index]) for index in lexical_ranked[:top_k]]
+    stable_candidate_name = _tool_name(tools[stable_candidate]) if stable_candidate is not None else None
+    top_tool_names = [
+        _tool_name(tool)
+        for index, tool in enumerate(tools)
+        if index in recovered_indices
+    ]
+    target_lexical_rank = _rank_in_tool_order(tools, lexical_ranked, target_tool)
+    target_attention_rank = _rank_in_tool_order(tools, attention_ranked, target_tool)
+    final_ranked = list(lexical_ranked[:top_k])
+    if stable_candidate is not None and stable_candidate not in final_ranked:
+        final_ranked.append(stable_candidate)
+    final_ranked.extend(index for index in lexical_ranked if index not in set(final_ranked))
+    target_final_rank = _rank_in_tool_order(tools, final_ranked, target_tool)
+    lexical_top3_hit = bool(target_lexical_rank is not None and target_lexical_rank <= top_k)
+    stable_candidate_hit = bool(target_tool and stable_candidate_name == target_tool)
+    final_recovery_hit = bool(lexical_top3_hit or stable_candidate_hit)
+    lexical_recall = {
+        f"lexical_hit_at_{k}": bool(target_lexical_rank is not None and target_lexical_rank <= k)
+        for k in (1, 3, 5, 10, 20)
+    }
+
+    if args.router_hit_filter == "hit" and not final_recovery_hit:
+        return {
+            "qid": example.qid,
+            "session_id": example.session_id,
+            "mode": "hybrid",
+            "hybrid_mode": getattr(args, "hybrid_mode", "hybrid"),
+            "router_strategy": args.router_strategy,
+            "top_k": top_k,
+            "ratio": ratio,
+            "skipped": True,
+            "skip_reason": "router_miss_filtered",
+            "num_tools": len(tools),
+            "top_tool_names": top_tool_names,
+            "target_tool_name": target_tool,
+            "router_hit": final_recovery_hit,
+        }
+    if args.router_hit_filter == "miss" and final_recovery_hit:
+        return {
+            "qid": example.qid,
+            "session_id": example.session_id,
+            "mode": "hybrid",
+            "hybrid_mode": getattr(args, "hybrid_mode", "hybrid"),
+            "router_strategy": args.router_strategy,
+            "top_k": top_k,
+            "ratio": ratio,
+            "skipped": True,
+            "skip_reason": "router_hit_filtered",
+            "num_tools": len(tools),
+            "top_tool_names": top_tool_names,
+            "target_tool_name": target_tool,
+            "router_hit": final_recovery_hit,
+        }
+
+    system_ids = _chat_template_ids(
+        tokenizer,
+        [{"role": "system", "content": example.system_prompt}],
+        keep_bos=True,
+        max_length=args.max_system_length,
+    )
+    system_input_ids = torch.tensor([system_ids], dtype=torch.long, device=model.device)
+    prefix_cache, system_length, system_prefill_sec = _prefill_system(
+        model, system_input_ids, args.system_attn_impl
+    )
+    logical_length = system_length
+    full_tool_tokens = 0
+    full_schema_tool_tokens = 0
+    stable_summary_full_tokens = 0
+    c2kv2_doc_tokens = 0
+    c2kv2_gist_tokens = 0
+    c2kv4_doc_tokens = 0
+    c2kv4_gist_tokens = 0
+    c2kv_doc_chunks = 0
+    full_prefill_sec = 0.0
+    c2kv2_compress_sec = 0.0
+    c2kv4_compress_sec = 0.0
+    c2kv2_ratios: List[float] = []
+    c2kv4_ratios: List[float] = []
+    has_c2kv_segment = False
+    tool_precision_by_index: List[Dict[str, Any]] = []
+
+    for index, tool in enumerate(tools):
+        if index in lexical_top_indices or (
+            args.router_strategy == "lex_top3_plus_stable1_full" and index in stable_set
+        ):
+            prefix_cache, length, elapsed = _append_full_tool_segment(
+                model,
+                tokenizer,
+                prefix_cache,
+                logical_length,
+                tool,
+                args,
+                use_gist=has_c2kv_segment,
+                label=f"Tool definition {index}",
+            )
+            logical_length += length
+            full_tool_tokens += length
+            full_schema_tool_tokens += length
+            full_prefill_sec += elapsed
+            precision = "full"
+        elif args.router_strategy == "lex_top3_plus_stable1_name_desc_full" and index in stable_set:
+            prefix_cache, summary_length, elapsed = _append_full_summary_segment(
+                model, tokenizer, prefix_cache, logical_length, tool, index, args, use_gist=has_c2kv_segment
+            )
+            logical_length += summary_length
+            stable_summary_full_tokens += summary_length
+            full_tool_tokens += summary_length
+            full_prefill_sec += elapsed
+            (
+                prefix_cache,
+                original_length,
+                doc_tokens,
+                doc_chunks,
+                gist_tokens,
+                actual_ratio,
+                elapsed,
+                skip_reason,
+            ) = _append_c2kv_tool_segment(
+                model, tokenizer, prefix_cache, logical_length, tool, args, ratio=ratio
+            )
+            if skip_reason is not None:
+                return {
+                    "qid": example.qid,
+                    "session_id": example.session_id,
+                    "mode": "hybrid",
+                    "hybrid_mode": getattr(args, "hybrid_mode", "hybrid"),
+                    "router_strategy": args.router_strategy,
+                    "top_k": top_k,
+                    "ratio": ratio,
+                    "skipped": True,
+                    "skip_reason": "tool_" + str(skip_reason),
+                    "num_tools": len(tools),
+                    "tool_index": index,
+                }
+            logical_length += original_length
+            c2kv4_doc_tokens += doc_tokens
+            c2kv4_gist_tokens += gist_tokens
+            c2kv_doc_chunks += doc_chunks
+            c2kv4_compress_sec += elapsed
+            c2kv4_ratios.append(actual_ratio)
+            has_c2kv_segment = True
+            precision = "summary_full+c2kv4"
+        else:
+            segment_ratio = 2 if (
+                args.router_strategy == "lex_top3_plus_stable1_c2kv2" and index in stable_set
+            ) else ratio
+            (
+                prefix_cache,
+                original_length,
+                doc_tokens,
+                doc_chunks,
+                gist_tokens,
+                actual_ratio,
+                elapsed,
+                skip_reason,
+            ) = _append_c2kv_tool_segment(
+                model, tokenizer, prefix_cache, logical_length, tool, args, ratio=segment_ratio
+            )
+            if skip_reason is not None:
+                return {
+                    "qid": example.qid,
+                    "session_id": example.session_id,
+                    "mode": "hybrid",
+                    "hybrid_mode": getattr(args, "hybrid_mode", "hybrid"),
+                    "router_strategy": args.router_strategy,
+                    "top_k": top_k,
+                    "ratio": ratio,
+                    "skipped": True,
+                    "skip_reason": "tool_" + str(skip_reason),
+                    "num_tools": len(tools),
+                    "tool_index": index,
+                }
+            logical_length += original_length
+            c2kv_doc_chunks += doc_chunks
+            has_c2kv_segment = True
+            if segment_ratio == 2:
+                c2kv2_doc_tokens += doc_tokens
+                c2kv2_gist_tokens += gist_tokens
+                c2kv2_compress_sec += elapsed
+                c2kv2_ratios.append(actual_ratio)
+                precision = "c2kv2"
+            else:
+                c2kv4_doc_tokens += doc_tokens
+                c2kv4_gist_tokens += gist_tokens
+                c2kv4_compress_sec += elapsed
+                c2kv4_ratios.append(actual_ratio)
+                precision = "c2kv4"
+        tool_precision_by_index.append({
+            "index": index,
+            "name": _tool_name(tool),
+            "precision": precision,
+        })
+
+    prompt_ids = _chat_template_ids(tokenizer, example.input_messages, add_generation_prompt=True)
+    if args.max_prompt_tokens and len(prompt_ids) > args.max_prompt_tokens:
+        prompt_ids = prompt_ids[-args.max_prompt_tokens :]
+    prompt_input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=model.device)
+    cache_length = prefix_cache.get_seq_length()
+    mock_cache_ids = prompt_input_ids.new_zeros((1, cache_length))
+    input_ids = torch.cat([mock_cache_ids, prompt_input_ids], dim=1)
+    position_ids = torch.arange(
+        logical_length,
+        logical_length + prompt_input_ids.shape[1],
+        dtype=torch.long,
+        device=model.device,
+    ).unsqueeze(0)
+    prediction, generate_sec, generated_tokens, tbt_sec = _generate_from_input_ids(
+        model,
+        tokenizer,
+        input_ids=input_ids,
+        max_new_tokens=args.max_new_tokens,
+        attn_impl=args.generate_attn_impl,
+        use_gist=has_c2kv_segment,
+        position_ids=position_ids,
+        past_key_values=prefix_cache,
+    )
+    pred_tool = _extract_tool_name(prediction)
+    prediction_has_tool_call = "<tool_call>" in prediction or "Action:" in prediction
+    target_has_tool_call = bool(target_tool) or "<tool_call>" in target or "Action:" in target
+    combined_full_doc_tokens = len(_chat_template_ids(
+        tokenizer,
+        [{"role": "user", "content": "Tool definitions:\n" + example.tool_definition}],
+    ))
+    tool_original_tokens = full_schema_tool_tokens + c2kv2_doc_tokens + c2kv4_doc_tokens
+    compressed_tool_tokens = full_tool_tokens + c2kv2_gist_tokens + c2kv4_gist_tokens
+    hybrid_ratio = tool_original_tokens / compressed_tool_tokens if compressed_tool_tokens else 0.0
+    online_ttft_sec = system_prefill_sec + full_prefill_sec + c2kv2_compress_sec + c2kv4_compress_sec
+    cached_ttft_sec = system_prefill_sec + full_prefill_sec
+    total_sec = time.perf_counter() - total_start
+    top_definition = _render_tool_definition([
+        tools[index] for index in range(len(tools)) if index in recovered_indices
+    ])
+    rest_definition = _render_tool_definition([
+        tools[index] for index in range(len(tools)) if index not in recovered_indices
+    ])
+    full_tool_names = [
+        item["name"] for item in tool_precision_by_index
+        if item["precision"] == "full"
+    ]
+    c2kv2_tool_names = [
+        item["name"] for item in tool_precision_by_index
+        if item["precision"] == "c2kv2"
+    ]
+    c2kv4_tool_names = [
+        item["name"] for item in tool_precision_by_index
+        if item["precision"] in {"c2kv4", "summary_full+c2kv4"}
+    ]
+    row = {
+        "qid": example.qid,
+        "session_id": example.session_id,
+        "mode": "hybrid",
+        "hybrid_mode": getattr(args, "hybrid_mode", "hybrid"),
+        "router_strategy": args.router_strategy,
+        "top_schema_mode": getattr(args, "top_schema_mode", "full"),
+        "top_k": top_k,
+        "ratio": ratio,
+        "skipped": False,
+        "num_tools": len(tools),
+        "num_top_tools": len(recovered_indices),
+        "num_rest_tools": len(tools) - len(recovered_indices),
+        "top_tool_names": top_tool_names,
+        "lexical_top3_tool_names": lexical_top3_tool_names,
+        "stable_candidate_tool_name": stable_candidate_name,
+        "stable_candidate_lexical_rank": stable_candidate_lexical_rank,
+        "full_tool_names": full_tool_names,
+        "c2kv2_tool_names": c2kv2_tool_names,
+        "c2kv4_tool_names": c2kv4_tool_names,
+        "lexical_top3_hit": lexical_top3_hit,
+        "stable_candidate_hit": stable_candidate_hit,
+        "final_recovery_hit": final_recovery_hit,
+        "promotion_gain": bool((not lexical_top3_hit) and stable_candidate_hit),
+        "demotion_loss": False,
+        "lexical_hit_at_topk": lexical_top3_hit,
+        "final_hit_at_topk": final_recovery_hit,
+        **lexical_recall,
+        "target_lexical_rank": target_lexical_rank,
+        "target_attention_rank": target_attention_rank,
+        "target_final_rank": target_final_rank,
+        "router_scope": args.router_scope,
+        "router_hit": final_recovery_hit,
+        "attention_score_mode": args.attention_router_score_mode,
+        "attention_cache_mode": args.attention_router_cache_mode,
+        "attention_router_sec": round(attention_router_sec, 4),
+        "attention_lexical_pool": args.attention_router_lexical_pool,
+        "vote_debug": vote_debug,
+        "tool_precision_by_index": tool_precision_by_index,
+        "doc_tokens": tool_original_tokens,
+        "combined_full_doc_tokens": combined_full_doc_tokens,
+        "tool_original_tokens": tool_original_tokens,
+        "top_doc_tokens": full_tool_tokens,
+        "rest_doc_tokens": c2kv2_doc_tokens + c2kv4_doc_tokens,
+        "rest_doc_chunks": c2kv_doc_chunks,
+        "rest_gist_tokens": c2kv2_gist_tokens + c2kv4_gist_tokens,
+        "full_tool_tokens": full_tool_tokens,
+        "full_schema_tool_tokens": full_schema_tool_tokens,
+        "stable_summary_full_tokens": stable_summary_full_tokens,
+        "c2kv2_doc_tokens": c2kv2_doc_tokens,
+        "c2kv2_gist_tokens": c2kv2_gist_tokens,
+        "c2kv4_doc_tokens": c2kv4_doc_tokens,
+        "c2kv4_gist_tokens": c2kv4_gist_tokens,
+        "compressed_tool_tokens": compressed_tool_tokens,
+        "tool_kv_tokens": compressed_tool_tokens,
+        "prefix_kv_length": cache_length,
+        "final_kv_length": cache_length + len(prompt_ids),
+        "actual_compression_ratio": round(hybrid_ratio, 4),
+        "combined_full_doc_actual_compression_ratio": (
+            round(combined_full_doc_tokens / compressed_tool_tokens, 4)
+            if compressed_tool_tokens else 0.0
+        ),
+        "c2kv2_actual_compression_ratio": (
+            round(sum(c2kv2_ratios) / len(c2kv2_ratios), 4) if c2kv2_ratios else 0.0
+        ),
+        "c2kv4_actual_compression_ratio": (
+            round(sum(c2kv4_ratios) / len(c2kv4_ratios), 4) if c2kv4_ratios else 0.0
+        ),
+        "rest_actual_compression_ratio": (
+            round((c2kv2_doc_tokens + c2kv4_doc_tokens) / (c2kv2_gist_tokens + c2kv4_gist_tokens), 4)
+            if (c2kv2_gist_tokens + c2kv4_gist_tokens) else 0.0
+        ),
+        "prompt_tokens": len(prompt_ids),
+        "target_tokens": len(tokenizer.encode(target, add_special_tokens=False)),
+        "generated_tokens": generated_tokens,
+        "latency_sec": round(generate_sec, 4),
+        "system_prefill_sec": round(system_prefill_sec, 4),
+        "top_full_prefill_sec": round(full_prefill_sec, 4),
+        "tool_compress_sec": round(c2kv2_compress_sec + c2kv4_compress_sec, 4),
+        "c2kv2_compress_sec": round(c2kv2_compress_sec, 4),
+        "c2kv4_compress_sec": round(c2kv4_compress_sec, 4),
+        "full_prefill_sec": round(full_prefill_sec, 4),
+        "blend_sec": 0.0,
+        "generate_sec": round(generate_sec, 4),
+        "ttft_sec": round(online_ttft_sec, 4),
+        "online_ttft_sec": round(online_ttft_sec, 4),
+        "cached_ttft_sec": round(cached_ttft_sec, 4),
+        "tool_only_cached_ttft_sec": round(full_prefill_sec, 4),
+        "tbt_sec": round(tbt_sec, 6),
+        "total_sec": round(total_sec, 4),
+        "cached_total_sec": round(cached_ttft_sec + generate_sec, 4),
+        "target_tool_name": target_tool,
+        "prediction_tool_name": pred_tool,
+        "tool_name_match": target_tool is not None and target_tool == pred_tool,
+        "has_tool_call": prediction_has_tool_call,
+        "target_has_tool_call": target_has_tool_call,
+        "response_type_match": target_has_tool_call == prediction_has_tool_call,
+        "exact_match": _normalize_text(prediction) == _normalize_text(target),
+        "text_token_f1": round(_text_token_f1(target, prediction), 4),
+        "rouge_l_f1": round(_rouge_l_f1(target, prediction), 4),
+        "prediction": prediction,
+        "target": target,
+    }
+    return _add_hybrid_debug_fields(
+        row,
+        args,
+        full_definition=example.tool_definition,
+        top_definition=top_definition,
+        rest_definition=rest_definition,
+        numerator_tokens=tool_original_tokens,
+        denominator_tokens=compressed_tool_tokens,
+        top_tokens=full_tool_tokens,
+        rest_original_tokens=c2kv2_doc_tokens + c2kv4_doc_tokens,
+        rest_compressed_tokens=c2kv2_gist_tokens + c2kv4_gist_tokens,
+    )
+
+
 def _parse_cases(cases: str) -> List[tuple[int, int]]:
     parsed = []
     for item in cases.split(","):
@@ -687,6 +1655,9 @@ def _generate_one_hybrid(
     top_k: int,
     ratio: int,
 ) -> Dict[str, Any]:
+    if args.router_strategy in STABLE_PLUS_STRATEGIES:
+        return _generate_one_stable_plus_hybrid(model, tokenizer, example, args, top_k, ratio)
+
     total_start = time.perf_counter()
     hybrid_mode = getattr(args, "hybrid_mode", "hybrid")
     top_schema_mode = getattr(args, "top_schema_mode", "full")
@@ -712,6 +1683,7 @@ def _generate_one_hybrid(
     attention_ranked: Optional[List[int]] = None
     final_ranked: Optional[List[int]] = None
     att_rerank_debug: Optional[Dict[str, Any]] = None
+    vote_debug: Optional[Dict[str, Any]] = None
     attention_router_sec = 0.0
     attention_tool_scores: Optional[List[float]] = None
     if args.router_strategy == "random":
@@ -767,6 +1739,36 @@ def _generate_one_hybrid(
             args.att_rerank_min_score_gain,
         )
         top_tools, rest_tools, top_tool_names = _split_ranked_tools(tools, final_ranked, top_k)
+    elif args.router_strategy in {"vote_all", "stable_vote", "conservative_vote"}:
+        attention_ranked, attention_tool_scores, attention_router_sec, head_rankings = _rank_tools_by_attention(
+            model,
+            tokenizer,
+            example,
+            args,
+            tools,
+            ratio,
+        )
+        voted_ranked, vote_debug = _rank_lexical_pool_by_head_rrf(
+            lexical_ranked,
+            head_rankings,
+            top_k=top_k,
+            pool_size=args.attention_router_lexical_pool,
+            rrf_k=args.attention_rrf_k,
+            stable=args.router_strategy in {"stable_vote", "conservative_vote"},
+            stable_heads=_parse_stable_heads(args.attention_stable_heads),
+            stable_head_count=args.attention_stable_head_count,
+        )
+        if args.router_strategy == "conservative_vote":
+            final_ranked, conservative_debug = _conservative_vote_replacement(
+                lexical_ranked,
+                voted_ranked,
+                top_k,
+            )
+            vote_debug["conservative_replacement"] = conservative_debug
+            att_rerank_debug = conservative_debug
+        else:
+            final_ranked = voted_ranked
+        top_tools, rest_tools, top_tool_names = _split_ranked_tools(tools, final_ranked, top_k)
     else:
         final_ranked = lexical_ranked
         top_tools, rest_tools, top_tool_names = _split_ranked_tools(tools, final_ranked, top_k)
@@ -776,6 +1778,13 @@ def _generate_one_hybrid(
     target_lexical_rank = _rank_in_tool_order(tools, lexical_ranked, target_tool)
     target_attention_rank = _rank_in_tool_order(tools, attention_ranked or [], target_tool)
     target_final_rank = _rank_in_tool_order(tools, final_ranked or [], target_tool)
+    lexical_hit_at_topk = target_lexical_rank is not None and target_lexical_rank <= top_k
+    lexical_recall = {
+        f"lexical_hit_at_{k}": bool(target_lexical_rank is not None and target_lexical_rank <= k)
+        for k in (1, 3, 5, 10, 20)
+    }
+    promotion_gain = bool((not lexical_hit_at_topk) and router_hit)
+    demotion_loss = bool(lexical_hit_at_topk and not router_hit)
     if args.router_hit_filter == "hit" and not router_hit:
         return {
             "qid": example.qid,
@@ -865,6 +1874,7 @@ def _generate_one_hybrid(
             max_doc_num=args.max_doc_num,
             max_tool_definition_tokens=args.max_tool_definition_tokens,
             truncate_tool_definition=args.truncate_tool_definition,
+            document_mode=args.tool_document_eval_mode,
         )
         if context_input_ids is None:
             return {
@@ -928,6 +1938,8 @@ def _generate_one_hybrid(
         past_key_values=prefix_cache,
     )
     pred_tool = _extract_tool_name(prediction)
+    prediction_has_tool_call = "<tool_call>" in prediction or "Action:" in prediction
+    target_has_tool_call = bool(target_tool) or "<tool_call>" in target or "Action:" in target
     full_doc_tokens = len(
         _chat_template_ids(
             tokenizer,
@@ -971,16 +1983,35 @@ def _generate_one_hybrid(
         ),
         "attention_score_mode": (
             args.attention_router_score_mode
-            if args.router_strategy in {"attention", "lex_attention", "att_rerank"} else None
+            if args.router_strategy in {
+                "attention",
+                "lex_attention",
+                "att_rerank",
+                "vote_all",
+                "stable_vote",
+                "conservative_vote",
+            } else None
         ),
         "attention_cache_mode": (
             args.attention_router_cache_mode
-            if args.router_strategy in {"attention", "lex_attention", "att_rerank"} else None
+            if args.router_strategy in {
+                "attention",
+                "lex_attention",
+                "att_rerank",
+                "vote_all",
+                "stable_vote",
+                "conservative_vote",
+            } else None
         ),
         "attention_router_sec": round(attention_router_sec, 4),
         "attention_lexical_pool": (
             args.attention_router_lexical_pool
-            if args.router_strategy == "lex_attention" else None
+            if args.router_strategy in {
+                "lex_attention",
+                "vote_all",
+                "stable_vote",
+                "conservative_vote",
+            } else None
         ),
         "att_rerank_pool": (
             args.att_rerank_pool if args.router_strategy == "att_rerank" else None
@@ -996,9 +2027,15 @@ def _generate_one_hybrid(
         ),
         "att_rerank_replaced": (
             bool(att_rerank_debug and att_rerank_debug.get("accepted"))
-            if args.router_strategy == "att_rerank" else None
+            if args.router_strategy in {"att_rerank", "conservative_vote"} else None
         ),
         "att_rerank_debug": att_rerank_debug,
+        "vote_debug": vote_debug,
+        "promotion_gain": promotion_gain,
+        "demotion_loss": demotion_loss,
+        "lexical_hit_at_topk": lexical_hit_at_topk,
+        "final_hit_at_topk": router_hit,
+        **lexical_recall,
         "target_lexical_rank": target_lexical_rank,
         "target_attention_rank": target_attention_rank,
         "target_final_rank": target_final_rank,
@@ -1032,8 +2069,12 @@ def _generate_one_hybrid(
         "target_tool_name": target_tool,
         "prediction_tool_name": pred_tool,
         "tool_name_match": target_tool is not None and target_tool == pred_tool,
-        "has_tool_call": "<tool_call>" in prediction or "Action:" in prediction,
+        "has_tool_call": prediction_has_tool_call,
+        "target_has_tool_call": target_has_tool_call,
+        "response_type_match": target_has_tool_call == prediction_has_tool_call,
         "exact_match": _normalize_text(prediction) == _normalize_text(target),
+        "text_token_f1": round(_text_token_f1(target, prediction), 4),
+        "rouge_l_f1": round(_rouge_l_f1(target, prediction), 4),
         "prediction": prediction,
         "target": target,
     }
@@ -1077,6 +2118,13 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         total_generated = sum(row.get("generated_tokens", 0) for row in valid_rows)
         compressed_tool_total = sum(_row_compressed_tool_tokens(row) for row in valid_rows)
         no_rest_rows = [row for row in valid_rows if row.get("num_rest_tools") == 0]
+        router_hit_rows = [row for row in valid_rows if row.get("router_hit")]
+        lexical_hit_rows = [row for row in valid_rows if row.get("lexical_top3_hit")]
+        attention_promotion_rows = [
+            row for row in valid_rows
+            if not row.get("lexical_top3_hit") and row.get("stable_candidate_hit")
+        ]
+        final_miss_rows = [row for row in valid_rows if row.get("final_recovery_hit") is False]
         summaries.append({
             "mode": "hybrid",
             "hybrid_mode": hybrid_mode,
@@ -1092,8 +2140,79 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 sum(1 for row in valid_rows if row.get("router_hit")) / len(valid_rows)
                 if valid_rows else 0.0
             ),
+            "lexical_recall_at_1": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_1")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_1" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_3": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_3")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_3" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_5": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_5")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_5" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_10": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_10")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_10" in row for row in valid_rows) else 0.0
+            ),
+            "lexical_recall_at_20": (
+                sum(1 for row in valid_rows if row.get("lexical_hit_at_20")) / len(valid_rows)
+                if valid_rows and any("lexical_hit_at_20" in row for row in valid_rows) else 0.0
+            ),
+            "promotion_gain_count": sum(1 for row in valid_rows if row.get("promotion_gain")),
+            "demotion_loss_count": sum(1 for row in valid_rows if row.get("demotion_loss")),
+            "delta_hit_at_3": (
+                (
+                    sum(1 for row in valid_rows if row.get("promotion_gain"))
+                    - sum(1 for row in valid_rows if row.get("demotion_loss"))
+                ) / len(valid_rows)
+                if valid_rows and any("promotion_gain" in row for row in valid_rows) else 0.0
+            ),
+            "hit_utilization": (
+                sum(1 for row in router_hit_rows if row.get("tool_name_match")) / len(router_hit_rows)
+                if router_hit_rows else 0.0
+            ),
+            "lexical_hit_utilization": (
+                sum(1 for row in lexical_hit_rows if row.get("tool_name_match")) / len(lexical_hit_rows)
+                if lexical_hit_rows else 0.0
+            ),
+            "attention_promotion_utilization": (
+                sum(1 for row in attention_promotion_rows if row.get("tool_name_match")) / len(attention_promotion_rows)
+                if attention_promotion_rows else 0.0
+            ),
+            "miss_recovery_rate": (
+                sum(1 for row in final_miss_rows if row.get("tool_name_match")) / len(final_miss_rows)
+                if final_miss_rows else 0.0
+            ),
+            "stable_candidate_hit_rate": (
+                sum(1 for row in valid_rows if row.get("stable_candidate_hit")) / len(valid_rows)
+                if valid_rows and any("stable_candidate_hit" in row for row in valid_rows) else 0.0
+            ),
+            "avg_stable_candidate_lexical_rank": (
+                sum(float(row.get("stable_candidate_lexical_rank")) for row in valid_rows if row.get("stable_candidate_lexical_rank") is not None)
+                / sum(1 for row in valid_rows if row.get("stable_candidate_lexical_rank") is not None)
+                if valid_rows and any(row.get("stable_candidate_lexical_rank") is not None for row in valid_rows) else 0.0
+            ),
+            "recovery_group_results": {
+                "lexical_top3_hit": _basic_metric_summary(lexical_hit_rows),
+                "stable_candidate_promotion": _basic_metric_summary(attention_promotion_rows),
+                "final_recovery_miss": _basic_metric_summary(final_miss_rows),
+            },
             "exact_match": (
                 sum(1 for row in valid_rows if row.get("exact_match")) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_text_token_f1": (
+                sum(_row_text_token_f1(row) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_rouge_l_f1": (
+                sum(_row_rouge_l_f1(row) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "response_type_accuracy": (
+                sum(1 for row in valid_rows if _row_response_type_match(row)) / len(valid_rows)
                 if valid_rows else 0.0
             ),
             "tool_name_accuracy": (
@@ -1121,16 +2240,64 @@ def _summarize_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 sum(row.get("rest_doc_tokens", 0) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
             ),
+            "avg_full_tool_tokens": (
+                sum(row.get("full_tool_tokens", row.get("top_doc_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_full_schema_tool_tokens": (
+                sum(row.get("full_schema_tool_tokens", row.get("full_tool_tokens", row.get("top_doc_tokens", 0))) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_stable_summary_full_tokens": (
+                sum(row.get("stable_summary_full_tokens", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_tool_original_tokens": (
+                sum(_row_tool_original_tokens(row) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_tool_kv_tokens": (
+                sum(row.get("tool_kv_tokens", _row_compressed_tool_tokens(row)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_combined_full_doc_tokens": (
+                sum(row.get("combined_full_doc_tokens", row.get("doc_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("combined_full_doc_tokens" in row for row in valid_rows) else 0.0
+            ),
+            "avg_combined_full_doc_actual_compression_ratio": (
+                sum(row.get("combined_full_doc_actual_compression_ratio", 0.0) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("combined_full_doc_actual_compression_ratio" in row for row in valid_rows) else 0.0
+            ),
+            "avg_c2kv2_doc_tokens": (
+                sum(row.get("c2kv2_doc_tokens", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_c2kv2_gist_tokens": (
+                sum(row.get("c2kv2_gist_tokens", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_c2kv4_doc_tokens": (
+                sum(row.get("c2kv4_doc_tokens", row.get("rest_doc_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_c2kv4_gist_tokens": (
+                sum(row.get("c2kv4_gist_tokens", row.get("rest_gist_tokens", 0)) for row in valid_rows) / len(valid_rows)
+                if valid_rows else 0.0
+            ),
+            "avg_final_kv_length": (
+                sum(row.get("final_kv_length", 0) for row in valid_rows) / len(valid_rows)
+                if valid_rows and any("final_kv_length" in row for row in valid_rows) else 0.0
+            ),
             "num_no_rest_tools": len(no_rest_rows),
             "no_rest_tool_rate": (
                 len(no_rest_rows) / len(valid_rows) if valid_rows else 0.0
             ),
             "avg_actual_compression_ratio": (
-                sum(row.get("actual_compression_ratio", 0.0) for row in valid_rows) / len(valid_rows)
+                sum(_row_actual_compression_ratio(row) for row in valid_rows) / len(valid_rows)
                 if valid_rows else 0.0
             ),
             "token_weighted_actual_compression_ratio": (
-                sum(row.get("doc_tokens", 0) for row in valid_rows) / compressed_tool_total
+                sum(_row_tool_original_tokens(row) for row in valid_rows) / compressed_tool_total
                 if compressed_tool_total else 0.0
             ),
             "avg_online_ttft_sec": (
@@ -1226,6 +2393,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
                 max_doc_num=args.max_doc_num,
                 max_tool_definition_tokens=args.max_tool_definition_tokens,
                 truncate_tool_definition=args.truncate_tool_definition,
+                document_mode=args.tool_document_eval_mode,
             )
             if skip_reason is not None:
                 selection_skips[skip_reason] += 1
@@ -1258,6 +2426,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         "model": args.model,
         "dataset_path": args.dataset_path,
         "split": args.split,
+        "tool_document_eval_mode": args.tool_document_eval_mode,
         "router_scope": args.router_scope,
         "router_strategy": args.router_strategy,
         "hybrid_mode": args.hybrid_mode,
@@ -1292,7 +2461,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--router_scope", choices=["last_user", "all"], default="last_user")
     parser.add_argument(
         "--router_strategy",
-        choices=["lexical", "random", "attention", "lex_attention", "att_rerank"],
+        choices=[
+            "lexical",
+            "random",
+            "attention",
+            "lex_attention",
+            "att_rerank",
+            "vote_all",
+            "stable_vote",
+            "conservative_vote",
+            "lex_top3_original_order",
+            "lex_top3_plus_stable1_full",
+            "lex_top3_plus_stable1_c2kv2",
+            "lex_top3_plus_stable1_name_desc_full",
+        ],
         default="lexical",
     )
     parser.add_argument("--top_schema_mode", choices=["full", "compact"], default="full")
@@ -1303,9 +2485,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attention_router_max_query_tokens", type=int, default=512)
     parser.add_argument(
         "--attention_router_score_mode",
-        choices=["mean", "sqrt_len", "sum"],
+        choices=["mean", "sqrt_len", "sum", "top4_mean"],
         default="mean",
         help="How to aggregate query attention over each tool's KV span.",
+    )
+    parser.add_argument(
+        "--attention_router_span_top_tokens",
+        type=int,
+        default=4,
+        help="For top4_mean scoring, average this many highest query-to-tool-span attention entries.",
     )
     parser.add_argument(
         "--attention_router_cache_mode",
@@ -1323,6 +2511,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--att_rerank_min_heads", type=int, default=3)
     parser.add_argument("--att_rerank_min_margin", type=float, default=0.0)
     parser.add_argument("--att_rerank_min_score_gain", type=float, default=0.0)
+    parser.add_argument("--attention_rrf_k", type=float, default=60.0)
+    parser.add_argument(
+        "--attention_stable_heads",
+        default="",
+        help="Comma-separated layer:head list for stable-vote routing. Defaults to the smoke-test top-16 heads.",
+    )
+    parser.add_argument("--attention_stable_head_count", type=int, default=16)
     parser.add_argument(
         "--debug_hybrid_tokens",
         action="store_true",
@@ -1337,6 +2532,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_examples", type=int, default=50, help="Maximum examples; <=0 means all selected examples.")
     parser.add_argument("--max_source_examples", type=int)
     parser.add_argument("--selection_filter", choices=["c2kv", "none"], default="c2kv")
+    parser.add_argument(
+        "--tool_document_eval_mode",
+        choices=["full", "per_tool"],
+        default="full",
+        help=(
+            "How to build C2KV eval documents from tool schemas. full keeps one "
+            "combined tool-definition document; per_tool makes each tool schema an "
+            "independent C2KV document."
+        ),
+    )
     parser.add_argument("--min_num_tools", type=int, default=0)
     parser.add_argument("--eval_ratio", type=float, default=0.1)
     parser.add_argument("--split_seed", type=int, default=42)

@@ -19,6 +19,7 @@ MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-0}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 MAX_SOURCE_EXAMPLES="${MAX_SOURCE_EXAMPLES:-}"
 SELECTION_FILTER="${SELECTION_FILTER:-c2kv}"
+TOOL_DOCUMENT_EVAL_MODE="${TOOL_DOCUMENT_EVAL_MODE:-full}"
 MIN_NUM_TOOLS="${MIN_NUM_TOOLS:-0}"
 EVAL_RATIO="${EVAL_RATIO:-0.1}"
 SPLIT_SEED="${SPLIT_SEED:-42}"
@@ -35,12 +36,16 @@ ATTENTION_ROUTER_LAYERS="${ATTENTION_ROUTER_LAYERS:-4}"
 ATTENTION_ROUTER_ATTN_IMPL="${ATTENTION_ROUTER_ATTN_IMPL:-eager}"
 ATTENTION_ROUTER_MAX_QUERY_TOKENS="${ATTENTION_ROUTER_MAX_QUERY_TOKENS:-512}"
 ATTENTION_ROUTER_SCORE_MODE="${ATTENTION_ROUTER_SCORE_MODE:-mean}"
+ATTENTION_ROUTER_SPAN_TOP_TOKENS="${ATTENTION_ROUTER_SPAN_TOP_TOKENS:-4}"
 ATTENTION_ROUTER_CACHE_MODE="${ATTENTION_ROUTER_CACHE_MODE:-c2kv}"
 ATTENTION_ROUTER_LEXICAL_POOL="${ATTENTION_ROUTER_LEXICAL_POOL:-10}"
 ATT_RERANK_POOL="${ATT_RERANK_POOL:-10}"
 ATT_RERANK_MIN_HEADS="${ATT_RERANK_MIN_HEADS:-3}"
 ATT_RERANK_MIN_MARGIN="${ATT_RERANK_MIN_MARGIN:-0.0}"
 ATT_RERANK_MIN_SCORE_GAIN="${ATT_RERANK_MIN_SCORE_GAIN:-0.0}"
+ATTENTION_RRF_K="${ATTENTION_RRF_K:-60.0}"
+ATTENTION_STABLE_HEADS="${ATTENTION_STABLE_HEADS:-}"
+ATTENTION_STABLE_HEAD_COUNT="${ATTENTION_STABLE_HEAD_COUNT:-16}"
 NPU_ATTN_IMPL="${NPU_ATTN_IMPL:-eager}"
 PARALLEL_EVAL="${PARALLEL_EVAL:-True}"
 DEBUG_HYBRID_TOKENS="${DEBUG_HYBRID_TOKENS:-False}"
@@ -65,6 +70,7 @@ echo "SPLIT=${SPLIT}"
 echo "MAX_EXAMPLES=${MAX_EXAMPLES}"
 echo "MAX_SOURCE_EXAMPLES=${MAX_SOURCE_EXAMPLES}"
 echo "SELECTION_FILTER=${SELECTION_FILTER}"
+echo "TOOL_DOCUMENT_EVAL_MODE=${TOOL_DOCUMENT_EVAL_MODE}"
 echo "MIN_NUM_TOOLS=${MIN_NUM_TOOLS}"
 echo "HYBRID_CASES=${HYBRID_CASES}"
 echo "HYBRID_MODES=${HYBRID_MODES}"
@@ -76,12 +82,16 @@ echo "ATTENTION_ROUTER_LAYERS=${ATTENTION_ROUTER_LAYERS}"
 echo "ATTENTION_ROUTER_ATTN_IMPL=${ATTENTION_ROUTER_ATTN_IMPL}"
 echo "ATTENTION_ROUTER_MAX_QUERY_TOKENS=${ATTENTION_ROUTER_MAX_QUERY_TOKENS}"
 echo "ATTENTION_ROUTER_SCORE_MODE=${ATTENTION_ROUTER_SCORE_MODE}"
+echo "ATTENTION_ROUTER_SPAN_TOP_TOKENS=${ATTENTION_ROUTER_SPAN_TOP_TOKENS}"
 echo "ATTENTION_ROUTER_CACHE_MODE=${ATTENTION_ROUTER_CACHE_MODE}"
 echo "ATTENTION_ROUTER_LEXICAL_POOL=${ATTENTION_ROUTER_LEXICAL_POOL}"
 echo "ATT_RERANK_POOL=${ATT_RERANK_POOL}"
 echo "ATT_RERANK_MIN_HEADS=${ATT_RERANK_MIN_HEADS}"
 echo "ATT_RERANK_MIN_MARGIN=${ATT_RERANK_MIN_MARGIN}"
 echo "ATT_RERANK_MIN_SCORE_GAIN=${ATT_RERANK_MIN_SCORE_GAIN}"
+echo "ATTENTION_RRF_K=${ATTENTION_RRF_K}"
+echo "ATTENTION_STABLE_HEADS=${ATTENTION_STABLE_HEADS}"
+echo "ATTENTION_STABLE_HEAD_COUNT=${ATTENTION_STABLE_HEAD_COUNT}"
 echo "MAX_PROMPT_TOKENS=${MAX_PROMPT_TOKENS}"
 echo "DEBUG_HYBRID_TOKENS=${DEBUG_HYBRID_TOKENS}"
 echo "DUMP_HYBRID_DEFINITIONS=${DUMP_HYBRID_DEFINITIONS}"
@@ -112,6 +122,7 @@ if [[ "${PARALLEL_EVAL}" != "True" && "${PARALLEL_EVAL}" != "true" && "${PARALLE
     --max_examples "${MAX_EXAMPLES}" \
     "${SOURCE_ARGS[@]}" \
     --selection_filter "${SELECTION_FILTER}" \
+    --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
     --min_num_tools "${MIN_NUM_TOOLS}" \
     --eval_ratio "${EVAL_RATIO}" \
     --split_seed "${SPLIT_SEED}" \
@@ -131,12 +142,16 @@ if [[ "${PARALLEL_EVAL}" != "True" && "${PARALLEL_EVAL}" != "true" && "${PARALLE
     --attention_router_attn_impl "${ATTENTION_ROUTER_ATTN_IMPL}" \
     --attention_router_max_query_tokens "${ATTENTION_ROUTER_MAX_QUERY_TOKENS}" \
     --attention_router_score_mode "${ATTENTION_ROUTER_SCORE_MODE}" \
+    --attention_router_span_top_tokens "${ATTENTION_ROUTER_SPAN_TOP_TOKENS}" \
     --attention_router_cache_mode "${ATTENTION_ROUTER_CACHE_MODE}" \
     --attention_router_lexical_pool "${ATTENTION_ROUTER_LEXICAL_POOL}" \
     --att_rerank_pool "${ATT_RERANK_POOL}" \
     --att_rerank_min_heads "${ATT_RERANK_MIN_HEADS}" \
     --att_rerank_min_margin "${ATT_RERANK_MIN_MARGIN}" \
     --att_rerank_min_score_gain "${ATT_RERANK_MIN_SCORE_GAIN}" \
+    --attention_rrf_k "${ATTENTION_RRF_K}" \
+    --attention_stable_heads "${ATTENTION_STABLE_HEADS}" \
+    --attention_stable_head_count "${ATTENTION_STABLE_HEAD_COUNT}" \
     --router_hit_filter "${ROUTER_HIT_FILTER}" \
     --router_seed "${ROUTER_SEED}" \
     --system_attn_impl "${NPU_ATTN_IMPL}" \
@@ -184,6 +199,7 @@ for hybrid_mode in "${_hybrid_modes[@]}"; do
           --max_examples "${MAX_EXAMPLES}" \
           "${SOURCE_ARGS[@]}" \
           --selection_filter "${SELECTION_FILTER}" \
+          --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
           --min_num_tools "${MIN_NUM_TOOLS}" \
           --eval_ratio "${EVAL_RATIO}" \
           --split_seed "${SPLIT_SEED}" \
@@ -203,12 +219,16 @@ for hybrid_mode in "${_hybrid_modes[@]}"; do
           --attention_router_attn_impl "${ATTENTION_ROUTER_ATTN_IMPL}" \
           --attention_router_max_query_tokens "${ATTENTION_ROUTER_MAX_QUERY_TOKENS}" \
           --attention_router_score_mode "${ATTENTION_ROUTER_SCORE_MODE}" \
+          --attention_router_span_top_tokens "${ATTENTION_ROUTER_SPAN_TOP_TOKENS}" \
           --attention_router_cache_mode "${ATTENTION_ROUTER_CACHE_MODE}" \
           --attention_router_lexical_pool "${ATTENTION_ROUTER_LEXICAL_POOL}" \
           --att_rerank_pool "${ATT_RERANK_POOL}" \
           --att_rerank_min_heads "${ATT_RERANK_MIN_HEADS}" \
           --att_rerank_min_margin "${ATT_RERANK_MIN_MARGIN}" \
           --att_rerank_min_score_gain "${ATT_RERANK_MIN_SCORE_GAIN}" \
+          --attention_rrf_k "${ATTENTION_RRF_K}" \
+          --attention_stable_heads "${ATTENTION_STABLE_HEADS}" \
+          --attention_stable_head_count "${ATTENTION_STABLE_HEAD_COUNT}" \
           --router_hit_filter "${ROUTER_HIT_FILTER}" \
           --router_seed "${ROUTER_SEED}" \
           --system_attn_impl "${NPU_ATTN_IMPL}" \
@@ -234,6 +254,7 @@ python agent/merge_agent_tool_definition_hybrid_eval.py \
   --model "${MODEL_PATH}" \
   --dataset_path "${DATASET_PATH}" \
   --split "${SPLIT}" \
+  --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
   --router_scope "${ROUTER_SCOPE}" \
   --router_strategy "${ROUTER_STRATEGIES}" \
   --hybrid_modes "${HYBRID_MODES}" \

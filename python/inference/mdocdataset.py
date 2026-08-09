@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import itertools
+from pathlib import Path
 import datasets
 import string
 from numpy import isin
@@ -108,8 +109,13 @@ class WikiMQADataset(AbstractMDQADataset):
         self.data_path = data_path
         if data_path is None:
             self.data = datasets.load_dataset('zai-org/LongBench', '2wikimqa', split=split)
+            self._extract_data_path = None
+        elif Path(data_path).is_dir():
+            self.data = datasets.load_from_disk(data_path)
+            self._extract_data_path = None if {"context", "answers", "input"}.issubset(self.data.column_names) else data_path
         else:
             self.data = datasets.load_dataset(data_path, split=split)
+            self._extract_data_path = data_path
         self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
         self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
@@ -149,7 +155,7 @@ class WikiMQADataset(AbstractMDQADataset):
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        return self.extract_documents(self.data[idx], query_prompt=self.query_prompt, data_path=self.data_path)
+        return self.extract_documents(self.data[idx], query_prompt=self.query_prompt, data_path=self._extract_data_path)
 
 
 class MusiqueDataset(AbstractMDQADataset):
@@ -187,9 +193,13 @@ class MusiqueDataset(AbstractMDQADataset):
 
 
 class HotpotQADataset(AbstractMDQADataset):
-    def __init__(self, enable_cot: bool=False) -> None:
-        print(f"Loading dataset from zai-org/LongBench hotpotqa...")
-        self.data = datasets.load_dataset('zai-org/LongBench', 'hotpotqa')['test']
+    def __init__(self, data_path: str | None=None, enable_cot: bool=False) -> None:
+        source = data_path or "zai-org/LongBench hotpotqa"
+        print(f"Loading dataset from {source}...")
+        if data_path is not None and Path(data_path).is_dir():
+            self.data = datasets.load_from_disk(data_path)
+        else:
+            self.data = datasets.load_dataset('zai-org/LongBench', 'hotpotqa')['test']
         self.system_prompt: str = QA_SYSTEM_PROMPT_COT if enable_cot else QA_SYSTEM_PROMPT
         self.max_new_tokens: int = QA_MAX_NEW_TOKENS_COT if enable_cot else QA_MAX_NEW_TOKENS
         self.query_prompt: str = QA_QUERY_PROMPT_COT if enable_cot else QA_QUERY_PROMPT
@@ -217,9 +227,13 @@ class HotpotQADataset(AbstractMDQADataset):
 
 
 class MultiNewsDataset(AbstractMDQADataset):
-    def __init__(self) -> None:
-        print(f"Loading dataset from zai-org/LongBench multi_news...")
-        self.data = datasets.load_dataset('zai-org/LongBench', 'multi_news')['test']
+    def __init__(self, data_path: str | None=None) -> None:
+        source = data_path or "zai-org/LongBench multi_news"
+        print(f"Loading dataset from {source}...")
+        if data_path is not None and Path(data_path).is_dir():
+            self.data = datasets.load_from_disk(data_path)
+        else:
+            self.data = datasets.load_dataset('zai-org/LongBench', 'multi_news')['test']
         self.system_prompt: str = "You are given several news passages. Write a one-page summary of all news."
         self.max_new_tokens: int = 512
         self.paragraphs = self.data['context']
@@ -246,9 +260,13 @@ class MultiNewsDataset(AbstractMDQADataset):
 
 
 class SAMSumDataset(AbstractMDQADataset):
-    def __init__(self) -> None:
-        print(f"Loading dataset from zai-org/LongBench samsum...")
-        self.data = datasets.load_dataset('zai-org/LongBench', 'samsum')['test']
+    def __init__(self, data_path: str | None=None) -> None:
+        source = data_path or "zai-org/LongBench samsum"
+        print(f"Loading dataset from {source}...")
+        if data_path is not None and Path(data_path).is_dir():
+            self.data = datasets.load_from_disk(data_path)
+        else:
+            self.data = datasets.load_dataset('zai-org/LongBench', 'samsum')['test']
         self.system_prompt: str = "Summarize the dialogue into a few short sentences. The following are some examples.\n\n"
         self.question_prompt: str = "As the above examples, please summarize the dialogue into a few short sentences.\n\n"
         self.max_new_tokens: int = 128
@@ -692,7 +710,7 @@ Do not simplify. Expand on every detail extensively."""
 class LongBenchDataset(AbstractMDQADataset):
     """Unified dataset class for LongBench datasets supporting both single and multiple context formats."""
 
-    def __init__(self, name: str, cut_length: int = 4096) -> None:
+    def __init__(self, name: str, cut_length: int = 4096, data_path: str | None = None) -> None:
         self.name = name
         self.cut_length = cut_length
         self.system_prompt = "You are a helpful assistant."
@@ -701,8 +719,12 @@ class LongBenchDataset(AbstractMDQADataset):
         self._configure_dataset(name)
 
         # Load and process data
-        print(f"Loading dataset from zai-org/LongBench {name}...")
-        data = datasets.load_dataset('zai-org/LongBench', name, split='test')
+        source = data_path or f"zai-org/LongBench {name}"
+        print(f"Loading dataset from {source}...")
+        if data_path is not None and Path(data_path).is_dir():
+            data = datasets.load_from_disk(data_path)
+        else:
+            data = datasets.load_dataset('zai-org/LongBench', name, split='test')
         self.data = data.map(
             lambda sample: self.process_sample(sample, name, cut_length),
             num_proc=32, remove_columns=data.column_names
@@ -913,11 +935,11 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
     if name == "wikimqa":
         return WikiMQADataset(path, **kwargs)
     elif name == "hotpotqa":
-        return HotpotQADataset(**kwargs)
+        return HotpotQADataset(path, **kwargs)
     elif name == "multinews":
-        return MultiNewsDataset()
+        return MultiNewsDataset(path)
     elif name == "samsum":
-        return SAMSumDataset()
+        return SAMSumDataset(path)
     elif name == "amap":
         if path is None:
             print('Defaulting amap dataset path to "../datasets/AmapData.csv"')
@@ -951,6 +973,6 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         'passage_count', 'passage_retrieval_en', 'passage_retrieval_zh',  # Passage retrieval (3)
         'vcsum'  # Summarization (1)
     ]:
-        return LongBenchDataset(name, kwargs.get('cut_length', 4096))
+        return LongBenchDataset(name, kwargs.get('cut_length', 4096), path)
     else:
         raise ValueError(f"Unsupported dataset name: {name}")

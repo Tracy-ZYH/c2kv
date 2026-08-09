@@ -201,9 +201,10 @@ class Qwen2Attention(nn.Module):
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         use_gist = kwargs.get("use_gist", False)
-        q_proj = self.gist_q_proj if use_gist and 'Q' in self.gist_param else self.q_proj
-        k_proj = self.gist_k_proj if use_gist and 'K' in self.gist_param else self.k_proj
-        v_proj = self.gist_v_proj if use_gist and 'V' in self.gist_param else self.v_proj
+        gist_param = self.gist_param.lower()
+        q_proj = self.gist_q_proj if use_gist and 'q' in gist_param else self.q_proj
+        k_proj = self.gist_k_proj if use_gist and 'k' in gist_param else self.k_proj
+        v_proj = self.gist_v_proj if use_gist and 'v' in gist_param else self.v_proj
 
         query_states = q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
@@ -528,6 +529,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         gist_key_values = []
         if self.training and GIST_GRADIENT_CHECKPOINTING:
+            if not hidden_states.requires_grad:
+                # Base embeddings are frozen when only training gist projections.
+                # Checkpointed blocks still need a grad-carrying input so the
+                # trainable gist_* parameters stay connected to the loss.
+                hidden_states.requires_grad_(True)
             use_reentrant = os.environ.get("C2KV_GIST_CHECKPOINT_USE_REENTRANT", "true").lower() in (
                 "1",
                 "true",

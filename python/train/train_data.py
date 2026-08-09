@@ -647,6 +647,9 @@ class MultiDocDataset(GistDataset):
         max_system_length: int = 256,
         dynamic_context_cap: int = 4096,
         num_samples: Optional[int] = None,
+        dataset_num_proc: int = 8,
+        dataset_load_from_cache_file: bool = True,
+        preprocess_cache_version: str = "mdoc_answer_preserve_v2",
         shuffle_seed: int = 42,
     ):
         if "musique" in path:
@@ -659,10 +662,13 @@ class MultiDocDataset(GistDataset):
         elif "hotpotqa" in path:
             data = datasets.load_dataset("jsonl", data_files=path, split="train")
             extract_documents = lambda sample: sample
+        elif "wikimqa" in path and "cleaned" in path:
+            data = datasets.load_from_disk(path)
+            extract_documents = lambda sample: sample
         elif "wikimqa" in path:
             dataset = load_mdoc_dataset("wikimqa", "xanhho/2WikiMultihopQA", split='train')
             extract_documents = lambda sample: dataset.extract_documents(sample, data_path=path)
-            data = datasets.load_from_disk(path) if "cleaned" in path else dataset.data
+            data = dataset.data
         elif "longmagpie" in path or "longalpaca" in path:
             data = datasets.load_from_disk(path)
             extract_documents = None
@@ -689,9 +695,12 @@ class MultiDocDataset(GistDataset):
         else:
             raise NotImplementedError(f"Unsupported dataset {path}")
         if num_samples is None:
-            data = data.select(range(512, len(data)))
+            data = data.select(range(min(512, len(data)), len(data)))
         else:
-            data = data.select(range(num_samples))
+            data = data.select(range(min(num_samples, len(data))))
+        map_kwargs = {}
+        if dataset_num_proc and dataset_num_proc > 1:
+            map_kwargs["num_proc"] = dataset_num_proc
         self.data = data.shuffle(seed=shuffle_seed).map(
             self._preprocess_mdoc_sample,
             fn_kwargs={
@@ -700,11 +709,18 @@ class MultiDocDataset(GistDataset):
                 'max_doc_length': max_doc_length,
                 'max_doc_num': max_doc_num,
                 'max_system_length': max_system_length,
-                'extract_docs': extract_documents
+                'extract_docs': extract_documents,
+                'preprocess_cache_version': preprocess_cache_version,
             },
             batched=False,
-            num_proc=64,
-            remove_columns=data.column_names
+            remove_columns=data.column_names,
+            load_from_cache_file=dataset_load_from_cache_file,
+            **map_kwargs,
+        )
+        self.data = self.data.filter(
+            lambda sample: any(label != -100 for label in sample["labels"]),
+            load_from_cache_file=dataset_load_from_cache_file,
+            **map_kwargs,
         )
         self.max_doc_length = max_doc_length
         self.max_system_length = max_system_length
@@ -721,7 +737,9 @@ class MultiDocDataset(GistDataset):
         max_doc_num: int,
         max_system_length: int,
         extract_docs: Callable | None,
+        preprocess_cache_version: str = "mdoc_answer_preserve_v2",
     ) -> Dict[str, Any]:
+        del preprocess_cache_version
         system_text = sample.get('system') or DEFAULT_SYSTEM_PROMPT
         if extract_docs is not None:
             sample = extract_docs(sample)
@@ -743,6 +761,11 @@ class MultiDocDataset(GistDataset):
         question_ids = tokenize(tokenizer, sample['question'], "user", add_generation_prompt=True)
         answer_ids = tokenizer.encode(sample['answer'][0], add_special_tokens=False)
         answer_ids.append(tokenizer.eos_token_id)
+        if len(answer_ids) >= max_length:
+            answer_ids = answer_ids[:max_length]
+        if len(question_ids) + len(answer_ids) > max_length:
+            question_budget = max(0, max_length - len(answer_ids))
+            question_ids = question_ids[:question_budget]
         input_ids = question_ids + answer_ids
         labels = [-100] * len(question_ids) + answer_ids
         pad_length = max_length - len(input_ids)

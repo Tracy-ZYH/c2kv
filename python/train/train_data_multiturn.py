@@ -61,6 +61,7 @@ class CompressHistoryExample:
     answer: str
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     tools: List[Dict[str, Any]] = field(default_factory=list)
+    original_messages: List[Message] = field(default_factory=list)
 
 
 class CompressHistorySource(ABC):
@@ -118,6 +119,7 @@ class JsonlCompressHistorySource(CompressHistorySource):
                 history_messages=list(record.get("history_messages") or []),
                 current_messages=list(record.get("current_messages") or []),
                 answer=str(record.get("answer") or ""),
+                original_messages=list(record.get("original_messages") or []),
             )
 
 
@@ -366,6 +368,21 @@ def _find_agent_parquet_files(path: Path) -> List[Path]:
     return files
 
 
+def _find_agent_jsonl_files(path: Path) -> List[Path]:
+    if path.is_file() and path.suffix == ".jsonl":
+        return [path]
+    roots = [path / "data", path]
+    files: List[Path] = []
+    for root in roots:
+        if root.is_dir():
+            files = sorted(root.glob("*.jsonl"))
+            if not files:
+                files = sorted(root.rglob("*.jsonl"))
+        if files:
+            break
+    return files
+
+
 def _iter_agent_rows(data_files: Sequence[Path]) -> Iterator[Dict[str, Any]]:
     import pyarrow.parquet as pq
 
@@ -376,6 +393,17 @@ def _iter_agent_rows(data_files: Sequence[Path]) -> Iterator[Dict[str, Any]]:
         columns = [column for column in wanted if column in available]
         for batch in pf.iter_batches(batch_size=256, columns=columns):
             yield from batch.to_pylist()
+
+
+def _iter_agent_jsonl_rows(data_files: Sequence[Path]) -> Iterator[Dict[str, Any]]:
+    for data_file in data_files:
+        with data_file.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = _json_loads(line, None)
+                if isinstance(row, dict):
+                    yield row
 
 
 def _span_attributes(span: Any) -> Dict[str, Any]:
@@ -395,6 +423,52 @@ def _sort_agent_spans(spans: Sequence[Any]) -> List[Dict[str, Any]]:
             span.get("span_id") or "",
         ),
     )
+
+
+def _toolathlon_row_to_agent_session(row: Dict[str, Any], row_index: int) -> Optional[Dict[str, Any]]:
+    tools = _tool_list_from_agent_value(row.get("tool_calls"))
+    messages = _json_loads(row.get("messages"), [])
+    if not tools or not isinstance(messages, list):
+        return None
+    config = _json_loads(row.get("config"), {})
+    system_prompt = ""
+    if isinstance(config, dict):
+        system_prompts = config.get("system_prompts") if isinstance(config.get("system_prompts"), dict) else {}
+        system_prompt = str(system_prompts.get("agent") or "").strip()
+    system_message = {"role": "system", "content": system_prompt} if system_prompt else None
+    spans = []
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        has_tool_call = bool(
+            message.get("tool_calls")
+            or message.get("toolCalls")
+            or message.get("function_call")
+            or _agent_message_parts(message)
+        )
+        if not has_tool_call:
+            continue
+        input_messages = [item for item in messages[:message_index] if isinstance(item, dict)]
+        if system_message and not any(item.get("role") == "system" for item in input_messages):
+            input_messages = [system_message, *input_messages]
+        if not any(item.get("role") == "user" for item in input_messages):
+            continue
+        spans.append({
+            "start_time": f"{message_index:06d}",
+            "span_id": f"toolathlon-{message_index}",
+            "attributes": {
+                "gen_ai.tool.definitions": _json_dumps(tools),
+                "gen_ai.input.messages": _json_dumps(input_messages),
+                "gen_ai.output.messages": _json_dumps([message]),
+            },
+        })
+    if not spans:
+        return None
+    return {
+        "session_id": str(row.get("request_id") or row.get("task_name") or f"toolathlon-row-{row_index}"),
+        "subset": str(row.get("task_name") or row.get("modelname_run") or "toolathlon"),
+        "spans": spans,
+    }
 
 
 def _agent_message_parts(message: Message) -> List[Dict[str, Any]]:
@@ -604,6 +678,8 @@ class AgentLLMTracesCompressHistorySource(CompressHistorySource):
         max_input_chars: Optional[int] = None,
         max_answer_chars: Optional[int] = None,
         include_tools: bool = False,
+        prefix_history_doc_num: Optional[int] = None,
+        prefix_history_exact: bool = False,
     ) -> None:
         self.path = Path(path)
         self.split = split
@@ -617,6 +693,8 @@ class AgentLLMTracesCompressHistorySource(CompressHistorySource):
         self.max_input_chars = max_input_chars
         self.max_answer_chars = max_answer_chars
         self.include_tools = include_tools
+        self.prefix_history_doc_num = prefix_history_doc_num
+        self.prefix_history_exact = prefix_history_exact
         self.records = self._load_records()
 
     def __len__(self) -> int:
@@ -627,21 +705,30 @@ class AgentLLMTracesCompressHistorySource(CompressHistorySource):
 
     def _load_records(self) -> List[CompressHistoryExample]:
         data_files = _find_agent_parquet_files(self.path)
+        jsonl_files: List[Path] = []
         if not data_files:
-            raise FileNotFoundError(f"No parquet files found under {self.path}")
+            jsonl_files = _find_agent_jsonl_files(self.path)
+        if not data_files and not jsonl_files:
+            raise FileNotFoundError(f"No parquet/jsonl files found under {self.path}")
         if self.split_manifest_file:
-            return self._load_records_from_manifest(data_files)
+            return self._load_records_from_manifest(data_files or jsonl_files)
         sessions = []
-        for row_index, row in enumerate(_iter_agent_rows(data_files)):
-            session_id = str(
-                row.get("session_id")
-                or row.get("trace_id")
-                or row.get("id")
-                or f"row-{row_index}"
-            )
-            subset = str(row.get("benchmark") or row.get("subset") or row.get("dataset") or row.get("task") or "unknown")
-            spans = _sort_agent_spans(_json_loads(row.get("spans"), row.get("spans")) or [])
-            sessions.append({"session_id": session_id, "subset": subset, "spans": spans})
+        if data_files:
+            for row_index, row in enumerate(_iter_agent_rows(data_files)):
+                session_id = str(
+                    row.get("session_id")
+                    or row.get("trace_id")
+                    or row.get("id")
+                    or f"row-{row_index}"
+                )
+                subset = str(row.get("benchmark") or row.get("subset") or row.get("dataset") or row.get("task") or "unknown")
+                spans = _sort_agent_spans(_json_loads(row.get("spans"), row.get("spans")) or [])
+                sessions.append({"session_id": session_id, "subset": subset, "spans": spans})
+        else:
+            for row_index, row in enumerate(_iter_agent_jsonl_rows(jsonl_files)):
+                session = _toolathlon_row_to_agent_session(row, row_index)
+                if session is not None:
+                    sessions.append(session)
 
         train_ids, eval_ids = self._split_session_ids(sessions)
         keep_ids = train_ids if self.split == "train" else eval_ids
@@ -673,16 +760,24 @@ class AgentLLMTracesCompressHistorySource(CompressHistorySource):
         }
         rng = random.Random(self.split_seed + (0 if self.split == "train" else 1))
         records: List[CompressHistoryExample] = []
-        for row_index, row in enumerate(_iter_agent_rows(data_files)):
+        row_iter = _iter_agent_rows(data_files) if data_files and data_files[0].suffix == ".parquet" else _iter_agent_jsonl_rows(data_files)
+        for row_index, row in enumerate(row_iter):
             session_id = str(
                 row.get("session_id")
                 or row.get("trace_id")
                 or row.get("id")
                 or f"row-{row_index}"
             )
+            if data_files and data_files[0].suffix == ".jsonl":
+                session = _toolathlon_row_to_agent_session(row, row_index)
+                if session is None:
+                    continue
+                session_id = session["session_id"]
+                spans = session["spans"]
+            else:
+                spans = _sort_agent_spans(_json_loads(row.get("spans"), row.get("spans")) or [])
             if session_id not in keep_ids:
                 continue
-            spans = _sort_agent_spans(_json_loads(row.get("spans"), row.get("spans")) or [])
             examples = self._session_examples(session_id, spans)
             if self.max_samples_per_session and len(examples) > self.max_samples_per_session:
                 examples = rng.sample(examples, self.max_samples_per_session)
@@ -737,6 +832,12 @@ class AgentLLMTracesCompressHistorySource(CompressHistorySource):
             if last_user_index is None:
                 continue
             history_docs = _agent_history_turn_docs(messages[:last_user_index])
+            if self.prefix_history_doc_num is not None:
+                if len(history_docs) < self.prefix_history_doc_num:
+                    continue
+                if self.prefix_history_exact and len(history_docs) != self.prefix_history_doc_num:
+                    continue
+                history_docs = history_docs[-self.prefix_history_doc_num :]
             current_messages = messages[last_user_index:]
             answer, has_tool_call = _render_agent_output_messages(output_messages, self.max_answer_chars)
             if self.require_tool_call and not has_tool_call:
@@ -751,6 +852,11 @@ class AgentLLMTracesCompressHistorySource(CompressHistorySource):
                     answer=answer,
                     system_prompt=system_prompt,
                     tools=list(tools) if self.include_tools else [],
+                    original_messages=[
+                        message
+                        for message in _json_loads(raw_input_messages, [])
+                        if isinstance(message, dict)
+                    ],
                 )
             )
         return examples
@@ -867,11 +973,19 @@ def _fit_reused_history(
     max_doc_length: int,
     max_doc_num: int,
     policy: HistorySelection,
+    split_oversized_history_docs: bool = True,
 ) -> List[Message]:
-    split_messages: List[Message] = []
-    for message in messages:
-        split_messages.extend(_split_message_to_fit(tokenizer, message, max_doc_length))
-    messages = list(split_messages)
+    if split_oversized_history_docs:
+        split_messages: List[Message] = []
+        for message in messages:
+            split_messages.extend(_split_message_to_fit(tokenizer, message, max_doc_length))
+        messages = list(split_messages)
+    else:
+        messages = [
+            message
+            for message in messages
+            if _message_token_length(tokenizer, message) <= max_doc_length
+        ]
     return _select_history(messages, max_doc_num=max_doc_num, policy=policy)
 
 
@@ -916,6 +1030,8 @@ def _preprocess_record(
     max_doc_num: int,
     max_system_length: int,
     history_selection: HistorySelection,
+    full_history_doc_num: int = 0,
+    split_oversized_history_docs: bool = True,
 ) -> Dict[str, Any]:
     """Adapter that converts a raw dataset record into a CompressHistoryExample
     and delegates to CompressHistoryDataset.preprocess_example.
@@ -940,6 +1056,8 @@ def _preprocess_record(
         max_doc_num=max_doc_num,
         max_system_length=max_system_length,
         history_selection=history_selection,
+        full_history_doc_num=full_history_doc_num,
+        split_oversized_history_docs=split_oversized_history_docs,
     )
     if result is None:
         return dict(_INVALID_SAMPLE_MARKER)
@@ -961,6 +1079,8 @@ class CompressHistoryDataset(GistDataset):
         num_samples: Optional[int] = None,
         shuffle_seed: int = 42,
         history_selection: HistorySelection = "tail",
+        full_history_doc_num: int = 0,
+        split_oversized_history_docs: bool = True,
         num_proc: int = 32,
     ) -> None:
         raw_data = source.data if hasattr(source, "data") else None
@@ -977,6 +1097,8 @@ class CompressHistoryDataset(GistDataset):
                     "max_doc_num": max_doc_num,
                     "max_system_length": max_system_length,
                     "history_selection": history_selection,
+                    "full_history_doc_num": full_history_doc_num,
+                    "split_oversized_history_docs": split_oversized_history_docs,
                 },
                 num_proc=num_proc,
                 remove_columns=raw_data.column_names,
@@ -999,6 +1121,8 @@ class CompressHistoryDataset(GistDataset):
                     max_doc_num=max_doc_num,
                     max_system_length=max_system_length,
                     history_selection=history_selection,
+                    full_history_doc_num=full_history_doc_num,
+                    split_oversized_history_docs=split_oversized_history_docs,
                 )
                 if row is not None:
                     rows.append(row)
@@ -1021,6 +1145,8 @@ class CompressHistoryDataset(GistDataset):
         max_doc_num: int,
         max_system_length: int,
         history_selection: HistorySelection,
+        full_history_doc_num: int = 0,
+        split_oversized_history_docs: bool = True,
     ) -> Optional[Dict[str, Any]]:
         raw_history = [
             _normal_chat_message(message)
@@ -1033,6 +1159,7 @@ class CompressHistoryDataset(GistDataset):
             max_doc_length=max_doc_length,
             max_doc_num=max_doc_num,
             policy=history_selection,
+            split_oversized_history_docs=split_oversized_history_docs,
         )
         current = [
             _normal_chat_message(message)
@@ -1041,6 +1168,18 @@ class CompressHistoryDataset(GistDataset):
         ]
         if len(history) < min_doc_num or not current or not example.answer:
             return None
+        if full_history_doc_num < 0:
+            raise ValueError(f"full_history_doc_num must be non-negative, got {full_history_doc_num}")
+        if full_history_doc_num:
+            if full_history_doc_num >= len(history):
+                compressed_history: List[Message] = []
+                full_history = list(history)
+            else:
+                compressed_history = list(history[:-full_history_doc_num])
+                full_history = list(history[-full_history_doc_num:])
+        else:
+            compressed_history = list(history)
+            full_history = []
 
         system_ids = _chat_template_ids(
             tokenizer,
@@ -1052,21 +1191,31 @@ class CompressHistoryDataset(GistDataset):
         system_input_ids = _pad(system_ids, max_system_length, -100)
 
         context_input_ids: List[int] = []
-        for message in history:
+        for message in compressed_history:
             doc_ids = _chat_template_ids(
                 tokenizer,
                 [message],
                 max_length=max_doc_length,
             )
             context_input_ids.extend(_pad(doc_ids, max_doc_length, -100))
-        empty_docs = max_doc_num - len(history)
+        empty_docs = max_doc_num - len(compressed_history)
         context_input_ids.extend([-100] * (max_doc_length * empty_docs))
 
+        full_history_ids: List[int] = []
+        for message in full_history:
+            full_history_ids.extend(
+                _chat_template_ids(
+                    tokenizer,
+                    [message],
+                    max_length=max_doc_length,
+                )
+            )
         prompt_ids = _chat_template_ids(
             tokenizer,
             current,
             add_generation_prompt=True,
         )
+        prompt_ids = full_history_ids + prompt_ids
         answer_ids = tokenizer.encode(example.answer, add_special_tokens=False)
         if not answer_ids:
             return None

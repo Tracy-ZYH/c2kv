@@ -16,6 +16,7 @@ MAX_EXAMPLES="${MAX_EXAMPLES:-50}"
 MAX_DOC_LENGTH="${MAX_DOC_LENGTH:-1024}"
 MAX_DOC_NUM="${MAX_DOC_NUM:-10}"
 MAX_TOOL_DEFINITION_TOKENS="${MAX_TOOL_DEFINITION_TOKENS:-10000}"
+TOOL_DOCUMENT_EVAL_MODE="${TOOL_DOCUMENT_EVAL_MODE:-full}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 OVERRIDE_RATIO="${OVERRIDE_RATIO:-4}"
 RATIOS="${RATIOS:-2,4,8}"
@@ -34,6 +35,7 @@ echo "OUTPUT_FILE=${OUTPUT_FILE}"
 echo "SPLIT_MANIFEST_FILE=${SPLIT_MANIFEST_FILE}"
 echo "SPLIT_NAME=${SPLIT_NAME}"
 echo "MAX_EXAMPLES=${MAX_EXAMPLES}"
+echo "TOOL_DOCUMENT_EVAL_MODE=${TOOL_DOCUMENT_EVAL_MODE}"
 echo "COMPARE_MODES=${COMPARE_MODES}"
 echo "RATIOS=${RATIOS}"
 echo "PARALLEL_EVAL=${PARALLEL_EVAL}"
@@ -56,6 +58,7 @@ if [[ "${PARALLEL_EVAL}" != "True" && "${PARALLEL_EVAL}" != "true" && "${PARALLE
     --max_doc_length "${MAX_DOC_LENGTH}" \
     --max_doc_num "${MAX_DOC_NUM}" \
     --max_tool_definition_tokens "${MAX_TOOL_DEFINITION_TOKENS}" \
+    --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --override_ratio "${OVERRIDE_RATIO}" \
     --ratios "${RATIOS}" \
@@ -105,6 +108,7 @@ for mode in "${_modes[@]}"; do
         --max_doc_length "${MAX_DOC_LENGTH}" \
         --max_doc_num "${MAX_DOC_NUM}" \
         --max_tool_definition_tokens "${MAX_TOOL_DEFINITION_TOKENS}" \
+        --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
         --max_new_tokens "${MAX_NEW_TOKENS}" \
         --override_ratio "${ratio}" \
         --mode "${mode}" \
@@ -130,4 +134,5 @@ python agent/merge_agent_tool_definition_eval.py \
   --base_model "${BASE_MODEL}" \
   --dataset_path "${DATASET_PATH}" \
   --split eval \
+  --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
   --input_files "${CASE_OUTPUTS[@]}"

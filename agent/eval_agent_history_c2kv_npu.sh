@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PYTHONPATH="$(pwd)/python:$(pwd)/agent:${PYTHONPATH:-}"
+export PYTHONPATH="$(pwd)/python:$(pwd)/python/inference:$(pwd)/agent:${PYTHONPATH:-}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,3,4,5,6,7}"
 
@@ -15,6 +15,14 @@ SPLIT="${SPLIT:-eval}"
 COMPARE_MODES="${COMPARE_MODES:-full,truncate,c2kv,hybrid}"
 RATIOS="${RATIOS:-4}"
 HYBRID_TOP_K="${HYBRID_TOP_K:-3}"
+ATTENTION_ROUTER_LAYERS="${ATTENTION_ROUTER_LAYERS:-32}"
+ATTENTION_ROUTER_ATTN_IMPL="${ATTENTION_ROUTER_ATTN_IMPL:-${NPU_ATTN_IMPL:-eager}}"
+ATTENTION_ROUTER_MAX_QUERY_TOKENS="${ATTENTION_ROUTER_MAX_QUERY_TOKENS:-512}"
+ATTENTION_ROUTER_SCORE_MODE="${ATTENTION_ROUTER_SCORE_MODE:-mean}"
+ATT_RERANK_POOL="${ATT_RERANK_POOL:-10}"
+ATT_RERANK_MIN_HEADS="${ATT_RERANK_MIN_HEADS:-30}"
+ATT_RERANK_MIN_MARGIN="${ATT_RERANK_MIN_MARGIN:-0.0}"
+ATT_RERANK_MIN_SCORE_GAIN="${ATT_RERANK_MIN_SCORE_GAIN:-0.0}"
 MAX_EXAMPLES="${MAX_EXAMPLES:-0}"
 MAX_SOURCE_EXAMPLES="${MAX_SOURCE_EXAMPLES:-}"
 SELECTION_FILTER="${SELECTION_FILTER:-c2kv}"
@@ -35,11 +43,20 @@ MAX_LENGTH="${MAX_LENGTH:-1536}"
 MAX_SYSTEM_LENGTH="${MAX_SYSTEM_LENGTH:-4096}"
 MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-1536}"
 MAX_BASELINE_INPUT_TOKENS="${MAX_BASELINE_INPUT_TOKENS:-16000}"
+RAW_FIRST_N_TURNS="${RAW_FIRST_N_TURNS:-15}"
+RAW_PREFIX_N_TURNS="${RAW_PREFIX_N_TURNS:-8}"
+RAW_PREFIX_NEXT_TARGET_SCOPE="${RAW_PREFIX_NEXT_TARGET_SCOPE:-turn}"
+DUMP_RAW_HISTORY_DOCS="${DUMP_RAW_HISTORY_DOCS:-False}"
+RAW_HISTORY_DOC_DEBUG_CHARS="${RAW_HISTORY_DOC_DEBUG_CHARS:-2000}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 HISTORY_SELECTION="${HISTORY_SELECTION:-tail}"
 TRUNCATE_SELECTION="${TRUNCATE_SELECTION:-tail}"
 MAX_INPUT_CHARS="${MAX_INPUT_CHARS:-}"
 MAX_ANSWER_CHARS="${MAX_ANSWER_CHARS:-}"
+PREFIX_HISTORY_DOC_NUM="${PREFIX_HISTORY_DOC_NUM:-}"
+PREFIX_HISTORY_EXACT="${PREFIX_HISTORY_EXACT:-False}"
+SPLIT_OVERSIZED_HISTORY_DOCS="${SPLIT_OVERSIZED_HISTORY_DOCS:-True}"
+HYBRID_FULL_AFTER_C2KV="${HYBRID_FULL_AFTER_C2KV:-False}"
 NPU_ATTN_IMPL="${NPU_ATTN_IMPL:-eager}"
 PARALLEL_EVAL="${PARALLEL_EVAL:-True}"
 OUTPUT_STEM="${OUTPUT_FILE%.jsonl}"
@@ -60,6 +77,15 @@ fi
 if [[ -n "${MAX_ANSWER_CHARS}" ]]; then
   OPTIONAL_ARGS+=(--max_answer_chars "${MAX_ANSWER_CHARS}")
 fi
+if [[ -n "${PREFIX_HISTORY_DOC_NUM}" ]]; then
+  OPTIONAL_ARGS+=(--prefix_history_doc_num "${PREFIX_HISTORY_DOC_NUM}")
+fi
+OPTIONAL_ARGS+=(--prefix_history_exact "${PREFIX_HISTORY_EXACT}")
+OPTIONAL_ARGS+=(--split_oversized_history_docs "${SPLIT_OVERSIZED_HISTORY_DOCS}")
+OPTIONAL_ARGS+=(--hybrid_full_after_c2kv "${HYBRID_FULL_AFTER_C2KV}")
+if [[ "${DUMP_RAW_HISTORY_DOCS}" == "True" || "${DUMP_RAW_HISTORY_DOCS}" == "true" || "${DUMP_RAW_HISTORY_DOCS}" == "1" ]]; then
+  OPTIONAL_ARGS+=(--dump_raw_history_docs --raw_history_doc_debug_chars "${RAW_HISTORY_DOC_DEBUG_CHARS}")
+fi
 
 echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES}"
 echo "MODEL_PATH=${MODEL_PATH}"
@@ -77,8 +103,16 @@ echo "MAX_DOC_NUM=${MAX_DOC_NUM}"
 echo "MAX_HISTORY_TOKENS=${MAX_HISTORY_TOKENS}"
 echo "MAX_PROMPT_TOKENS=${MAX_PROMPT_TOKENS}"
 echo "MAX_BASELINE_INPUT_TOKENS=${MAX_BASELINE_INPUT_TOKENS}"
+echo "RAW_FIRST_N_TURNS=${RAW_FIRST_N_TURNS}"
+echo "RAW_PREFIX_N_TURNS=${RAW_PREFIX_N_TURNS}"
+echo "RAW_PREFIX_NEXT_TARGET_SCOPE=${RAW_PREFIX_NEXT_TARGET_SCOPE}"
+echo "DUMP_RAW_HISTORY_DOCS=${DUMP_RAW_HISTORY_DOCS}"
 echo "HISTORY_SELECTION=${HISTORY_SELECTION}"
 echo "TRUNCATE_SELECTION=${TRUNCATE_SELECTION}"
+echo "PREFIX_HISTORY_DOC_NUM=${PREFIX_HISTORY_DOC_NUM}"
+echo "PREFIX_HISTORY_EXACT=${PREFIX_HISTORY_EXACT}"
+echo "SPLIT_OVERSIZED_HISTORY_DOCS=${SPLIT_OVERSIZED_HISTORY_DOCS}"
+echo "HYBRID_FULL_AFTER_C2KV=${HYBRID_FULL_AFTER_C2KV}"
 echo "INCLUDE_TOOLS=${INCLUDE_TOOLS}"
 echo "PARALLEL_EVAL=${PARALLEL_EVAL}"
 
@@ -91,6 +125,14 @@ COMMON_ARGS=(
   --split "${SPLIT}"
   "${SPLIT_ARGS[@]}"
   --hybrid_top_k "${HYBRID_TOP_K}"
+  --attention_router_layers "${ATTENTION_ROUTER_LAYERS}"
+  --attention_router_attn_impl "${ATTENTION_ROUTER_ATTN_IMPL}"
+  --attention_router_max_query_tokens "${ATTENTION_ROUTER_MAX_QUERY_TOKENS}"
+  --attention_router_score_mode "${ATTENTION_ROUTER_SCORE_MODE}"
+  --att_rerank_pool "${ATT_RERANK_POOL}"
+  --att_rerank_min_heads "${ATT_RERANK_MIN_HEADS}"
+  --att_rerank_min_margin "${ATT_RERANK_MIN_MARGIN}"
+  --att_rerank_min_score_gain "${ATT_RERANK_MIN_SCORE_GAIN}"
   --max_examples "${MAX_EXAMPLES}"
   --selection_filter "${SELECTION_FILTER}"
   --eval_ratio "${EVAL_RATIO}"
@@ -106,6 +148,9 @@ COMMON_ARGS=(
   --max_system_length "${MAX_SYSTEM_LENGTH}"
   --max_prompt_tokens "${MAX_PROMPT_TOKENS}"
   --max_baseline_input_tokens "${MAX_BASELINE_INPUT_TOKENS}"
+  --raw_first_n_turns "${RAW_FIRST_N_TURNS}"
+  --raw_prefix_n_turns "${RAW_PREFIX_N_TURNS}"
+  --raw_prefix_next_target_scope "${RAW_PREFIX_NEXT_TARGET_SCOPE}"
   --max_new_tokens "${MAX_NEW_TOKENS}"
   --history_selection "${HISTORY_SELECTION}"
   --truncate_selection "${TRUNCATE_SELECTION}"
@@ -133,11 +178,12 @@ CASE_OUTPUTS=()
 SUMMARY_FILES=()
 CASE_INDEX=0
 BATCH_SIZE="${#_visible_npus[@]}"
+FULL_RATIO_MODES=",full,history_full,all_full,original_replay_full,reconstructed_contiguous_full,raw_first15_full,raw_first15_full_same_model,raw_first8_full,raw_first8_full_same_model,raw_prefix8_exact_full,raw_prefix8_exact_full_same_model,raw_prefix_next_full,raw_prefix_next_full_same_model,split_full_kv,sequential_full_kv,current_only,"
 
 for mode in "${_modes[@]}"; do
   mode="${mode// /}"
   case_ratios=("${_ratios[@]}")
-  if [[ "${mode}" == "full" ]]; then
+  if [[ "${FULL_RATIO_MODES}" == *",${mode},"* ]]; then
     case_ratios=("1")
   fi
   for ratio in "${case_ratios[@]}"; do
@@ -186,6 +232,7 @@ for summary in "${SUMMARY_FILES[@]}"; do
   if [[ -f "${summary}" ]]; then
     cat "${summary}"
   else
-    echo "MISSING summary file. Check log: ${summary%.summary.json}.log"
+    summary_log="${summary%.summary.json}.log"
+    echo "MISSING summary file. Check log: ${summary_log}"
   fi
 done

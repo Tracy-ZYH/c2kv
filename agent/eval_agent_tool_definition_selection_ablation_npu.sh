@@ -33,6 +33,7 @@ export SPLIT_NAME="${SPLIT_NAME:-toolset_disjoint}"
 export MAX_DOC_LENGTH="${MAX_DOC_LENGTH:-1024}"
 export MAX_DOC_NUM="${MAX_DOC_NUM:-10}"
 export MAX_TOOL_DEFINITION_TOKENS="${MAX_TOOL_DEFINITION_TOKENS:-10000}"
+export TOOL_DOCUMENT_EVAL_MODE="${TOOL_DOCUMENT_EVAL_MODE:-full}"
 export MAX_PROMPT_TOKENS="${MAX_PROMPT_TOKENS:-4096}"
 export MAX_BASELINE_INPUT_TOKENS="${MAX_BASELINE_INPUT_TOKENS:-0}"
 export MAX_HYBRID_DECODE_TOKENS="${MAX_HYBRID_DECODE_TOKENS:-0}"
@@ -71,6 +72,7 @@ echo "SPLIT=${SPLIT}"
 echo "MAX_EXAMPLES=${MAX_EXAMPLES}"
 echo "HYBRID_CASES=${HYBRID_CASES}"
 echo "SELECTION_FILTER=${SELECTION_FILTER}"
+echo "TOOL_DOCUMENT_EVAL_MODE=${TOOL_DOCUMENT_EVAL_MODE}"
 echo "MIN_NUM_TOOLS=${MIN_NUM_TOOLS}"
 echo "BASELINE_DEVICES=${BASELINE_DEVICES}"
 echo "HYBRID_DEVICE_LEXICAL=${HYBRID_DEVICE_LEXICAL}"
@@ -191,6 +193,7 @@ python agent/merge_agent_tool_definition_reuse_baselines_eval.py \
   --reuse_model "${BASE_MODEL}" \
   --dataset_path "${DATASET_PATH}" \
   --split "${SPLIT}" \
+  --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
   --modes "full,c2kv,c2kv_hybrid,c2kv_hybrid_top1,c2kv_hybrid_compact,random_hybrid,drop_selected,topk_only" \
   --ratios "1,4" \
   --input_files \

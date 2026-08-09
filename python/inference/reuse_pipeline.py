@@ -14,6 +14,35 @@ from compress_kv import compress_kv, QueryStorage
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+NPU_FUSION_ATTENTION_IMPL = "npu_fusion_attention"
+
+
+def _load_safe_attn_impl(attn_impl: str) -> str:
+    return "eager" if attn_impl == NPU_FUSION_ATTENTION_IMPL else attn_impl
+
+
+def _set_model_attn_impl(model: PreTrainedModel, attn_impl: str) -> None:
+    if attn_impl != NPU_FUSION_ATTENTION_IMPL:
+        return
+    model.config._attn_implementation = attn_impl
+    inner_model = getattr(model, "model", None)
+    if inner_model is not None and hasattr(inner_model, "config"):
+        inner_model.config._attn_implementation = attn_impl
+
+
+def _gist_compatible_config(config_class: Any, model_name_or_path: str, tokenizer: AutoTokenizer) -> Any:
+    return config_class.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=True,
+        local_files_only=True,
+        gist_type="dynamic-interleave",
+        gist_param="qkv",
+        gist_residual_type="embed-mean",
+        gist_overlap=64,
+        gist_token_id=tokenizer.eos_token_id,
+        pad_token_id=None,
+    )
+
 
 def _empty_device_cache(device: Any) -> None:
     gc.collect()
@@ -145,14 +174,31 @@ class LLMInference:
             else torch.float32
         )
         device_map = {"": device} if device in {"cuda", "npu"} else None
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
-            dtype=dtype,
-            device_map=device_map,
-            trust_remote_code=True,
-            local_files_only=True,
-            attn_implementation=attn_impl,
-        )
+        load_attn_impl = _load_safe_attn_impl(attn_impl)
+        if attn_impl == NPU_FUSION_ATTENTION_IMPL:
+            from models import get_model_class
+
+            config_class, model_class = get_model_class(model_name_or_path, "qkv")
+            config = _gist_compatible_config(config_class, model_name_or_path, self.tokenizer)
+            self.model = model_class.from_pretrained(
+                model_name_or_path,
+                config=config,
+                dtype=dtype,
+                device_map=device_map,
+                trust_remote_code=True,
+                local_files_only=True,
+                attn_implementation=load_attn_impl,
+            )
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                dtype=dtype,
+                device_map=device_map,
+                trust_remote_code=True,
+                local_files_only=True,
+                attn_implementation=load_attn_impl,
+            )
+        _set_model_attn_impl(self.model, attn_impl)
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

@@ -110,6 +110,7 @@ def main() -> None:
     parser.add_argument("--base_model")
     parser.add_argument("--dataset_path")
     parser.add_argument("--split", default="eval")
+    parser.add_argument("--tool_document_eval_mode", default="full")
     args = parser.parse_args()
 
     rows = []
@@ -125,6 +126,7 @@ def main() -> None:
         "base_model": args.base_model,
         "dataset_path": args.dataset_path,
         "split": args.split,
+        "tool_document_eval_mode": args.tool_document_eval_mode,
         "num_rows": len(rows),
         "results": _summarize(rows),
     }

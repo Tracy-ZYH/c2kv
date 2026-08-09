@@ -47,6 +47,10 @@ class CompressHistoryDataArgs:
     require_tool_call: bool = False
     include_tools: bool = False
     max_input_chars: Optional[int] = None
+    prefix_history_doc_num: Optional[int] = None
+    prefix_history_exact: bool = False
+    full_history_doc_num: int = 0
+    split_oversized_history_docs: bool = True
     device_type: str = "auto"
     npu_attn_impl: str = "npu_fusion_attention"
 
@@ -127,6 +131,8 @@ def _source_kwargs(data_args: CompressHistoryDataArgs, split: str) -> Optional[d
             "include_tools": data_args.include_tools,
             "max_input_chars": data_args.max_input_chars,
             "max_answer_chars": data_args.max_answer_chars,
+            "prefix_history_doc_num": data_args.prefix_history_doc_num,
+            "prefix_history_exact": data_args.prefix_history_exact,
         }
     return None
 
@@ -170,6 +176,8 @@ def main():
             "max_length": data_args.max_length,
             "max_system_length": data_args.max_system_length,
             "history_selection": data_args.history_selection,
+            "full_history_doc_num": data_args.full_history_doc_num,
+            "split_oversized_history_docs": data_args.split_oversized_history_docs,
             "num_samples": data_args.num_samples,
             "shuffle_seed": training_args.dataset_shuffle_seed,
             "num_proc": data_args.num_proc,

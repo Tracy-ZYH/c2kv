@@ -18,6 +18,7 @@ MAX_EXAMPLES="${MAX_EXAMPLES:-0}"
 HYBRID_TOP_K="${HYBRID_TOP_K:-3}"
 CACHEBLEND_RECOMPUTE_RATIO="${CACHEBLEND_RECOMPUTE_RATIO:-0.15}"
 SELECTION_FILTER="${SELECTION_FILTER:-c2kv}"
+TOOL_DOCUMENT_EVAL_MODE="${TOOL_DOCUMENT_EVAL_MODE:-full}"
 MIN_NUM_TOOLS="${MIN_NUM_TOOLS:-0}"
 STRICT_4X_BASELINES="${STRICT_4X_BASELINES:-True}"
 COMMON_SUBSET_FILE="${COMMON_SUBSET_FILE:-}"
@@ -55,6 +56,7 @@ echo "COMPARE_MODES=${COMPARE_MODES}"
 echo "RATIOS=${RATIOS}"
 echo "MAX_EXAMPLES=${MAX_EXAMPLES}"
 echo "SELECTION_FILTER=${SELECTION_FILTER}"
+echo "TOOL_DOCUMENT_EVAL_MODE=${TOOL_DOCUMENT_EVAL_MODE}"
 echo "MIN_NUM_TOOLS=${MIN_NUM_TOOLS}"
 echo "STRICT_4X_BASELINES=${STRICT_4X_BASELINES}"
 echo "COMMON_SUBSET_FILE=${COMMON_SUBSET_FILE}"
@@ -102,6 +104,7 @@ if [[ "${PARALLEL_EVAL}" != "True" && "${PARALLEL_EVAL}" != "true" && "${PARALLE
     --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \
     --max_examples "${MAX_EXAMPLES}" \
     --selection_filter "${SELECTION_FILTER}" \
+    --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
     --min_num_tools "${MIN_NUM_TOOLS}" \
     --max_doc_length "${MAX_DOC_LENGTH}" \
     --max_doc_num "${MAX_DOC_NUM}" \
@@ -166,6 +169,7 @@ for mode in "${_modes[@]}"; do
         --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \
         --max_examples "${MAX_EXAMPLES}" \
         --selection_filter "${SELECTION_FILTER}" \
+        --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
         --min_num_tools "${MIN_NUM_TOOLS}" \
         --max_doc_length "${MAX_DOC_LENGTH}" \
         --max_doc_num "${MAX_DOC_NUM}" \
@@ -203,6 +207,7 @@ python agent/merge_agent_tool_definition_reuse_baselines_eval.py \
   --reuse_model "${BASE_MODEL}" \
   --dataset_path "${DATASET_PATH}" \
   --split "${SPLIT}" \
+  --tool_document_eval_mode "${TOOL_DOCUMENT_EVAL_MODE}" \
   --modes "${COMPARE_MODES}" \
   --ratios "${RATIOS}" \
   --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \

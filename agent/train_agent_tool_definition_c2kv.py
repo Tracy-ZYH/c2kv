@@ -421,10 +421,22 @@ class AgentLLMTracesSource:
         self.path = self._resolve_dataset_path(Path(args.dataset_path))
         self.source_skips: Counter[str] = Counter()
         data_files = self._find_parquet_files(self.path)
-        if not data_files:
-            raise FileNotFoundError(self._missing_dataset_message(self.path))
-        logger.info("Loading %d parquet shards from %s", len(data_files), self.path)
-        self.sessions = self._load_sessions(self._iter_parquet_rows(data_files))
+        if data_files:
+            logger.info("Loading %d parquet shards from %s", len(data_files), self.path)
+            self.sessions = self._load_sessions(self._iter_parquet_rows(data_files))
+        else:
+            jsonl_files = self._find_jsonl_files(self.path)
+            if not jsonl_files:
+                raise FileNotFoundError(self._missing_dataset_message(self.path))
+            logger.info("Loading %d jsonl shards from %s", len(jsonl_files), self.path)
+            sessions = []
+            for row_index, row in enumerate(self._iter_jsonl_rows(jsonl_files)):
+                session = self._toolathlon_row_to_session(row, row_index)
+                if session is None:
+                    self.source_skips["unusable_jsonl_row"] += 1
+                    continue
+                sessions.append(session)
+            self.sessions = sessions
         if args.max_sessions is not None:
             self.sessions = self.sessions[: args.max_sessions]
         logger.info("Loaded %d sessions before train/eval split", len(self.sessions))
@@ -450,6 +462,21 @@ class AgentLLMTracesSource:
                 files.extend(sorted(root.glob("*.parquet")))
                 if not files:
                     files.extend(sorted(root.rglob("*.parquet")))
+            if files:
+                break
+        return [str(file) for file in files]
+
+    @staticmethod
+    def _find_jsonl_files(path: Path) -> List[str]:
+        if path.is_file() and path.suffix == ".jsonl":
+            return [str(path)]
+        search_roots = [path / "data", path]
+        files: List[Path] = []
+        for root in search_roots:
+            if root.is_dir():
+                files.extend(sorted(root.glob("*.jsonl")))
+                if not files:
+                    files.extend(sorted(root.rglob("*.jsonl")))
             if files:
                 break
         return [str(file) for file in files]
@@ -488,6 +515,65 @@ class AgentLLMTracesSource:
             table = pq.read_table(data_file)
             for row in table.to_pylist():
                 yield row
+
+    @staticmethod
+    def _iter_jsonl_rows(data_files: Sequence[str]) -> Iterator[Dict[str, Any]]:
+        for data_file in data_files:
+            with Path(data_file).open("r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = _json_loads(line, None)
+                    if isinstance(row, dict):
+                        yield row
+
+    @staticmethod
+    def _toolathlon_row_to_session(row: Dict[str, Any], row_index: int) -> Optional[Dict[str, Any]]:
+        tools_payload = _json_loads(row.get("tool_calls"), {})
+        tools = _as_tool_list(tools_payload)
+        messages = _json_loads(row.get("messages"), [])
+        if not tools or not isinstance(messages, list):
+            return None
+        config = _json_loads(row.get("config"), {})
+        system_prompt = ""
+        if isinstance(config, dict):
+            system_prompts = config.get("system_prompts") if isinstance(config.get("system_prompts"), dict) else {}
+            system_prompt = str(system_prompts.get("agent") or "").strip()
+        system_message = {"role": "system", "content": system_prompt} if system_prompt else None
+        spans = []
+        for message_index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            has_tool_call = bool(
+                message.get("tool_calls")
+                or message.get("toolCalls")
+                or message.get("function_call")
+                or _message_parts(message)
+            )
+            if not has_tool_call:
+                continue
+            input_messages = [item for item in messages[:message_index] if isinstance(item, dict)]
+            if system_message and not any(item.get("role") == "system" for item in input_messages):
+                input_messages = [system_message, *input_messages]
+            if not any(item.get("role") == "user" for item in input_messages):
+                continue
+            spans.append({
+                "start_time": f"{message_index:06d}",
+                "span_id": f"toolathlon-{message_index}",
+                "attributes": {
+                    "gen_ai.tool.definitions": _json_dumps(tools),
+                    "gen_ai.input.messages": _json_dumps(input_messages),
+                    "gen_ai.output.messages": _json_dumps([message]),
+                },
+            })
+        if not spans:
+            return None
+        session_id = str(row.get("request_id") or row.get("task_name") or f"toolathlon-row-{row_index}")
+        return {
+            "session_id": session_id,
+            "subset": str(row.get("task_name") or row.get("modelname_run") or "toolathlon"),
+            "spans": spans,
+        }
 
     def _load_sessions(self, raw: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sessions_by_id: Dict[str, List[Dict[str, Any]]] = {}

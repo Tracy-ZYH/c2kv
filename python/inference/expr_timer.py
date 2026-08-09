@@ -31,7 +31,7 @@ class PhaseTimer:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self.enable:
-            return self
+            return False
         if CUDA_AVAILABLE:
             torch.cuda.synchronize(device=self.device_id)
         elapsed = time.perf_counter() - self.start_time

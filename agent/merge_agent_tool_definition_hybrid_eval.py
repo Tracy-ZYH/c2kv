@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 
 def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -45,6 +46,71 @@ def _sample_key(row: Dict[str, Any]) -> Optional[str]:
     return f"{session_id}\t{qid}" if session_id is not None else str(qid)
 
 
+def _normalize_text(text: str) -> str:
+    return " ".join((text or "").strip().split())
+
+
+def _text_tokens(text: str) -> List[str]:
+    return re.findall(r"\w+", _normalize_text(text))
+
+
+def _text_token_f1(target: str, prediction: str) -> float:
+    target_tokens = _text_tokens(target)
+    prediction_tokens = _text_tokens(prediction)
+    if not target_tokens and not prediction_tokens:
+        return 1.0
+    if not target_tokens or not prediction_tokens:
+        return 0.0
+    overlap = sum((Counter(target_tokens) & Counter(prediction_tokens)).values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(target_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _lcs_length(left: Sequence[str], right: Sequence[str]) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    for left_token in left:
+        current = [0]
+        for index, right_token in enumerate(right, start=1):
+            if left_token == right_token:
+                current.append(previous[index - 1] + 1)
+            else:
+                current.append(max(previous[index], current[-1]))
+        previous = current
+    return previous[-1]
+
+
+def _rouge_l_f1(target: str, prediction: str) -> float:
+    target_tokens = _text_tokens(target)
+    prediction_tokens = _text_tokens(prediction)
+    if not target_tokens and not prediction_tokens:
+        return 1.0
+    if not target_tokens or not prediction_tokens:
+        return 0.0
+    overlap = _lcs_length(target_tokens, prediction_tokens)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(target_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _row_text_token_f1(row: Dict[str, Any]) -> float:
+    if "text_token_f1" in row:
+        return float(row.get("text_token_f1") or 0.0)
+    return _text_token_f1(row.get("target", ""), row.get("prediction", ""))
+
+
+def _row_rouge_l_f1(row: Dict[str, Any]) -> float:
+    if "rouge_l_f1" in row:
+        return float(row.get("rouge_l_f1") or 0.0)
+    return _rouge_l_f1(row.get("target", ""), row.get("prediction", ""))
+
+
 def _metrics(valid_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     total_generated = sum(int(row.get("generated_tokens", 0)) for row in valid_rows)
     called = sum(1 for row in valid_rows if row.get("has_tool_call"))
@@ -67,6 +133,14 @@ def _metrics(valid_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         ),
         "exact_match": (
             sum(1 for row in valid_rows if row.get("exact_match")) / len(valid_rows)
+            if valid_rows else 0.0
+        ),
+        "avg_text_token_f1": (
+            sum(_row_text_token_f1(row) for row in valid_rows) / len(valid_rows)
+            if valid_rows else 0.0
+        ),
+        "avg_rouge_l_f1": (
+            sum(_row_rouge_l_f1(row) for row in valid_rows) / len(valid_rows)
             if valid_rows else 0.0
         ),
         "tool_name_accuracy": (
@@ -359,6 +433,7 @@ def main() -> None:
     parser.add_argument("--model")
     parser.add_argument("--dataset_path")
     parser.add_argument("--split", default="eval")
+    parser.add_argument("--tool_document_eval_mode", default="full")
     parser.add_argument("--router_scope", default="last_user")
     parser.add_argument("--router_strategy")
     parser.add_argument("--hybrid_modes")
@@ -376,6 +451,7 @@ def main() -> None:
         "model": args.model,
         "dataset_path": args.dataset_path,
         "split": args.split,
+        "tool_document_eval_mode": args.tool_document_eval_mode,
         "router_scope": args.router_scope,
         "router_strategy": args.router_strategy,
         "hybrid_modes": [item.strip() for item in (args.hybrid_modes or "").split(",") if item.strip()],

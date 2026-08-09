@@ -8,6 +8,12 @@ from transformers.cache_utils import DynamicCache
 from typing import Any, Dict, List, Optional, Union, Iterator
 
 
+def _as_scalar_loss(loss: torch.Tensor) -> torch.Tensor:
+    if loss.dim() == 0:
+        return loss
+    return loss.mean()
+
+
 class TrainerDistillMixin:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -99,8 +105,9 @@ class GistPretrainTrainer(TrainerDistillMixin, Trainer):
         inputs["labels"] = labels
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
+        loss = _as_scalar_loss(loss)
         if self.model_args.gist_reconstruct_loss_coef is not None:
-            self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
+            self.log_data["compress_loss"].append(_as_scalar_loss(outputs["reconstruct_loss"]).detach())
         return (loss, outputs) if return_outputs else loss
     
     def prediction_step(
@@ -158,7 +165,11 @@ class GistSFTTrainer(Trainer):
         # prepare position_ids
         position_ids = torch.arange(context_len, max_seq_len, dtype=torch.long, device=inputs["input_ids"].device)
         inputs["position_ids"] = position_ids.unsqueeze(0).expand(batch_size, -1)
-        return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+        loss_or_outputs = super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+        if return_outputs:
+            loss, outputs = loss_or_outputs
+            return _as_scalar_loss(loss), outputs
+        return _as_scalar_loss(loss_or_outputs)
     
     def prediction_step(
         self,
@@ -302,10 +313,14 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
                 inputs["labels"] = inputs["labels"][:, logits_start:]
                 inputs["logits_to_keep"] = input_length - logits_start
         else:
-            logits_start = 0
+            raise ValueError(
+                "Batch has no supervised label tokens after preprocessing/truncation. "
+                f"input_length={input_length}, max_doc_length={self.max_doc_length}"
+            )
         inputs["reconstruct_loss_coef"] = self.model_args.gist_reconstruct_loss_coef
         self._inner_model(model).config._attn_implementation = self._gist_attn_impl()
         loss, outputs = super().compute_loss(model, inputs, True, num_items_in_batch)
+        loss = _as_scalar_loss(loss)
         label_token_count = int((inputs["labels"] != -100).sum().detach().cpu().item())
         self.log_data.setdefault("label_tokens", []).append(
             inputs["labels"].new_tensor(float(label_token_count)).detach()
@@ -318,8 +333,19 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
                 f"max_doc_length={self.max_doc_length}, "
                 f"input_length={input_length}"
             )
+        if model.training and not loss.requires_grad:
+            trainable = [
+                name for name, param in self._unwrap_model(model).named_parameters()
+                if param.requires_grad
+            ]
+            raise RuntimeError(
+                "Loss does not require grad even though supervised labels are present. "
+                f"label_tokens={label_token_count}, "
+                f"num_trainable_params={len(trainable)}, "
+                f"trainable_sample={trainable[:8]}"
+            )
         if self.model_args.gist_reconstruct_loss_coef is not None and model.training:
-            self.log_data["compress_loss"].append(outputs["reconstruct_loss"].detach())
+            self.log_data["compress_loss"].append(_as_scalar_loss(outputs["reconstruct_loss"]).detach())
         return (loss, outputs) if return_outputs else loss
     
     def prediction_step(

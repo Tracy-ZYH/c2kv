@@ -8,8 +8,36 @@ from transformers.cache_utils import DynamicCache
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 
 from compress_kv import compress_kv, QueryStorage
-from mdocdataset import load_mdoc_dataset, AbstractMDQADataset
+from mdocdataset import load_mdoc_dataset, AbstractMDQADataset, max_f1_score, max_rouge_score
 from expr_timer import DataRecorder, ExprTimer
+
+
+def _is_npu_available() -> bool:
+    return hasattr(torch, "npu") and torch.npu.is_available()
+
+
+def _load_attn_impl() -> str:
+    return "eager" if _is_npu_available() else "flash_attention_2"
+
+
+def _eval_attn_impl() -> str:
+    # expr_fullcompute loads the stock Transformers model with AutoModelForCausalLM.
+    # The custom "npu_fusion_attention" backend is only registered in this repo's
+    # local model classes, so keep the full baseline on eager for NPU.
+    return "eager" if _is_npu_available() else "flash_attention_2"
+
+
+def _set_attn_impl(model: torch.nn.Module, attn_impl: str) -> None:
+    model.config._attn_implementation = attn_impl
+    if hasattr(model, "model"):
+        model.model.config._attn_implementation = attn_impl
+
+
+def _safe_metric(metric_fn, pred: str, ground_truth) -> float:
+    try:
+        return metric_fn(pred or "", ground_truth)
+    except Exception:
+        return 0.0
 
 
 def prepare_example_with_template(example, system_prompt, tokenizer):
@@ -51,8 +79,9 @@ class MDQAEvaluator:
             device_map="auto",
             trust_remote_code=True,
             local_files_only=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation=_load_attn_impl(),
         )
+        _set_attn_impl(self.model, _eval_attn_impl())
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -135,6 +164,8 @@ def evaluate_model_on_dataset(
     
     results = []
     em_scores = []
+    token_f1_scores = []
+    rouge_l_scores = []
     
     for i in tqdm(range(num_examples), desc="Evaluating"):
         example = dataset[i]
@@ -143,22 +174,31 @@ def evaluate_model_on_dataset(
         
         max_new_tokens = example['max_new_tokens'] if timer.enable and 'max_new_tokens' in example else dataset.max_new_tokens
         pred = evaluator.generate_answer(context, prompt, max_new_tokens, record)
-        em_score = dataset.metric(pred, gt)
+        em_score = _safe_metric(dataset.metric, pred, gt)
+        token_f1 = _safe_metric(max_f1_score, pred, gt)
+        rouge_l = _safe_metric(max_rouge_score, pred, gt)
         em_scores.append(em_score)
+        token_f1_scores.append(token_f1)
+        rouge_l_scores.append(rouge_l)
         
         results.append({
             'qid': qid,
             'prediction': pred,
             'ground_truth': gt,
-            'em_score': em_score
+            'em_score': em_score,
+            'token_f1': token_f1,
+            'rouge_l': rouge_l,
         })
         if timer.enable:
-            record.phases['generate'] /= len(evaluator.tokenizer.encode(pred))
+            generated_token_count = max(1, len(evaluator.tokenizer.encode(pred)))
+            record.phases['generate'] /= generated_token_count
             results[-1]['timer'] = record.summary()
             del results[-1]['prediction']
     
     # 计算指标
     exact_match = sum(em_scores) / len(em_scores) if em_scores else 0.0
+    avg_token_f1 = sum(token_f1_scores) / len(token_f1_scores) if token_f1_scores else 0.0
+    avg_rouge_l = sum(rouge_l_scores) / len(rouge_l_scores) if rouge_l_scores else 0.0
     
     # 保存结果
     if output_file:
@@ -174,6 +214,9 @@ def evaluate_model_on_dataset(
             'dataset': dataset.__class__.__name__,
             'num_examples': len(results),
             'exact_match': exact_match,
+            'primary_score': exact_match,
+            'avg_token_f1': avg_token_f1,
+            'avg_rouge_l': avg_rouge_l,
             **timer.statistics(),
         }
         
@@ -181,7 +224,13 @@ def evaluate_model_on_dataset(
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
     
-    return {'exact_match': exact_match, 'num_examples': len(results)}
+    return {
+        'exact_match': exact_match,
+        'primary_score': exact_match,
+        'avg_token_f1': avg_token_f1,
+        'avg_rouge_l': avg_rouge_l,
+        'num_examples': len(results),
+    }
 
 
 def main():

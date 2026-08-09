@@ -8,10 +8,39 @@ from transformers.cache_utils import DynamicCache
 from tqdm import tqdm
 import numpy as np
 
-from mdocdataset import AbstractMDQADataset, load_mdoc_dataset
+from mdocdataset import AbstractMDQADataset, load_mdoc_dataset, max_f1_score, max_rouge_score
 from models import get_model_class, blend_gist_key_values
 from reuse_pipeline import tokenize_for_reuse, prefill_kv_cache
 from expr_timer import DataRecorder, ExprTimer
+
+
+def _is_npu_available() -> bool:
+    return hasattr(torch, "npu") and torch.npu.is_available()
+
+
+def _load_attn_impl() -> str:
+    return "eager" if _is_npu_available() else "flash_attention_2"
+
+
+def _eval_attn_impl() -> str:
+    return "npu_fusion_attention" if _is_npu_available() else "flash_attention_2"
+
+
+def _gist_attn_impl() -> str:
+    return "npu_fusion_attention" if _is_npu_available() else "flex_attention"
+
+
+def _set_attn_impl(model: torch.nn.Module, attn_impl: str) -> None:
+    model.config._attn_implementation = attn_impl
+    if hasattr(model, "model"):
+        model.model.config._attn_implementation = attn_impl
+
+
+def _safe_metric(metric_fn, pred: str, ground_truth: Any) -> float:
+    try:
+        return metric_fn(pred or "", ground_truth)
+    except Exception:
+        return 0.0
 
 
 def cut_documents(documents: List[str], max_length: int | None) -> List[str]:
@@ -57,12 +86,15 @@ def evaluate_model_on_dataset(
         trust_remote_code=True,
         local_files_only=True,
         dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation=_load_attn_impl(),
     )
+    _set_attn_impl(model, _eval_attn_impl())
     device = model.device
     
     # Calculate metrics
     em_scores = []
+    token_f1_scores = []
+    rouge_l_scores = []
     results = []
     
     num_examples = len(dataset) if max_examples is None else min(max_examples, len(dataset))
@@ -93,7 +125,7 @@ def evaluate_model_on_dataset(
         documents = cut_documents(example['documents'], max_length=cut_length)
 
         context_inputs = tokenize_for_reuse(tokenizer, documents, keep_bos=False, role='user').to(device)
-        model.model.config._attn_implementation = "flex_attention"
+        _set_attn_impl(model, _gist_attn_impl())
         gist_extra_kwargs = {}
         if getattr(model.config, 'gist_type', None) == 'dynamic-interleave' and override_ratio is not None:
             gist_extra_kwargs['ratio'] = override_ratio
@@ -130,14 +162,17 @@ def evaluate_model_on_dataset(
         if timer.enable:
             if 'max_new_tokens' in example:
                 max_new_tokens = example['max_new_tokens']
-            cache_cpu = [(key.to(device="cpu"), value.to(device="cpu")) for key, value in context_cache]
+            cache_cpu = [
+                (layer.keys.to(device="cpu"), layer.values.to(device="cpu"))
+                for layer in context_cache.layers
+            ]
             with record.record('offload'):
                 for layer_i in range(len(cache_cpu)):
                     k, v = cache_cpu[layer_i]
                     cache_cpu[layer_i] = (k.to(device), v.to(device))
             del cache_cpu
 
-        model.model.config._attn_implementation = "flash_attention_2"
+        _set_attn_impl(model, _eval_attn_impl())
         with record.record("generate"):
             generated_outputs = model.generate(
                 input_ids=input_ids,
@@ -157,22 +192,31 @@ def evaluate_model_on_dataset(
         pred = tokenizer.decode(generated_tokens, skip_special_tokens=True)
         print(pred)
 
-        em_score = dataset.metric(pred, example['answer'])
+        em_score = _safe_metric(dataset.metric, pred, example['answer'])
+        token_f1 = _safe_metric(max_f1_score, pred, example['answer'])
+        rouge_l = _safe_metric(max_rouge_score, pred, example['answer'])
         em_scores.append(em_score)
+        token_f1_scores.append(token_f1)
+        rouge_l_scores.append(rouge_l)
         
         results.append({
             'qid': example['qid'],
             'prediction': pred,
             'ground_truth': example['answer'],
-            'em_score': em_score
+            'em_score': em_score,
+            'token_f1': token_f1,
+            'rouge_l': rouge_l,
         })
         if timer.enable:
-            record.phases['generate'] /= len(tokenizer.encode(pred))
+            generated_token_count = max(1, len(tokenizer.encode(pred)))
+            record.phases['generate'] /= generated_token_count
             results[-1]['timer'] = record.summary()
             del results[-1]['prediction']
     
     # Calculate overall metrics
     exact_match = sum(em_scores) / len(em_scores) if em_scores else 0
+    avg_token_f1 = sum(token_f1_scores) / len(token_f1_scores) if token_f1_scores else 0
+    avg_rouge_l = sum(rouge_l_scores) / len(rouge_l_scores) if rouge_l_scores else 0
     
     # Save results if output file is specified
     if output_file:
@@ -190,6 +234,9 @@ def evaluate_model_on_dataset(
             'dataset': dataset.__class__.__name__,
             'num_examples': len(results),
             'exact_match': exact_match,
+            'primary_score': exact_match,
+            'avg_token_f1': avg_token_f1,
+            'avg_rouge_l': avg_rouge_l,
             **timer.statistics(),
         }
         
@@ -199,6 +246,9 @@ def evaluate_model_on_dataset(
     
     return {
         'exact_match': exact_match,
+        'primary_score': exact_match,
+        'avg_token_f1': avg_token_f1,
+        'avg_rouge_l': avg_rouge_l,
         'num_examples': len(results)
     }
 

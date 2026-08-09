@@ -34,6 +34,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+NPU_FUSION_ATTENTION_IMPL = "npu_fusion_attention"
+
+
+def _load_safe_attn_impl(attn_impl: str) -> str:
+    return "eager" if attn_impl == NPU_FUSION_ATTENTION_IMPL else attn_impl
+
+
+def _set_model_attn_impl(model: Any, attn_impl: str) -> None:
+    if attn_impl != NPU_FUSION_ATTENTION_IMPL:
+        return
+    model.config._attn_implementation = attn_impl
+    inner_model = getattr(model, "model", None)
+    if inner_model is not None and hasattr(inner_model, "config"):
+        inner_model.config._attn_implementation = attn_impl
+
+
+def _gist_compatible_config(config_class: Any, model_path: str, tokenizer: Any) -> Any:
+    return config_class.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        local_files_only=True,
+        gist_type="dynamic-interleave",
+        gist_param="qkv",
+        gist_residual_type="embed-mean",
+        gist_overlap=64,
+        gist_token_id=tokenizer.eos_token_id,
+        pad_token_id=None,
+    )
+
 
 def _sync_device(device: Any) -> None:
     device_type = getattr(device, "type", str(device))
@@ -101,6 +130,35 @@ def _extract_tool_name(text: str) -> Optional[str]:
     return None
 
 
+def _json_loads(value: Any, default: Any) -> Any:
+    if value is None or value == "":
+        return default
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _as_tool_list(tool_definition: str) -> List[Dict[str, Any]]:
+    parsed = _json_loads(tool_definition, [])
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("tools"), list):
+            parsed = parsed["tools"]
+        elif isinstance(parsed.get("functions"), list):
+            parsed = parsed["functions"]
+        else:
+            parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _render_tool_definition(tools: List[Dict[str, Any]]) -> str:
+    return json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+
+
 def _build_tool_chunks(
     tokenizer: Any,
     tool_definition: str,
@@ -108,28 +166,58 @@ def _build_tool_chunks(
     max_doc_num: int,
     max_tool_definition_tokens: int,
     truncate_tool_definition: bool,
+    document_mode: str = "full",
 ) -> tuple[Optional[torch.Tensor], int, int, Optional[str]]:
-    tool_doc = {"role": "user", "content": "Tool definitions:\n" + tool_definition}
-    doc_ids = _chat_template_ids(tokenizer, [tool_doc])
-    if len(doc_ids) > max_tool_definition_tokens:
-        return None, len(doc_ids), 0, f"tool_definition_tokens>{max_tool_definition_tokens}"
-    max_context_tokens = max_doc_length * max_doc_num
-    if len(doc_ids) > max_context_tokens:
-        if not truncate_tool_definition:
-            return None, len(doc_ids), 0, f"tool_definition_tokens>{max_context_tokens}"
-        doc_ids = doc_ids[:max_context_tokens]
-    doc_chunks = [
-        doc_ids[start : start + max_doc_length]
-        for start in range(0, len(doc_ids), max_doc_length)
-    ]
-    if len(doc_chunks) > max_doc_num:
-        return None, len(doc_ids), 0, f"tool_definition_docs>{max_doc_num}"
+    if document_mode == "full":
+        tool_doc = {"role": "user", "content": "Tool definitions:\n" + tool_definition}
+        doc_ids = _chat_template_ids(tokenizer, [tool_doc])
+        if len(doc_ids) > max_tool_definition_tokens:
+            return None, len(doc_ids), 0, f"tool_definition_tokens>{max_tool_definition_tokens}"
+        max_context_tokens = max_doc_length * max_doc_num
+        if len(doc_ids) > max_context_tokens:
+            if not truncate_tool_definition:
+                return None, len(doc_ids), 0, f"tool_definition_tokens>{max_context_tokens}"
+            doc_ids = doc_ids[:max_context_tokens]
+        doc_chunks = [
+            doc_ids[start : start + max_doc_length]
+            for start in range(0, len(doc_ids), max_doc_length)
+        ]
+        if len(doc_chunks) > max_doc_num:
+            return None, len(doc_ids), 0, f"tool_definition_docs>{max_doc_num}"
+    elif document_mode == "per_tool":
+        tools = _as_tool_list(tool_definition)
+        if not tools:
+            return None, 0, 0, "no_parseable_tools"
+        doc_chunks = []
+        doc_tokens = 0
+        for tool in tools:
+            tool_doc = {
+                "role": "user",
+                "content": "Tool definition:\n" + _render_tool_definition([tool]),
+            }
+            doc_ids = _chat_template_ids(tokenizer, [tool_doc])
+            doc_tokens += len(doc_ids)
+            if len(doc_ids) > max_doc_length and not truncate_tool_definition:
+                return None, doc_tokens, len(doc_chunks), f"tool_document_tokens>{max_doc_length}"
+            doc_chunks.extend(
+                doc_ids[start : start + max_doc_length]
+                for start in range(0, len(doc_ids), max_doc_length)
+            )
+        if doc_tokens > max_tool_definition_tokens:
+            return None, doc_tokens, len(doc_chunks), f"tool_definition_tokens>{max_tool_definition_tokens}"
+        if len(doc_chunks) > max_doc_num:
+            if not truncate_tool_definition:
+                return None, doc_tokens, len(doc_chunks), f"tool_definition_docs>{max_doc_num}"
+            doc_chunks = doc_chunks[:max_doc_num]
+    else:
+        raise ValueError(f"Unknown tool document eval mode: {document_mode}")
     rows = []
     for chunk in doc_chunks:
         rows.append(_pad(chunk, max_doc_length, -100))
     if not rows:
-        return None, len(doc_ids), 0, "empty_tool_definition"
-    return torch.tensor(rows, dtype=torch.long), len(doc_ids), len(rows), None
+        return None, 0, 0, "empty_tool_definition"
+    total_tokens = doc_tokens if document_mode == "per_tool" else len(doc_ids)
+    return torch.tensor(rows, dtype=torch.long), total_tokens, len(rows), None
 
 
 def _tool_doc_ids(tokenizer: Any, tool_definition: str) -> List[int]:
@@ -324,6 +412,7 @@ def _generate_one(
         max_doc_num=args.max_doc_num,
         max_tool_definition_tokens=args.max_tool_definition_tokens,
         truncate_tool_definition=args.truncate_tool_definition,
+        document_mode=args.tool_document_eval_mode,
     )
     if context_input_ids is None:
         return {
@@ -619,30 +708,34 @@ def _load_model(args: argparse.Namespace, tokenizer: Any, device: str) -> Any:
         raise ValueError("--base_model is required for c2kv_untrained baseline")
     model_path = args.base_model if args.untrained_c2kv else args.model
     if args.mode in ("full", "truncate") and args.baseline_model_class == "auto":
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            local_files_only=True,
-            device_map={"": device} if device != "cpu" else None,
-            dtype=torch.bfloat16 if args.dtype == "bf16" else torch.float16 if args.dtype == "fp16" else torch.float32,
-            attn_implementation=args.generate_attn_impl,
-        )
+        if args.generate_attn_impl == NPU_FUSION_ATTENTION_IMPL:
+            config_class, model_class = get_model_class(model_path, "qkv")
+            config = _gist_compatible_config(config_class, model_path, tokenizer)
+            model = model_class.from_pretrained(
+                model_path,
+                config=config,
+                trust_remote_code=True,
+                local_files_only=True,
+                device_map={"": device} if device != "cpu" else None,
+                dtype=torch.bfloat16 if args.dtype == "bf16" else torch.float16 if args.dtype == "fp16" else torch.float32,
+                attn_implementation=_load_safe_attn_impl(args.generate_attn_impl),
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                local_files_only=True,
+                device_map={"": device} if device != "cpu" else None,
+                dtype=torch.bfloat16 if args.dtype == "bf16" else torch.float16 if args.dtype == "fp16" else torch.float32,
+                attn_implementation=args.generate_attn_impl,
+            )
+        _set_model_attn_impl(model, args.generate_attn_impl)
         model.eval()
         return model
 
     config_class, model_class = get_model_class(model_path, "qkv")
     if args.untrained_c2kv:
-        config = config_class.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            local_files_only=True,
-            gist_type="dynamic-interleave",
-            gist_param="qkv",
-            gist_residual_type="embed-mean",
-            gist_overlap=64,
-            gist_token_id=tokenizer.eos_token_id,
-            pad_token_id=None,
-        )
+        config = _gist_compatible_config(config_class, model_path, tokenizer)
         model = model_class.from_pretrained(
             model_path,
             config=config,
@@ -650,7 +743,7 @@ def _load_model(args: argparse.Namespace, tokenizer: Any, device: str) -> Any:
             local_files_only=True,
             device_map={"": device} if device != "cpu" else None,
             dtype=torch.bfloat16 if args.dtype == "bf16" else torch.float16 if args.dtype == "fp16" else torch.float32,
-            attn_implementation=args.generate_attn_impl,
+            attn_implementation=_load_safe_attn_impl(args.generate_attn_impl),
         )
     else:
         model = model_class.from_pretrained(
@@ -659,8 +752,9 @@ def _load_model(args: argparse.Namespace, tokenizer: Any, device: str) -> Any:
             local_files_only=True,
             device_map={"": device} if device != "cpu" else None,
             dtype=torch.bfloat16 if args.dtype == "bf16" else torch.float16 if args.dtype == "fp16" else torch.float32,
-            attn_implementation=args.generate_attn_impl,
+            attn_implementation=_load_safe_attn_impl(args.generate_attn_impl),
         )
+    _set_model_attn_impl(model, args.generate_attn_impl)
     model.eval()
     return model
 
@@ -711,6 +805,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
                 max_doc_num=args.max_doc_num,
                 max_tool_definition_tokens=args.max_tool_definition_tokens,
                 truncate_tool_definition=args.truncate_tool_definition,
+                document_mode=args.tool_document_eval_mode,
             )
             if skip_reason is not None:
                 selection_skips[skip_reason] += 1
@@ -762,6 +857,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         "base_model": args.base_model,
         "dataset_path": args.dataset_path,
         "split": args.split,
+        "tool_document_eval_mode": args.tool_document_eval_mode,
         "modes": modes,
         "ratios": ratios,
         "selection_skips": dict(selection_skips),
@@ -794,6 +890,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_examples", type=int, default=50, help="Maximum examples; <=0 means all selected examples.")
     parser.add_argument("--max_source_examples", type=int)
     parser.add_argument("--selection_filter", choices=["c2kv", "none"], default="c2kv")
+    parser.add_argument(
+        "--tool_document_eval_mode",
+        choices=["full", "per_tool"],
+        default="full",
+        help=(
+            "How to build C2KV eval documents from tool schemas. full keeps the "
+            "legacy single combined tool-definition document; per_tool makes each "
+            "tool schema an independent C2KV document."
+        ),
+    )
     parser.add_argument("--eval_ratio", type=float, default=0.1)
     parser.add_argument("--split_seed", type=int, default=42)
     parser.add_argument("--split_manifest_file")

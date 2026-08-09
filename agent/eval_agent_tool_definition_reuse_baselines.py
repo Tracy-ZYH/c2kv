@@ -74,6 +74,9 @@ REUSE_MODES = {
     "cacheblend_vdiff_snapkv_aug_hybrid",
 }
 AGENT_MODES = {"full", "truncate", "c2kv", "c2kv_untrained", "hybrid", "c2kv_aug_hybrid"}
+MODE_ALIASES = {
+    "c2kv_hybrid": "hybrid",
+}
 REUSE_HYBRID_MODES = {
     "snapkv_hybrid",
     "epic_leading32_snapkv_hybrid",
@@ -1252,6 +1255,7 @@ def _generate_one_c2kv_aug_hybrid(
         max_doc_num=args.max_doc_num,
         max_tool_definition_tokens=args.max_tool_definition_tokens,
         truncate_tool_definition=args.truncate_tool_definition,
+        document_mode=args.tool_document_eval_mode,
     )
     if context_input_ids is None:
         return {
@@ -1607,6 +1611,7 @@ def _select_examples(args: argparse.Namespace, tokenizer: Any) -> tuple[List[Any
                 max_doc_num=args.max_doc_num,
                 max_tool_definition_tokens=args.max_tool_definition_tokens,
                 truncate_tool_definition=args.truncate_tool_definition,
+                document_mode=args.tool_document_eval_mode,
             )
             if skip_reason is not None:
                 selection_skips[skip_reason] += 1
@@ -1633,7 +1638,8 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     if args.max_baseline_input_tokens is not None and args.max_baseline_input_tokens <= 0:
         args.max_baseline_input_tokens = None
 
-    modes = [item.strip() for item in (args.compare_modes or args.mode).split(",") if item.strip()]
+    requested_modes = [item.strip() for item in (args.compare_modes or args.mode).split(",") if item.strip()]
+    modes = [MODE_ALIASES.get(mode, mode) for mode in requested_modes]
     ratios = [int(item.strip()) for item in (args.ratios or str(args.override_ratio)).split(",") if item.strip()]
     rows: List[Dict[str, Any]] = []
 
@@ -1742,6 +1748,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         "reuse_model": args.reuse_model or args.base_model or args.model,
         "dataset_path": args.dataset_path,
         "split": args.split,
+        "tool_document_eval_mode": args.tool_document_eval_mode,
         "modes": modes,
         "ratios": ratios,
         "selection_skips": selection_skips,
@@ -1836,6 +1843,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_examples", type=int, default=0, help="Maximum examples; <=0 means all selected examples.")
     parser.add_argument("--max_source_examples", type=int)
     parser.add_argument("--selection_filter", choices=["c2kv", "none"], default="c2kv")
+    parser.add_argument(
+        "--tool_document_eval_mode",
+        choices=["full", "per_tool"],
+        default="full",
+        help=(
+            "How to build C2KV eval documents from tool schemas. full keeps one "
+            "combined tool-definition document; per_tool makes each tool schema an "
+            "independent C2KV document."
+        ),
+    )
     parser.add_argument("--min_num_tools", type=int, default=0)
     parser.add_argument("--eval_ratio", type=float, default=0.1)
     parser.add_argument("--split_seed", type=int, default=42)
