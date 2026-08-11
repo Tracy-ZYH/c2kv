@@ -35,6 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 NPU_FUSION_ATTENTION_IMPL = "npu_fusion_attention"
+_STANDALONE_POSITION_DEBUG_PRINTED = False
 
 
 def _load_safe_attn_impl(attn_impl: str) -> str:
@@ -459,6 +460,35 @@ def _generate_one(
         dtype=torch.long,
         device=model.device,
     ).unsqueeze(0)
+
+    global _STANDALONE_POSITION_DEBUG_PRINTED
+    if (
+        os.environ.get("C2KV_DEBUG_STANDALONE_POSITION") == "1"
+        and not _STANDALONE_POSITION_DEBUG_PRINTED
+    ):
+        _STANDALONE_POSITION_DEBUG_PRINTED = True
+        pos_cpu = position_ids.detach().cpu()
+        query_position_start = int(pos_cpu[0, 0].item()) if prompt_length else None
+        query_position_end = int(pos_cpu[0, -1].item()) if prompt_length else None
+        logger.warning(
+            "[C2KV STANDALONE POSITION]\n"
+            "num_docs=%s\n"
+            "sum_original_seq_len=%s\n"
+            "sum_gist_len=%s\n"
+            "physical_prefix_len=%s\n"
+            "position_correction=%s\n"
+            "query_len=%s\n"
+            "query_position_start=%s\n"
+            "query_position_end=%s",
+            doc_chunks,
+            tool_length,
+            gist_tokens,
+            cache_length,
+            original_prefix_length - cache_length,
+            prompt_length,
+            query_position_start,
+            query_position_end,
+        )
 
     prediction, latency, generated_tokens, tbt_sec = _generate_from_input_ids(
         model,
