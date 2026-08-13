@@ -148,6 +148,34 @@ def _post_json(base_url: str, path: str, payload: Dict[str, Any], timeout: int) 
     return response.json()
 
 
+def _tool_calls_to_text(tool_calls: Any) -> str:
+    """Serialize OpenAI-format message.tool_calls back into <tool_call> blocks.
+
+    When the request carries `tools`, the server-side tool-call parser (e.g.
+    --tool-call-parser qwen25) strips `<tool_call>...</tool_call>` out of
+    `message.content` and returns it as structured `message.tool_calls`.
+    Metrics in this script (`_extract_tool_name` / `_has_tool_call` / text F1)
+    operate on the text form, so the structured calls must be rendered back —
+    otherwise every tool call scores as a miss (tool_name_match = 0 for all
+    modes whenever tools are passed).
+    """
+    blocks: List[str] = []
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = function.get("name") or call.get("name")
+        arguments = function.get("arguments", call.get("arguments"))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                pass
+        payload: Dict[str, Any] = {"name": name, "arguments": arguments}
+        blocks.append("<tool_call>\n" + json.dumps(payload, ensure_ascii=False) + "\n</tool_call>")
+    return "\n".join(blocks)
+
+
 def _chat_completion(
     base_url: str,
     model: str,
@@ -166,8 +194,13 @@ def _chat_completion(
     if tools:
         payload["tools"] = tools
     data = _post_json(base_url, "/v1/chat/completions", payload, timeout)
-    content = data["choices"][0]["message"].get("content")
-    return content if isinstance(content, str) else ""
+    message = data["choices"][0]["message"]
+    content = message.get("content")
+    text = content if isinstance(content, str) else ""
+    tool_call_text = _tool_calls_to_text(message.get("tool_calls"))
+    if tool_call_text:
+        text = f"{text.rstrip()}\n{tool_call_text}" if text.strip() else tool_call_text
+    return text
 
 
 def _extract_document(
