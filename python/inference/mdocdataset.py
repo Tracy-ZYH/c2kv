@@ -936,7 +936,7 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         return WikiMQADataset(path, **kwargs)
     elif name == "hotpotqa":
         return HotpotQADataset(path, **kwargs)
-    elif name == "multinews":
+    elif name in {"multinews", "multi_news"}:
         return MultiNewsDataset(path)
     elif name == "samsum":
         return SAMSumDataset(path)

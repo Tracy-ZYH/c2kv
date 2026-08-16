@@ -14,6 +14,19 @@ MAX_CHUNKS = 10
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 
+def _load_from_disk_compat(path: str):
+    try:
+        return datasets.load_from_disk(path)
+    except ValueError as exc:
+        if "Feature type 'List' not found" not in str(exc):
+            raise
+        from datasets.features import features as hf_features
+
+        if "List" not in hf_features._FEATURE_TYPES:
+            hf_features._FEATURE_TYPES["List"] = datasets.Sequence
+        return datasets.load_from_disk(path)
+
+
 def add_eos(inputs: Mapping, eos_token_id: int):
     """Add eos for BatchEncoding object."""
     assert isinstance(inputs["input_ids"], list), f"Make sure the return_tensors are set to list!"
@@ -89,10 +102,20 @@ class GistDataset:
         if method == 'interleave':
             weights = [len(data) for data in data_list]
             probabilities = [weight / sum(weights) for weight in weights]
-            self.data = datasets.interleave_datasets(
-                data_list, probabilities=probabilities,
-                stopping_strategy="all_exhausted_without_replacement",
-            )
+            try:
+                self.data = datasets.interleave_datasets(
+                    data_list, probabilities=probabilities,
+                    stopping_strategy="all_exhausted_without_replacement",
+                )
+            except ValueError as exc:
+                if "all_exhausted_without_replacement" not in str(exc):
+                    raise
+                logger.warning(
+                    "datasets.interleave_datasets does not support "
+                    "all_exhausted_without_replacement; falling back to "
+                    "concatenate_datasets(...).shuffle(seed=42)."
+                )
+                self.data = datasets.concatenate_datasets(data_list).shuffle(seed=42)
         elif method == 'concat':
             self.data = datasets.concatenate_datasets(data_list)
         else:
@@ -130,7 +153,7 @@ class PretrainDataset(GistDataset):
             data_files = get_data_files(path, split)
             data = datasets.load_dataset(path, data_files=data_files, streaming=True)['train']
         else: # load a preprocessed subset
-            data = datasets.load_from_disk(path)
+            data = _load_from_disk_compat(path)
             map_args['num_proc'] = 32
         self.data = data.map(self._preprocess_pretrain_data, **map_args).shuffle(seed=shuffle_seed)
         self.iterator = iter(self.data)
@@ -657,23 +680,23 @@ class MultiDocDataset(GistDataset):
             extract_documents = dataset.extract_documents
             data = dataset.data
         elif "hotpotqa" in path and "cleaned" in path:
-            data = datasets.load_from_disk(path)
+            data = _load_from_disk_compat(path)
             extract_documents = lambda sample: sample
         elif "hotpotqa" in path:
             data = datasets.load_dataset("jsonl", data_files=path, split="train")
             extract_documents = lambda sample: sample
         elif "wikimqa" in path and "cleaned" in path:
-            data = datasets.load_from_disk(path)
+            data = _load_from_disk_compat(path)
             extract_documents = lambda sample: sample
         elif "wikimqa" in path:
             dataset = load_mdoc_dataset("wikimqa", "xanhho/2WikiMultihopQA", split='train')
             extract_documents = lambda sample: dataset.extract_documents(sample, data_path=path)
             data = dataset.data
         elif "longmagpie" in path or "longalpaca" in path:
-            data = datasets.load_from_disk(path)
+            data = _load_from_disk_compat(path)
             extract_documents = None
         elif "nextcoder" in path.lower():
-            data = datasets.load_from_disk(path)
+            data = _load_from_disk_compat(path)
             extract_documents = lambda s: extract_nextcoder_documents(s, max_doc_length, max_doc_num)
         elif "longalign" in path:
             data = datasets.load_dataset("json", data_files=path, split="train")
@@ -709,6 +732,7 @@ class MultiDocDataset(GistDataset):
                 'max_doc_length': max_doc_length,
                 'max_doc_num': max_doc_num,
                 'max_system_length': max_system_length,
+                'dynamic_context_cap': dynamic_context_cap,
                 'extract_docs': extract_documents,
                 'preprocess_cache_version': preprocess_cache_version,
             },
@@ -736,6 +760,7 @@ class MultiDocDataset(GistDataset):
         max_doc_length: int,
         max_doc_num: int,
         max_system_length: int,
+        dynamic_context_cap: int,
         extract_docs: Callable | None,
         preprocess_cache_version: str = "mdoc_answer_preserve_v2",
     ) -> Dict[str, Any]:
@@ -748,13 +773,22 @@ class MultiDocDataset(GistDataset):
             sample['question'] = QA_QUERY_PROMPTS[query_prompt_seed] + '\n\n' + sample['question']
             system_text = sample.get('system') or system_text
         concat_doc_ids = []
+        used_doc_num = 0
+        used_context_tokens = 0
         for doc in sample['documents'][:max_doc_num]:
+            remaining = dynamic_context_cap - used_context_tokens
+            if remaining <= 0:
+                break
             doc_ids = tokenize(tokenizer, doc, "user", max_doc_length)
+            if len(doc_ids) > remaining:
+                doc_ids = doc_ids[:remaining]
             pad_length = max_doc_length - len(doc_ids)
             assert pad_length >= 0, f"pad_length {pad_length} < 0"
+            used_context_tokens += len(doc_ids)
+            used_doc_num += 1
             concat_doc_ids.extend(doc_ids)
             concat_doc_ids.extend([-100] * pad_length)
-        concat_doc_ids.extend([-100] * (max_doc_length * (max_doc_num - len(sample['documents']))))
+        concat_doc_ids.extend([-100] * (max_doc_length * (max_doc_num - used_doc_num)))
         system_ids = tokenize(tokenizer, system_text, "system", max_system_length, keep_bos=True)
         system_ids = system_ids[:max_system_length]
         system_input_ids = system_ids + [-100] * (max_system_length - len(system_ids))

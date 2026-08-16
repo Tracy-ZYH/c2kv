@@ -94,9 +94,7 @@ def _text_tokens(text: str) -> List[str]:
     return re.findall(r"[A-Za-z0-9_]+", (text or "").lower())
 
 
-def _lexical_topk(question: str, documents: Sequence[str], top_k: int) -> set[int]:
-    if top_k <= 0:
-        return set()
+def _lexical_ranking(question: str, documents: Sequence[str]) -> List[int]:
     query_counts: Dict[str, int] = {}
     for token in _text_tokens(question):
         query_counts[token] = query_counts.get(token, 0) + 1
@@ -108,7 +106,152 @@ def _lexical_topk(question: str, documents: Sequence[str], top_k: int) -> set[in
         overlap = sum(min(count, doc_counts.get(token, 0)) for token, count in query_counts.items())
         scored.append((overlap, -index, index))
     scored.sort(reverse=True)
-    return {index for _, _, index in scored[: min(top_k, len(scored))]}
+    return [index for _, _, index in scored]
+
+
+def _lexical_topk(question: str, documents: Sequence[str], top_k: int) -> set[int]:
+    if top_k <= 0:
+        return set()
+    ranking = _lexical_ranking(question, documents)
+    return set(ranking[: min(top_k, len(ranking))])
+
+
+def _parse_rank_span(span: str) -> tuple[int, Optional[int]]:
+    span = span.strip().lower()
+    if span in {"*", "rest", "default"}:
+        return 1, None
+    if "-" in span:
+        start_text, end_text = span.split("-", 1)
+        start = int(start_text)
+        end = int(end_text) if end_text else None
+        return start, end
+    rank = int(span)
+    return rank, rank
+
+
+def _parse_precision(value: str, default_ratio: int) -> tuple[str, int]:
+    value = value.strip().lower().replace("_", "")
+    if value == "full":
+        return "full", 1
+    if value == "c2kv":
+        return "c2kv", default_ratio
+    if value.startswith("c2kv"):
+        ratio_text = value[len("c2kv") :]
+        return "c2kv", int(ratio_text) if ratio_text else default_ratio
+    raise ValueError(f"Unsupported rank plan precision={value!r}")
+
+
+def _rank_plan_states(
+    question: str,
+    documents: Sequence[str],
+    rank_plan: str,
+    default_ratio: int,
+) -> tuple[Dict[int, tuple[str, int]], List[int]]:
+    ranking = _lexical_ranking(question, documents)
+    rank_by_index = {index: rank for rank, index in enumerate(ranking, start=1)}
+    rules: List[tuple[int, Optional[int], str, int]] = []
+    for item in rank_plan.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(
+                f"Invalid rank_plan item={item!r}. Expected syntax like '1:full,2-3:c2kv4,4-:full'."
+            )
+        span_text, precision_text = item.split(":", 1)
+        start, end = _parse_rank_span(span_text)
+        kind, ratio = _parse_precision(precision_text, default_ratio)
+        rules.append((start, end, kind, ratio))
+    if not rules:
+        raise ValueError("rank_plan must not be empty when mode='rank_plan'")
+
+    states: Dict[int, tuple[str, int]] = {}
+    for index in range(len(documents)):
+        rank = rank_by_index[index]
+        state = ("c2kv", default_ratio)
+        for start, end, kind, ratio in rules:
+            if rank >= start and (end is None or rank <= end):
+                state = (kind, ratio)
+        states[index] = state
+    return states, ranking
+
+
+def _parse_int_list(text: str) -> List[int]:
+    values: List[int] = []
+    for item in (text or "").split(","):
+        item = item.strip()
+        if item:
+            values.append(int(item))
+    return values
+
+
+def _score_token_ids(query_counts: Dict[str, int], tokenizer: Any, token_ids: Sequence[int]) -> float:
+    text = tokenizer.decode(list(token_ids), skip_special_tokens=True)
+    doc_counts: Dict[str, int] = {}
+    for token in _text_tokens(text):
+        doc_counts[token] = doc_counts.get(token, 0) + 1
+    overlap = sum(min(count, doc_counts.get(token, 0)) for token, count in query_counts.items())
+    if overlap == 0:
+        return 0.0
+    return overlap / max(1.0, len(token_ids) ** 0.5)
+
+
+def _evidence_span_candidates(
+    question: str,
+    doc_ids: Sequence[Sequence[int]],
+    documents: Sequence[str],
+    tokenizer: Any,
+    candidate_docs: int,
+    span_sizes: Sequence[int],
+) -> List[Dict[str, Any]]:
+    ranking = _lexical_ranking(question, documents)
+    selected_docs = ranking[: min(candidate_docs, len(ranking))]
+    query_counts: Dict[str, int] = {}
+    for token in _text_tokens(question):
+        query_counts[token] = query_counts.get(token, 0) + 1
+
+    candidates: List[Dict[str, Any]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for doc_rank, doc_index in enumerate(selected_docs, start=1):
+        ids = list(doc_ids[doc_index])
+        if not ids:
+            continue
+        for size in sorted(set(span_sizes), reverse=True):
+            if size <= 0:
+                continue
+            window = min(size, len(ids))
+            stride = max(1, window // 2)
+            for start in range(0, len(ids), stride):
+                end = min(len(ids), start + window)
+                key = (doc_index, start, end)
+                if key in seen or end <= start:
+                    continue
+                seen.add(key)
+                span_ids = ids[start:end]
+                score = _score_token_ids(query_counts, tokenizer, span_ids)
+                if score <= 0:
+                    continue
+                candidates.append({
+                    "doc_index": doc_index,
+                    "doc_rank": doc_rank,
+                    "start_token": start,
+                    "end_token": end,
+                    "token_count": len(span_ids),
+                    "score": score,
+                    "token_ids": span_ids,
+                })
+                if end == len(ids):
+                    break
+    candidates.sort(
+        key=lambda item: (
+            item["score"],
+            -item["doc_rank"],
+            -item["token_count"],
+            -item["start_token"],
+        ),
+        reverse=True,
+    )
+    return candidates
 
 
 def _input_ids_from_tokens(tokens: Sequence[int], device: Any) -> torch.Tensor:
@@ -137,12 +280,31 @@ def _build_prefix(
         return None, f"context_tokens>{args.max_context_tokens}"
 
     full_indices: set[int]
+    doc_states: Dict[int, tuple[str, int]]
+    lexical_ranking: List[int] = []
     if args.mode == "full":
         full_indices = set(range(len(doc_ids)))
+        doc_states = {index: ("full", 1) for index in range(len(doc_ids))}
     elif args.mode == "hybrid":
         full_indices = _lexical_topk(example["question"], documents, args.hybrid_top_k)
+        doc_states = {
+            index: ("full", 1) if index in full_indices else ("c2kv", args.override_ratio)
+            for index in range(len(doc_ids))
+        }
     elif args.mode == "c2kv":
         full_indices = set()
+        doc_states = {index: ("c2kv", args.override_ratio) for index in range(len(doc_ids))}
+    elif args.mode == "budget_recovery":
+        full_indices = set()
+        doc_states = {index: ("c2kv", args.override_ratio) for index in range(len(doc_ids))}
+    elif args.mode == "rank_plan":
+        doc_states, lexical_ranking = _rank_plan_states(
+            example["question"],
+            documents,
+            args.rank_plan,
+            args.override_ratio,
+        )
+        full_indices = {index for index, (kind, _ratio) in doc_states.items() if kind == "full"}
     else:
         raise ValueError(f"Unsupported mode={args.mode!r}")
 
@@ -165,9 +327,16 @@ def _build_prefix(
     compress_sec = 0.0
     blend_sec = 0.0
     c2kv_doc_count = 0
+    c2kv_doc_counts_by_ratio: Dict[str, int] = {}
+    c2kv_doc_tokens_by_ratio: Dict[str, int] = {}
+    gist_tokens_by_ratio: Dict[str, int] = {}
+    recovery_span_tokens = 0
+    recovery_span_count = 0
+    recovery_spans: List[Dict[str, Any]] = []
 
     for index, ids in enumerate(doc_ids):
-        if index in full_indices:
+        doc_kind, doc_ratio = doc_states[index]
+        if doc_kind == "full":
             input_ids = _input_ids_from_tokens(ids, model.device)
             prefix_cache, added_length, elapsed = _prefill_tokens_with_cache(
                 model,
@@ -196,17 +365,78 @@ def _build_prefix(
             prefix_cache,
             logical_length,
             args.gist_attn_impl,
-            args.override_ratio,
+            doc_ratio,
         )
         logical_length += original_length
         c2kv_doc_tokens += original_length
-        gist_tokens += max(doc_gist_tokens, max(0, prefix_cache.get_seq_length() - before_cache_len))
+        added_gist_tokens = max(doc_gist_tokens, max(0, prefix_cache.get_seq_length() - before_cache_len))
+        gist_tokens += added_gist_tokens
+        ratio_key = str(doc_ratio)
+        c2kv_doc_counts_by_ratio[ratio_key] = c2kv_doc_counts_by_ratio.get(ratio_key, 0) + 1
+        c2kv_doc_tokens_by_ratio[ratio_key] = c2kv_doc_tokens_by_ratio.get(ratio_key, 0) + original_length
+        gist_tokens_by_ratio[ratio_key] = gist_tokens_by_ratio.get(ratio_key, 0) + added_gist_tokens
         compress_sec += doc_compress_sec
         blend_sec += doc_blend_sec
         c2kv_doc_count += 1
 
+    if args.mode == "budget_recovery":
+        budget_tokens = max(1, doc_tokens // max(1, args.target_compression_ratio))
+        current_compressed_tokens = full_doc_tokens + gist_tokens
+        extra_budget = budget_tokens - current_compressed_tokens
+        if extra_budget > 0:
+            candidates = _evidence_span_candidates(
+                example["question"],
+                doc_ids,
+                documents,
+                tokenizer,
+                args.recovery_candidate_docs,
+                _parse_int_list(args.recovery_span_tokens),
+            )
+            used_docs: set[int] = set()
+            used_ranges: Dict[int, List[tuple[int, int]]] = {}
+            for candidate in candidates:
+                token_count = int(candidate["token_count"])
+                if token_count > extra_budget:
+                    continue
+                doc_index = int(candidate["doc_index"])
+                if args.recovery_distinct_docs and doc_index in used_docs:
+                    continue
+                existing = used_ranges.setdefault(doc_index, [])
+                start = int(candidate["start_token"])
+                end = int(candidate["end_token"])
+                if any(not (end <= old_start or start >= old_end) for old_start, old_end in existing):
+                    continue
+
+                input_ids = _input_ids_from_tokens(candidate["token_ids"], model.device)
+                prefix_cache, added_length, elapsed = _prefill_tokens_with_cache(
+                    model,
+                    input_ids,
+                    prefix_cache,
+                    logical_length,
+                    args.generate_attn_impl,
+                )
+                if added_length > extra_budget:
+                    return None, "recovery_budget_overflow"
+                logical_length += added_length
+                full_doc_tokens += added_length
+                recovery_span_tokens += added_length
+                recovery_span_count += 1
+                full_prefill_sec += elapsed
+                extra_budget -= added_length
+                used_docs.add(doc_index)
+                existing.append((start, end))
+                recovery_spans.append({
+                    key: value
+                    for key, value in candidate.items()
+                    if key != "token_ids"
+                })
+                if recovery_span_count >= args.recovery_max_spans:
+                    break
+
     compressed_context_tokens = full_doc_tokens + gist_tokens
     actual_ratio = doc_tokens / compressed_context_tokens if compressed_context_tokens else 0.0
+    if args.mode == "budget_recovery" and compressed_context_tokens > doc_tokens / max(1, args.target_compression_ratio):
+        return None, "budget_constraint_violation"
     return {
         "cache": prefix_cache,
         "logical_length": logical_length,
@@ -215,11 +445,20 @@ def _build_prefix(
         "doc_chunks": len(doc_ids),
         "full_doc_count": len(full_indices),
         "c2kv_doc_count": c2kv_doc_count,
+        "c2kv_doc_counts_by_ratio": c2kv_doc_counts_by_ratio,
         "full_doc_tokens": full_doc_tokens,
+        "recovery_span_tokens": recovery_span_tokens,
+        "recovery_span_count": recovery_span_count,
+        "recovery_spans": recovery_spans,
         "c2kv_doc_tokens": c2kv_doc_tokens,
+        "c2kv_doc_tokens_by_ratio": c2kv_doc_tokens_by_ratio,
         "gist_tokens": gist_tokens,
+        "gist_tokens_by_ratio": gist_tokens_by_ratio,
         "compressed_context_tokens": compressed_context_tokens,
         "actual_compression_ratio": actual_ratio,
+        "rank_plan": args.rank_plan if args.mode == "rank_plan" else None,
+        "target_compression_ratio": args.target_compression_ratio if args.mode == "budget_recovery" else None,
+        "lexical_ranked_doc_indices": lexical_ranking[:10] if lexical_ranking else None,
         "system_prefill_sec": system_prefill_sec,
         "full_prefill_sec": full_prefill_sec,
         "tool_compress_sec": compress_sec,
@@ -322,9 +561,12 @@ def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avg_rouge_l": sum(row.get("rouge_l", 0.0) for row in valid) / len(valid) if valid else 0.0,
         "avg_doc_tokens": doc_total / len(valid) if valid else 0.0,
         "avg_full_doc_tokens": sum(row.get("full_doc_tokens", 0) for row in valid) / len(valid) if valid else 0.0,
+        "avg_recovery_span_tokens": sum(row.get("recovery_span_tokens", 0) for row in valid) / len(valid) if valid else 0.0,
+        "avg_recovery_span_count": sum(row.get("recovery_span_count", 0) for row in valid) / len(valid) if valid else 0.0,
         "avg_gist_tokens": sum(row.get("gist_tokens", 0) for row in valid) / len(valid) if valid else 0.0,
         "avg_compressed_context_tokens": compressed_total / len(valid) if valid else 0.0,
         "avg_actual_compression_ratio": sum(row.get("actual_compression_ratio", 0.0) for row in valid) / len(valid) if valid else 0.0,
+        "min_actual_compression_ratio": min((row.get("actual_compression_ratio", 0.0) for row in valid), default=0.0),
         "token_weighted_actual_compression_ratio": doc_total / compressed_total if compressed_total else 0.0,
         "avg_full_doc_count": sum(row.get("full_doc_count", 0) for row in valid) / len(valid) if valid else 0.0,
         "avg_c2kv_doc_count": sum(row.get("c2kv_doc_count", 0) for row in valid) / len(valid) if valid else 0.0,
@@ -363,7 +605,11 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
         enable_cot=args.cot,
     )
     rows: List[Dict[str, Any]] = []
-    num_examples = len(dataset) if args.max_examples is None else min(args.max_examples, len(dataset))
+    num_examples = (
+        len(dataset)
+        if args.max_examples is None or args.max_examples <= 0
+        else min(args.max_examples, len(dataset))
+    )
     for index in tqdm(range(num_examples), desc=f"{args.mode}@{args.override_ratio if args.mode != 'full' else 1}"):
         example = dataset[index]
         try:
@@ -412,9 +658,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer")
     parser.add_argument("--dataset", default="wikimqa")
     parser.add_argument("--dataset_path")
-    parser.add_argument("--mode", choices=["full", "c2kv", "hybrid"], required=True)
+    parser.add_argument("--mode", choices=["full", "c2kv", "hybrid", "rank_plan", "budget_recovery"], required=True)
     parser.add_argument("--override_ratio", type=int, default=16)
     parser.add_argument("--hybrid_top_k", type=int, default=3)
+    parser.add_argument(
+        "--rank_plan",
+        default="1:full,2-:c2kv",
+        help=(
+            "Lexical-rank precision plan for mode=rank_plan. Examples: "
+            "'1:full,2-:c2kv16' or '1:full,2-3:c2kv4,4-:full'. "
+            "Later rules override earlier matching rules."
+        ),
+    )
+    parser.add_argument("--target_compression_ratio", type=int, default=8)
+    parser.add_argument("--recovery_candidate_docs", type=int, default=4)
+    parser.add_argument("--recovery_span_tokens", default="256,128,64")
+    parser.add_argument("--recovery_max_spans", type=int, default=2)
+    parser.add_argument("--recovery_distinct_docs", action="store_true", default=True)
+    parser.add_argument("--no_recovery_distinct_docs", dest="recovery_distinct_docs", action="store_false")
     parser.add_argument("--max_examples", type=int)
     parser.add_argument("--output_file")
     parser.add_argument("--only_supporting", action="store_true")

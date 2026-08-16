@@ -142,6 +142,65 @@ def _has_tool_call(text: str) -> bool:
     return "<tool_call>" in (text or "") or "Action:" in (text or "")
 
 
+def _tool_calls_to_text(tool_calls: Any) -> str:
+    if isinstance(tool_calls, dict):
+        tool_calls = [tool_calls]
+    if not isinstance(tool_calls, list):
+        return ""
+    rendered = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = (
+            function.get("name")
+            or call.get("name")
+            or call.get("tool_name")
+            or call.get("function_name")
+            or ""
+        )
+        arguments = (
+            function.get("arguments")
+            if "arguments" in function
+            else call.get("arguments", call.get("args", call.get("input", {})))
+        )
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                pass
+        rendered.append(
+            "<tool_call>\n"
+            + json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False)
+            + "\n</tool_call>"
+        )
+    return "\n".join(rendered)
+
+
+def _message_to_prediction_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    parts = [content] if isinstance(content, str) and content else []
+    tool_calls_text = _tool_calls_to_text(message.get("tool_calls"))
+    if tool_calls_text:
+        parts.append("Action:\n" + tool_calls_text)
+    return "\n\n".join(parts)
+
+
+def _message_has_content_or_tool_calls(message: Dict[str, Any]) -> bool:
+    return bool(message.get("content") or message.get("tool_calls"))
+
+
+def _normal_chat_message_with_tool_calls(message: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = _normal_chat_message(message)
+    tool_calls_text = _tool_calls_to_text(message.get("tool_calls"))
+    if tool_calls_text and tool_calls_text not in str(normalized.get("content") or ""):
+        content = str(normalized.get("content") or "")
+        normalized["content"] = "\n\n".join(
+            part for part in (content, "Action:\n" + tool_calls_text) if part
+        )
+    return normalized
+
+
 def _post_json(base_url: str, path: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     response = HTTP.post(f"{base_url.rstrip('/')}{path}", json=payload, timeout=timeout)
     response.raise_for_status()
@@ -166,8 +225,7 @@ def _chat_completion(
     if tools:
         payload["tools"] = tools
     data = _post_json(base_url, "/v1/chat/completions", payload, timeout)
-    content = data["choices"][0]["message"].get("content")
-    return content if isinstance(content, str) else ""
+    return _message_to_prediction_text(data["choices"][0]["message"])
 
 
 def _extract_document(
@@ -203,9 +261,9 @@ def _history_messages(
     args: argparse.Namespace,
 ) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
     raw_history = [
-        _normal_chat_message(message)
+        _normal_chat_message_with_tool_calls(message)
         for message in example.history_messages
-        if message.get("content")
+        if _message_has_content_or_tool_calls(message)
     ]
     history = _fit_reused_history(
         tokenizer,
@@ -231,9 +289,9 @@ def _history_messages(
 
 def _current_messages(example: CompressHistoryExample) -> List[Dict[str, Any]]:
     return [
-        _normal_chat_message(message)
+        _normal_chat_message_with_tool_calls(message)
         for message in example.current_messages
-        if message.get("content") or message.get("role") == "assistant"
+        if _message_has_content_or_tool_calls(message) or message.get("role") == "assistant"
     ]
 
 
