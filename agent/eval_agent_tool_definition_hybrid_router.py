@@ -5,6 +5,7 @@ import copy
 import gc
 import json
 import logging
+import math
 import random
 import re
 import sys
@@ -398,6 +399,44 @@ def _rank_tools(tools: Sequence[Dict[str, Any]], query: str) -> List[int]:
     return [index for _, index in scored]
 
 
+def _rank_tools_bm25(tools: Sequence[Dict[str, Any]], query: str) -> List[int]:
+    query_terms = _tokens(query)
+    tool_terms = [_tokens(_tool_search_text(tool)) for tool in tools]
+    if not query_terms or not tool_terms:
+        return list(range(len(tools)))
+
+    doc_freq: Dict[str, int] = {}
+    for terms in tool_terms:
+        for term in set(terms):
+            doc_freq[term] = doc_freq.get(term, 0) + 1
+
+    num_docs = len(tool_terms)
+    avg_len = sum(len(terms) for terms in tool_terms) / max(1, num_docs)
+    k1 = 1.5
+    b = 0.75
+    scored: List[tuple[float, int]] = []
+    for index, terms in enumerate(tool_terms):
+        if not terms:
+            scored.append((0.0, index))
+            continue
+        counts: Dict[str, int] = {}
+        for term in terms:
+            counts[term] = counts.get(term, 0) + 1
+        doc_len = len(terms)
+        score = 0.0
+        for term in query_terms:
+            tf = counts.get(term, 0)
+            if tf <= 0:
+                continue
+            df = doc_freq.get(term, 0)
+            idf = math.log(1.0 + (num_docs - df + 0.5) / (df + 0.5))
+            denom = tf + k1 * (1.0 - b + b * doc_len / max(avg_len, 1e-6))
+            score += idf * (tf * (k1 + 1.0)) / max(denom, 1e-6)
+        scored.append((score, index))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [index for _, index in scored]
+
+
 def _split_ranked_tools(
     tools: Sequence[Dict[str, Any]],
     ranked: Sequence[int],
@@ -415,6 +454,14 @@ def _split_topk_tools(
     top_k: int,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     return _split_ranked_tools(tools, _rank_tools(tools, query), top_k)
+
+
+def _split_bm25_topk_tools(
+    tools: Sequence[Dict[str, Any]],
+    query: str,
+    top_k: int,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    return _split_ranked_tools(tools, _rank_tools_bm25(tools, query), top_k)
 
 
 def _rank_in_tool_order(
@@ -1680,6 +1727,7 @@ def _generate_one_hybrid(
     target = example.answer.strip()
     target_tool = _extract_tool_name(target)
     lexical_ranked = _rank_tools(tools, query)
+    bm25_ranked: Optional[List[int]] = None
     attention_ranked: Optional[List[int]] = None
     final_ranked: Optional[List[int]] = None
     att_rerank_debug: Optional[Dict[str, Any]] = None
@@ -1693,6 +1741,10 @@ def _generate_one_hybrid(
             seed_text=example.qid,
             seed=args.router_seed,
         )
+    elif args.router_strategy == "bm25":
+        bm25_ranked = _rank_tools_bm25(tools, query)
+        final_ranked = bm25_ranked
+        top_tools, rest_tools, top_tool_names = _split_ranked_tools(tools, final_ranked, top_k)
     elif args.router_strategy == "attention":
         attention_ranked, attention_tool_scores, attention_router_sec, _ = _rank_tools_by_attention(
             model,
@@ -1776,6 +1828,7 @@ def _generate_one_hybrid(
     selected_rest_tools = rest_tools
     router_hit = target_tool in set(top_tool_names) if target_tool else False
     target_lexical_rank = _rank_in_tool_order(tools, lexical_ranked, target_tool)
+    target_bm25_rank = _rank_in_tool_order(tools, bm25_ranked or [], target_tool)
     target_attention_rank = _rank_in_tool_order(tools, attention_ranked or [], target_tool)
     target_final_rank = _rank_in_tool_order(tools, final_ranked or [], target_tool)
     lexical_hit_at_topk = target_lexical_rank is not None and target_lexical_rank <= top_k
@@ -2037,6 +2090,7 @@ def _generate_one_hybrid(
         "final_hit_at_topk": router_hit,
         **lexical_recall,
         "target_lexical_rank": target_lexical_rank,
+        "target_bm25_rank": target_bm25_rank,
         "target_attention_rank": target_attention_rank,
         "target_final_rank": target_final_rank,
         "router_scope": args.router_scope,
@@ -2463,6 +2517,7 @@ def parse_args() -> argparse.Namespace:
         "--router_strategy",
         choices=[
             "lexical",
+            "bm25",
             "random",
             "attention",
             "lex_attention",

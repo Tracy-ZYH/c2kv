@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -196,6 +197,67 @@ def _score_token_ids(query_counts: Dict[str, int], tokenizer: Any, token_ids: Se
     return overlap / max(1.0, len(token_ids) ** 0.5)
 
 
+def _bm25_scores(query: str, texts: Sequence[str]) -> List[float]:
+    tokenized_docs = [_text_tokens(text) for text in texts]
+    query_terms = _text_tokens(query)
+    if not tokenized_docs or not query_terms:
+        return [0.0 for _ in texts]
+
+    doc_freq: Dict[str, int] = {}
+    for tokens in tokenized_docs:
+        for token in set(tokens):
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+
+    num_docs = len(tokenized_docs)
+    avg_len = sum(len(tokens) for tokens in tokenized_docs) / max(1, num_docs)
+    k1 = 1.5
+    b = 0.75
+    scores: List[float] = []
+    for tokens in tokenized_docs:
+        if not tokens:
+            scores.append(0.0)
+            continue
+        counts: Dict[str, int] = {}
+        for token in tokens:
+            counts[token] = counts.get(token, 0) + 1
+        doc_len = len(tokens)
+        score = 0.0
+        for term in query_terms:
+            tf = counts.get(term, 0)
+            if tf <= 0:
+                continue
+            df = doc_freq.get(term, 0)
+            idf = math.log(1.0 + (num_docs - df + 0.5) / (df + 0.5))
+            denom = tf + k1 * (1.0 - b + b * doc_len / max(avg_len, 1e-6))
+            score += idf * (tf * (k1 + 1.0)) / max(denom, 1e-6)
+        scores.append(score)
+    return scores
+
+
+def _clear_device_cache(device: Any) -> None:
+    device_type = getattr(device, "type", str(device)).split(":")[0]
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif device_type == "npu" and hasattr(torch, "npu") and torch.npu.is_available():
+        torch.npu.empty_cache()
+
+
+def _gist_spans_from_lengths(lengths: Sequence[int], gist_tokens: int) -> List[tuple[int, int]]:
+    total = sum(max(0, int(length)) for length in lengths)
+    if total <= 0 or gist_tokens <= 0:
+        return [(0, 0) for _ in lengths]
+    spans: List[tuple[int, int]] = []
+    cursor = 0
+    for length in lengths:
+        start = int(cursor * gist_tokens / total)
+        cursor += max(0, int(length))
+        end = int((cursor * gist_tokens + total - 1) / total)
+        if end <= start and length > 0:
+            end = min(gist_tokens, start + 1)
+        spans.append((max(0, start), min(gist_tokens, end)))
+    return spans
+
+
 def _evidence_span_candidates(
     question: str,
     doc_ids: Sequence[Sequence[int]],
@@ -254,6 +316,325 @@ def _evidence_span_candidates(
     return candidates
 
 
+def _build_chunk_candidates(
+    question: str,
+    doc_ids: Sequence[Sequence[int]],
+    documents: Sequence[str],
+    tokenizer: Any,
+    chunk_tokens: int,
+    chunk_overlap: int,
+) -> tuple[List[Dict[str, Any]], List[str], Dict[str, int]]:
+    ranking = _lexical_ranking(question, documents)
+    rank_by_doc = {doc_index: rank for rank, doc_index in enumerate(ranking, start=1)}
+
+    chunk_tokens = max(1, int(chunk_tokens))
+    chunk_overlap = max(0, min(int(chunk_overlap), chunk_tokens - 1))
+    stride = max(1, chunk_tokens - chunk_overlap)
+
+    candidates: List[Dict[str, Any]] = []
+    chunk_texts: List[str] = []
+    for doc_index, ids in enumerate(doc_ids):
+        ids = list(ids)
+        if not ids:
+            continue
+        chunk_id = 0
+        for start in range(0, len(ids), stride):
+            end = min(len(ids), start + chunk_tokens)
+            if end <= start:
+                continue
+            token_ids = ids[start:end]
+            text = tokenizer.decode(token_ids, skip_special_tokens=True)
+            chunk_texts.append(text)
+            candidates.append({
+                "doc_index": doc_index,
+                "doc_rank": rank_by_doc.get(doc_index, len(doc_ids)),
+                "chunk_id": chunk_id,
+                "start_token": start,
+                "end_token": end,
+                "token_count": len(token_ids),
+                "score": 0.0,
+                "token_ids": token_ids,
+            })
+            chunk_id += 1
+            if end == len(ids):
+                break
+    return candidates, chunk_texts, {"chunk_tokens": chunk_tokens, "chunk_overlap": chunk_overlap}
+
+
+@torch.inference_mode()
+def _rank_chunks_by_attention(
+    model: Any,
+    tokenizer: Any,
+    question: str,
+    candidates: Sequence[Dict[str, Any]],
+    args: argparse.Namespace,
+    *,
+    cache_mode: str,
+) -> tuple[List[Dict[str, Any]], float]:
+    if not candidates:
+        return [], 0.0
+
+    system_prompt = "You are a helpful assistant."
+    system_inputs = tokenize_for_reuse(tokenizer, [system_prompt], keep_bos=True, role="system")
+    system_ids = system_inputs.input_ids.to(model.device)
+    system_cache, system_length, system_prefill_sec = _prefill_system(
+        model,
+        system_ids,
+        args.system_attn_impl,
+    )
+
+    start_time = time.perf_counter()
+    prefix_cache = system_cache
+    logical_length = system_length
+    chunk_key_tokens = 0
+    spans: List[tuple[int, int]] = []
+    prefill_sec = 0.0
+    blend_sec = 0.0
+    use_gist_for_query = False
+
+    normalized_cache_mode = cache_mode.lower()
+    if normalized_cache_mode == "fullkv":
+        for candidate in candidates:
+            token_ids = candidate["token_ids"]
+            input_ids = _input_ids_from_tokens(token_ids, model.device)
+            before_length = prefix_cache.get_seq_length()
+            prefix_cache, added_length, elapsed = _prefill_tokens_with_cache(
+                model,
+                input_ids,
+                prefix_cache,
+                logical_length,
+                args.attention_router_attn_impl,
+            )
+            logical_length += added_length
+            spans.append((before_length - system_length, before_length - system_length + added_length))
+            chunk_key_tokens += added_length
+            prefill_sec += elapsed
+    elif normalized_cache_mode == "c2kv":
+        max_chunk_len = max(len(candidate["token_ids"]) for candidate in candidates)
+        pad_len = max(1, max_chunk_len)
+        context_input_ids = torch.tensor(
+            [_pad(candidate["token_ids"], pad_len) for candidate in candidates],
+            dtype=torch.long,
+        )
+        (
+            prefix_cache,
+            original_length,
+            gist_tokens,
+            _actual_ratio,
+            compress_sec,
+            doc_blend_sec,
+        ) = _build_tool_cache(
+            model,
+            context_input_ids,
+            prefix_cache,
+            logical_length,
+            args.gist_attn_impl,
+            args.override_ratio,
+        )
+        if gist_tokens <= 0:
+            raise RuntimeError("attention_chunk_router_empty_gist")
+        logical_length += original_length
+        spans = _gist_spans_from_lengths(
+            [len(candidate["token_ids"]) for candidate in candidates],
+            gist_tokens,
+        )
+        chunk_key_tokens = gist_tokens
+        prefill_sec += compress_sec
+        blend_sec += doc_blend_sec
+        use_gist_for_query = True
+    else:
+        raise ValueError(f"Unsupported attention chunk cache mode={cache_mode!r}")
+
+    query_inputs = tokenize_for_reuse(
+        tokenizer,
+        [question],
+        keep_bos=False,
+        role="user",
+        add_generation_prompt=True,
+    )
+    query_ids = query_inputs.input_ids.to(model.device)
+    if args.attention_router_max_query_tokens and query_ids.shape[1] > args.attention_router_max_query_tokens:
+        query_ids = query_ids[:, -args.attention_router_max_query_tokens :]
+    query_len = query_ids.shape[1]
+    attention_mask = torch.ones(
+        (1, prefix_cache.get_seq_length() + query_len),
+        dtype=torch.long,
+        device=model.device,
+    )
+    position_ids = torch.arange(
+        logical_length,
+        logical_length + query_len,
+        dtype=torch.long,
+        device=model.device,
+    ).unsqueeze(0)
+
+    layer_scores: List[List[float]] = []
+
+    def _score_chunk_attention(chunk_attn: torch.Tensor, span_len: int) -> float:
+        if args.attention_router_score_mode == "sum":
+            score = chunk_attn.sum(dim=-1).mean()
+        elif args.attention_router_score_mode == "sqrt_len":
+            score = chunk_attn.sum(dim=-1).mean() / (span_len ** 0.5)
+        elif args.attention_router_score_mode == "top4_mean":
+            flat = chunk_attn.reshape(-1)
+            top_n = min(max(1, args.attention_router_span_top_tokens), flat.numel())
+            score = torch.topk(flat, top_n).values.mean()
+        else:
+            score = chunk_attn.mean()
+        return float(score.item())
+
+    def make_hook(_layer_index: int):
+        def hook(_module: Any, _inputs: Any, output: Any) -> None:
+            attn_weights = output[1] if isinstance(output, tuple) and len(output) > 1 else None
+            if attn_weights is None:
+                return
+            cache_attn = attn_weights[0, :, :, system_length : system_length + chunk_key_tokens].float()
+            head_scores: List[List[float]] = []
+            for head_index in range(cache_attn.shape[0]):
+                head_attn = cache_attn[head_index]
+                scores: List[float] = []
+                for span_start, span_end in spans:
+                    if span_end <= span_start:
+                        scores.append(0.0)
+                    else:
+                        scores.append(_score_chunk_attention(head_attn[:, span_start:span_end], span_end - span_start))
+                head_scores.append(scores)
+            if head_scores:
+                layer_scores.append([
+                    sum(scores[index] for scores in head_scores) / len(head_scores)
+                    for index in range(len(candidates))
+                ])
+        return hook
+
+    num_layers = len(model.model.layers)
+    last_layers = max(1, min(args.attention_router_layers, num_layers))
+    handles = [
+        model.model.layers[index].self_attn.register_forward_hook(make_hook(index))
+        for index in range(num_layers - last_layers, num_layers)
+    ]
+    original_attn_impl = model.model.config._attn_implementation
+    model.model.config._attn_implementation = args.attention_router_attn_impl
+    try:
+        forward_kwargs = {
+            "input_ids": query_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "past_key_values": prefix_cache,
+            "use_cache": True,
+            "output_attentions": True,
+            "logits_to_keep": 1,
+        }
+        if use_gist_for_query:
+            forward_kwargs["use_gist"] = True
+        _sync_device(model.device)
+        model(**forward_kwargs)
+        _sync_device(model.device)
+    finally:
+        model.model.config._attn_implementation = original_attn_impl
+        for handle in handles:
+            handle.remove()
+        prefix_cache = None
+        system_cache = None
+        _clear_device_cache(model.device)
+
+    if not layer_scores:
+        raise RuntimeError(
+            "Attention chunk router did not capture attention weights. Try --attention_router_attn_impl eager."
+        )
+
+    scores = [
+        sum(layer[index] for layer in layer_scores) / len(layer_scores)
+        for index in range(len(candidates))
+    ]
+    ranked_candidates: List[Dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        item = dict(candidate)
+        item["score"] = scores[index]
+        item["ranker"] = f"attention_{normalized_cache_mode}"
+        item["attention_router_layers"] = last_layers
+        item["attention_score_mode"] = args.attention_router_score_mode
+        ranked_candidates.append(item)
+    ranked_candidates.sort(
+        key=lambda item: (
+            item["score"],
+            -item["doc_rank"],
+            -item["token_count"],
+            -item["start_token"],
+        ),
+        reverse=True,
+    )
+    return ranked_candidates, system_prefill_sec + (time.perf_counter() - start_time)
+
+
+def _chunk_recovery_candidates(
+    question: str,
+    doc_ids: Sequence[Sequence[int]],
+    documents: Sequence[str],
+    tokenizer: Any,
+    chunk_tokens: int,
+    chunk_overlap: int,
+    ranker: str,
+    model: Any | None = None,
+    args: argparse.Namespace | None = None,
+) -> tuple[List[Dict[str, Any]], float]:
+    candidates, chunk_texts, _ = _build_chunk_candidates(
+        question,
+        doc_ids,
+        documents,
+        tokenizer,
+        chunk_tokens,
+        chunk_overlap,
+    )
+    query_counts: Dict[str, int] = {}
+    for token in _text_tokens(question):
+        query_counts[token] = query_counts.get(token, 0) + 1
+    ranker = ranker.lower()
+    if ranker == "bm25":
+        scores = _bm25_scores(question, chunk_texts)
+    elif ranker in {"lexical", "overlap"}:
+        scores = [
+            _score_token_ids(query_counts, tokenizer, candidate["token_ids"])
+            for candidate in candidates
+        ]
+    elif ranker in {"attention_fullkv", "att_fullkv"}:
+        if model is None or args is None:
+            raise ValueError("attention_fullkv ranker requires model and args")
+        return _rank_chunks_by_attention(
+            model,
+            tokenizer,
+            question,
+            candidates,
+            args,
+            cache_mode="fullkv",
+        )
+    elif ranker in {"attention_c2kv", "att_c2kv", "attention_compressedkv", "att_compressedkv"}:
+        if model is None or args is None:
+            raise ValueError("attention_c2kv ranker requires model and args")
+        return _rank_chunks_by_attention(
+            model,
+            tokenizer,
+            question,
+            candidates,
+            args,
+            cache_mode="c2kv",
+        )
+    else:
+        raise ValueError(f"Unsupported hybrid_chunk_ranker={ranker!r}")
+    for candidate, score in zip(candidates, scores):
+        candidate["score"] = score
+        candidate["ranker"] = ranker
+    candidates.sort(
+        key=lambda item: (
+            item["score"],
+            -item["doc_rank"],
+            -item["token_count"],
+            -item["start_token"],
+        ),
+        reverse=True,
+    )
+    return candidates, 0.0
+
+
 def _input_ids_from_tokens(tokens: Sequence[int], device: Any) -> torch.Tensor:
     return torch.tensor([list(tokens)], dtype=torch.long, device=device)
 
@@ -297,6 +678,9 @@ def _build_prefix(
     elif args.mode == "budget_recovery":
         full_indices = set()
         doc_states = {index: ("c2kv", args.override_ratio) for index in range(len(doc_ids))}
+    elif args.mode == "chunk_hybrid":
+        full_indices = set()
+        doc_states = {index: ("c2kv", args.override_ratio) for index in range(len(doc_ids))}
     elif args.mode == "rank_plan":
         doc_states, lexical_ranking = _rank_plan_states(
             example["question"],
@@ -333,6 +717,7 @@ def _build_prefix(
     recovery_span_tokens = 0
     recovery_span_count = 0
     recovery_spans: List[Dict[str, Any]] = []
+    attention_router_sec = 0.0
 
     for index, ids in enumerate(doc_ids):
         doc_kind, doc_ratio = doc_states[index]
@@ -433,6 +818,49 @@ def _build_prefix(
                 if recovery_span_count >= args.recovery_max_spans:
                     break
 
+    if args.mode == "chunk_hybrid":
+        candidates, attention_router_sec = _chunk_recovery_candidates(
+            example["question"],
+            doc_ids,
+            documents,
+            tokenizer,
+            args.hybrid_chunk_tokens,
+            args.hybrid_chunk_overlap,
+            args.hybrid_chunk_ranker,
+            model,
+            args,
+        )
+        used_ranges: Dict[int, List[tuple[int, int]]] = {}
+        for candidate in candidates:
+            doc_index = int(candidate["doc_index"])
+            existing = used_ranges.setdefault(doc_index, [])
+            start = int(candidate["start_token"])
+            end = int(candidate["end_token"])
+            if any(not (end <= old_start or start >= old_end) for old_start, old_end in existing):
+                continue
+
+            input_ids = _input_ids_from_tokens(candidate["token_ids"], model.device)
+            prefix_cache, added_length, elapsed = _prefill_tokens_with_cache(
+                model,
+                input_ids,
+                prefix_cache,
+                logical_length,
+                args.generate_attn_impl,
+            )
+            logical_length += added_length
+            full_doc_tokens += added_length
+            recovery_span_tokens += added_length
+            recovery_span_count += 1
+            full_prefill_sec += elapsed
+            existing.append((start, end))
+            recovery_spans.append({
+                key: value
+                for key, value in candidate.items()
+                if key != "token_ids"
+            })
+            if recovery_span_count >= args.hybrid_chunk_top_k:
+                break
+
     compressed_context_tokens = full_doc_tokens + gist_tokens
     actual_ratio = doc_tokens / compressed_context_tokens if compressed_context_tokens else 0.0
     if args.mode == "budget_recovery" and compressed_context_tokens > doc_tokens / max(1, args.target_compression_ratio):
@@ -458,6 +886,14 @@ def _build_prefix(
         "actual_compression_ratio": actual_ratio,
         "rank_plan": args.rank_plan if args.mode == "rank_plan" else None,
         "target_compression_ratio": args.target_compression_ratio if args.mode == "budget_recovery" else None,
+        "hybrid_chunk_top_k": args.hybrid_chunk_top_k if args.mode == "chunk_hybrid" else None,
+        "hybrid_chunk_tokens": args.hybrid_chunk_tokens if args.mode == "chunk_hybrid" else None,
+        "hybrid_chunk_overlap": args.hybrid_chunk_overlap if args.mode == "chunk_hybrid" else None,
+        "hybrid_chunk_ranker": args.hybrid_chunk_ranker if args.mode == "chunk_hybrid" else None,
+        "attention_router_sec": attention_router_sec if args.mode == "chunk_hybrid" else 0.0,
+        "attention_router_layers": args.attention_router_layers if args.mode == "chunk_hybrid" else None,
+        "attention_router_attn_impl": args.attention_router_attn_impl if args.mode == "chunk_hybrid" else None,
+        "attention_router_score_mode": args.attention_router_score_mode if args.mode == "chunk_hybrid" else None,
         "lexical_ranked_doc_indices": lexical_ranking[:10] if lexical_ranking else None,
         "system_prefill_sec": system_prefill_sec,
         "full_prefill_sec": full_prefill_sec,
@@ -563,6 +999,7 @@ def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avg_full_doc_tokens": sum(row.get("full_doc_tokens", 0) for row in valid) / len(valid) if valid else 0.0,
         "avg_recovery_span_tokens": sum(row.get("recovery_span_tokens", 0) for row in valid) / len(valid) if valid else 0.0,
         "avg_recovery_span_count": sum(row.get("recovery_span_count", 0) for row in valid) / len(valid) if valid else 0.0,
+        "avg_attention_router_sec": sum(row.get("attention_router_sec", 0.0) for row in valid) / len(valid) if valid else 0.0,
         "avg_gist_tokens": sum(row.get("gist_tokens", 0) for row in valid) / len(valid) if valid else 0.0,
         "avg_compressed_context_tokens": compressed_total / len(valid) if valid else 0.0,
         "avg_actual_compression_ratio": sum(row.get("actual_compression_ratio", 0.0) for row in valid) / len(valid) if valid else 0.0,
@@ -658,7 +1095,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer")
     parser.add_argument("--dataset", default="wikimqa")
     parser.add_argument("--dataset_path")
-    parser.add_argument("--mode", choices=["full", "c2kv", "hybrid", "rank_plan", "budget_recovery"], required=True)
+    parser.add_argument("--mode", choices=["full", "c2kv", "hybrid", "rank_plan", "budget_recovery", "chunk_hybrid"], required=True)
     parser.add_argument("--override_ratio", type=int, default=16)
     parser.add_argument("--hybrid_top_k", type=int, default=3)
     parser.add_argument(
@@ -676,6 +1113,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recovery_max_spans", type=int, default=2)
     parser.add_argument("--recovery_distinct_docs", action="store_true", default=True)
     parser.add_argument("--no_recovery_distinct_docs", dest="recovery_distinct_docs", action="store_false")
+    parser.add_argument("--hybrid_chunk_top_k", type=int, default=8)
+    parser.add_argument("--hybrid_chunk_tokens", type=int, default=256)
+    parser.add_argument("--hybrid_chunk_overlap", type=int, default=64)
+    parser.add_argument(
+        "--hybrid_chunk_ranker",
+        choices=[
+            "lexical",
+            "bm25",
+            "attention_fullkv",
+            "att_fullkv",
+            "attention_c2kv",
+            "att_c2kv",
+            "attention_compressedkv",
+            "att_compressedkv",
+        ],
+        default="lexical",
+    )
+    parser.add_argument("--attention_router_layers", type=int, default=4)
+    parser.add_argument("--attention_router_attn_impl", default="eager")
+    parser.add_argument("--attention_router_max_query_tokens", type=int, default=512)
+    parser.add_argument(
+        "--attention_router_score_mode",
+        choices=["mean", "sum", "sqrt_len", "top4_mean"],
+        default="top4_mean",
+    )
+    parser.add_argument("--attention_router_span_top_tokens", type=int, default=4)
     parser.add_argument("--max_examples", type=int)
     parser.add_argument("--output_file")
     parser.add_argument("--only_supporting", action="store_true")

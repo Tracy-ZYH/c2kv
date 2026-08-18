@@ -721,20 +721,24 @@ class LongBenchDataset(AbstractMDQADataset):
         # Load and process data
         source = data_path or f"zai-org/LongBench {name}"
         print(f"Loading dataset from {source}...")
+        map_num_proc = 32
         if data_path is not None and Path(data_path).is_dir():
             data = datasets.load_from_disk(data_path)
+        elif data_path is not None and Path(data_path).is_file():
+            data = datasets.load_dataset("json", data_files=data_path, split="train")
+            map_num_proc = 1
         else:
             data = datasets.load_dataset('zai-org/LongBench', name, split='test')
         self.data = data.map(
             lambda sample: self.process_sample(sample, name, cut_length),
-            num_proc=32, remove_columns=data.column_names
+            num_proc=map_num_proc, remove_columns=data.column_names
         )
         print(f"Done loading {name}")
 
     def _configure_dataset(self, name: str) -> None:
         """Configure metric, max_new_tokens, and system_prompt based on dataset type."""
         # QA datasets - English
-        if name in ['qasper', 'multifieldqa_en', 'narrativeqa', 'triviaqa']:
+        if name in ['qasper', 'multifieldqa_en', 'narrativeqa', 'triviaqa', 'musique', 'hotpotqa', '2wikimqa']:
             self.metric = max_f1_score
             self.max_new_tokens = 256
         # QA datasets - Chinese
@@ -742,7 +746,7 @@ class LongBenchDataset(AbstractMDQADataset):
             self.metric = max_f1_zh_score
             self.max_new_tokens = 256
         # Summarization datasets - English
-        elif name in ['qmsum', 'gov_report']:
+        elif name in ['qmsum', 'gov_report', 'multi_news']:
             self.metric = max_rouge_score
             self.max_new_tokens = 512
         # Summarization datasets - Chinese
@@ -814,10 +818,38 @@ Output only the answer. No explanation. No extra text.\n\nQuestion: """ + sample
             # Context has "Passage:" markers
             documents = LongBenchDataset._split_by_markers(sample['context'], ['Passage:'], cut_length)
 
+        elif dataset_type in {'hotpotqa', '2wikimqa'}:
+            question = QA_QUERY_PROMPT + sample['input']
+            documents = LongBenchDataset._split_by_markers(
+                sample['context'],
+                ['Passage'],
+                cut_length,
+                keep_marker=True,
+            )
+
+        elif dataset_type == 'musique':
+            question = QA_QUERY_PROMPT + sample['input']
+            # LongBench Musique stores concatenated passages with "Passage N:" markers.
+            documents = LongBenchDataset._split_by_markers(
+                sample['context'],
+                ['Passage'],
+                cut_length,
+                keep_marker=True,
+            )
+
         # Summarization datasets
         elif dataset_type == 'gov_report':
             question = "Summarize the given government report. Output only the summary with no extra text or preamble."
             documents = LongBenchDataset._split_context(sample['context'], cut_length)
+
+        elif dataset_type == 'multi_news':
+            question = "Write a one-page summary of all the news. Output only the summary with no extra text or preamble."
+            documents = LongBenchDataset._split_by_markers(
+                sample['context'].replace('NEWLINE_CHAR', '\n'),
+                ['Passage'],
+                cut_length,
+                keep_marker=True,
+            )
 
         elif dataset_type == 'qmsum':
             question = """Answer the question based on the given passages.
@@ -927,15 +959,22 @@ Output only the answer in one paragraph. No markdown format. No explanation or e
 
 def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> AbstractMDQADataset:
     if name == "musique":
+        if path and "longbench" in str(path).lower():
+            return LongBenchDataset(name, kwargs.get('cut_length', 4096), path)
         if path is None:
             print('Defaulting musique dataset path to "../datasets/musique.jsonl"')
             path = "../datasets/musique.jsonl"
         return MusiqueDataset(path, **kwargs)
     kwargs.pop('only_supporting', None)
+    if name in {"wikimqa", "hotpotqa"} and path and "longbench_raw" in str(path):
+        longbench_name = "2wikimqa" if name == "wikimqa" else name
+        return LongBenchDataset(longbench_name, kwargs.get('cut_length', 4096), path)
     if name == "wikimqa":
         return WikiMQADataset(path, **kwargs)
     elif name == "hotpotqa":
         return HotpotQADataset(path, **kwargs)
+    elif name in {"multinews", "multi_news"} and path and "longbench_raw" in str(path):
+        return LongBenchDataset("multi_news", kwargs.get('cut_length', 4096), path)
     elif name in {"multinews", "multi_news"}:
         return MultiNewsDataset(path)
     elif name == "samsum":
@@ -966,8 +1005,8 @@ def load_mdoc_dataset(name: str, path: Optional[str]=None, **kwargs) -> Abstract
         return RULERDataset(path, chunk_size=chunk_size)
     # LongBench datasets (original 3 + new 13)
     elif name in [
-        'qmsum', 'gov_report', 'qasper',  # Original 3
-        'dureader', 'multifieldqa_en', 'multifieldqa_zh', 'narrativeqa', 'triviaqa',  # QA (5)
+        'qmsum', 'gov_report', 'qasper', 'multi_news',  # Original 4
+        'dureader', 'multifieldqa_en', 'multifieldqa_zh', 'narrativeqa', 'triviaqa', 'musique', 'hotpotqa', '2wikimqa',  # QA (8)
         'lsht', 'trec',  # Classification (2)
         'lcc', 'repobench-p',  # Code understanding (2)
         'passage_count', 'passage_retrieval_en', 'passage_retrieval_zh',  # Passage retrieval (3)
