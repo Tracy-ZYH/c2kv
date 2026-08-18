@@ -256,3 +256,10 @@ logs/
 # System
 .DS_Store
 Thumbs.db
+
+# Runtime/debug dumps
+extra-info/
+bfcl_runs/
+*.log
+__pycache__/
+*.pyc

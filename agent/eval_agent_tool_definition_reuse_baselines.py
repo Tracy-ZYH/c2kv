@@ -39,6 +39,7 @@ from eval_agent_tool_definition_hybrid_router import (  # noqa: E402
     _generate_one_hybrid,
     _query_text,
     _render_tool_definition,
+    _split_bm25_topk_tools,
     _split_random_topk_tools,
     _split_topk_tools,
 )
@@ -587,6 +588,12 @@ def _generate_one_reuse_hybrid(
             seed_text=example.qid,
             seed=args.router_seed,
         )
+    elif args.router_strategy == "bm25":
+        top_tools, rest_tools, top_tool_names = _split_bm25_topk_tools(
+            tools,
+            query,
+            args.hybrid_top_k,
+        )
     else:
         top_tools, rest_tools, top_tool_names = _split_topk_tools(tools, query, args.hybrid_top_k)
 
@@ -895,6 +902,12 @@ def _generate_one_reuse_aug_hybrid(
             seed_text=example.qid,
             seed=args.router_seed,
         )
+    elif args.router_strategy == "bm25":
+        top_tools, _, top_tool_names = _split_bm25_topk_tools(
+            tools,
+            query,
+            args.hybrid_top_k,
+        )
     else:
         top_tools, _, top_tool_names = _split_topk_tools(tools, query, args.hybrid_top_k)
 
@@ -1171,6 +1184,12 @@ def _generate_one_c2kv_aug_hybrid(
             args.hybrid_top_k,
             seed_text=example.qid,
             seed=args.router_seed,
+        )
+    elif args.router_strategy == "bm25":
+        top_tools, _, top_tool_names = _split_bm25_topk_tools(
+            tools,
+            query,
+            args.hybrid_top_k,
         )
     else:
         top_tools, _, top_tool_names = _split_topk_tools(tools, query, args.hybrid_top_k)
@@ -1825,7 +1844,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--override_ratio", type=int, default=4)
     parser.add_argument("--hybrid_top_k", type=int, default=3)
     parser.add_argument("--router_scope", choices=["last_user", "all"], default="last_user")
-    parser.add_argument("--router_strategy", choices=["lexical", "random"], default="lexical")
+    parser.add_argument("--router_strategy", choices=["lexical", "bm25", "random"], default="lexical")
     parser.add_argument("--router_seed", type=int, default=42)
     parser.add_argument("--router_hit_filter", choices=["all", "hit", "miss"], default="all")
     parser.add_argument(

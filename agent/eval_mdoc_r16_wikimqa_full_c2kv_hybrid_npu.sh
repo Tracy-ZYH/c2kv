@@ -30,6 +30,11 @@ GIST_ATTN_IMPL="${GIST_ATTN_IMPL:-npu_fusion_attention}"
 GENERATE_ATTN_IMPL="${GENERATE_ATTN_IMPL:-npu_fusion_attention}"
 DTYPE="${DTYPE:-bf16}"
 MODES="${MODES:-full,c2kv,hybrid}"
+RANK_PLANS="${RANK_PLANS:-}"
+TARGET_COMPRESSION_RATIO="${TARGET_COMPRESSION_RATIO:-8}"
+RECOVERY_CANDIDATE_DOCS="${RECOVERY_CANDIDATE_DOCS:-4}"
+RECOVERY_SPAN_TOKENS="${RECOVERY_SPAN_TOKENS:-256,128,64}"
+RECOVERY_MAX_SPANS="${RECOVERY_MAX_SPANS:-2}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -46,18 +51,35 @@ echo "HYBRID_TOP_K=${HYBRID_TOP_K}"
 echo "MAX_DOC_LENGTH=${MAX_DOC_LENGTH}"
 echo "MAX_DOC_NUM=${MAX_DOC_NUM}"
 echo "MAX_CONTEXT_TOKENS=${MAX_CONTEXT_TOKENS}"
+echo "RANK_PLANS=${RANK_PLANS}"
+echo "TARGET_COMPRESSION_RATIO=${TARGET_COMPRESSION_RATIO}"
+echo "RECOVERY_CANDIDATE_DOCS=${RECOVERY_CANDIDATE_DOCS}"
+echo "RECOVERY_SPAN_TOKENS=${RECOVERY_SPAN_TOKENS}"
+echo "RECOVERY_MAX_SPANS=${RECOVERY_MAX_SPANS}"
 
 IFS=',' read -ra VISIBLE_NPUS <<< "${ASCEND_RT_VISIBLE_DEVICES}"
 IFS=',' read -ra RUN_MODES <<< "${MODES}"
+IFS=';' read -ra RUN_RANK_PLANS <<< "${RANK_PLANS}"
 
 PIDS=()
 INDEX=0
+RANK_PLAN_INDEX=0
 for MODE in "${RUN_MODES[@]}"; do
   MODE="${MODE// /}"
+  RANK_PLAN=""
+  MODE_NAME="${MODE}"
+  if [[ "${MODE}" == rank_plan:* ]]; then
+    MODE_NAME="${MODE#rank_plan:}"
+    if (( RANK_PLAN_INDEX < ${#RUN_RANK_PLANS[@]} )); then
+      RANK_PLAN="${RUN_RANK_PLANS[${RANK_PLAN_INDEX}]}"
+    fi
+    RANK_PLAN_INDEX=$((RANK_PLAN_INDEX + 1))
+    MODE="rank_plan"
+  fi
   DEVICE="${VISIBLE_NPUS[$((INDEX % ${#VISIBLE_NPUS[@]}))]}"
-  OUTPUT_FILE="${OUTPUT_DIR}/${DATASET}_${MODE}_r${RATIO}.jsonl"
-  LOG_FILE="${OUTPUT_DIR}/${DATASET}_${MODE}_r${RATIO}.log"
-  echo "[launch] mode=${MODE} device=${DEVICE} output=${OUTPUT_FILE}"
+  OUTPUT_FILE="${OUTPUT_DIR}/${DATASET}_${MODE_NAME}_r${RATIO}.jsonl"
+  LOG_FILE="${OUTPUT_DIR}/${DATASET}_${MODE_NAME}_r${RATIO}.log"
+  echo "[launch] mode=${MODE} name=${MODE_NAME} rank_plan=${RANK_PLAN} device=${DEVICE} output=${OUTPUT_FILE}"
   (
     export ASCEND_RT_VISIBLE_DEVICES="${DEVICE}"
     export ASCEND_VISIBLE_DEVICES="${DEVICE}"
@@ -70,6 +92,11 @@ for MODE in "${RUN_MODES[@]}"; do
       --mode "${MODE}" \
       --override_ratio "${RATIO}" \
       --hybrid_top_k "${HYBRID_TOP_K}" \
+      --rank_plan "${RANK_PLAN:-1:full,2-:c2kv${RATIO}}" \
+      --target_compression_ratio "${TARGET_COMPRESSION_RATIO}" \
+      --recovery_candidate_docs "${RECOVERY_CANDIDATE_DOCS}" \
+      --recovery_span_tokens "${RECOVERY_SPAN_TOKENS}" \
+      --recovery_max_spans "${RECOVERY_MAX_SPANS}" \
       --max_examples "${MAX_EXAMPLES}" \
       --output_file "${OUTPUT_FILE}" \
       --max_doc_length "${MAX_DOC_LENGTH}" \
@@ -97,7 +124,11 @@ done
 echo "==== summaries ===="
 for MODE in "${RUN_MODES[@]}"; do
   MODE="${MODE// /}"
-  SUMMARY_FILE="${OUTPUT_DIR}/${DATASET}_${MODE}_r${RATIO}.summary.json"
+  MODE_NAME="${MODE}"
+  if [[ "${MODE}" == rank_plan:* ]]; then
+    MODE_NAME="${MODE#rank_plan:}"
+  fi
+  SUMMARY_FILE="${OUTPUT_DIR}/${DATASET}_${MODE_NAME}_r${RATIO}.summary.json"
   echo "---- ${SUMMARY_FILE} ----"
   if [[ -f "${SUMMARY_FILE}" ]]; then
     cat "${SUMMARY_FILE}"

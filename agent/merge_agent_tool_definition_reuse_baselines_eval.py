@@ -72,6 +72,10 @@ def _display_mode(row: Dict[str, Any]) -> str:
             return str(router_strategy)
         if hybrid_mode == "hybrid" and router_strategy == "random":
             return "random_hybrid"
+        if hybrid_mode == "hybrid" and router_strategy == "bm25":
+            if top_k is not None and top_k != 3:
+                return f"bm25_hybrid_top{top_k}"
+            return "bm25_hybrid"
         if hybrid_mode == "hybrid":
             if top_schema_mode == "compact":
                 return "c2kv_hybrid_compact"

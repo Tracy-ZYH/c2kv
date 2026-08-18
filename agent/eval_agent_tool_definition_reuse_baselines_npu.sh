@@ -134,10 +134,22 @@ BATCH_SIZE="${#_visible_npus[@]}"
 
 for mode in "${_modes[@]}"; do
   mode="${mode// /}"
+  if [[ -z "${mode}" ]]; then
+    continue
+  fi
+  actual_mode="${mode}"
+  case_router_strategy="${ROUTER_STRATEGY:-${ROUTER_STRATEGIES:-lexical}}"
+  if [[ "${mode}" == "hybrid_bm25" ]]; then
+    actual_mode="hybrid"
+    case_router_strategy="bm25"
+  elif [[ "${mode}" == "hybrid_lexical" || "${mode}" == "c2kv_hybrid" ]]; then
+    actual_mode="hybrid"
+    case_router_strategy="lexical"
+  fi
   case_ratios=("${_ratios[@]}")
-  if [[ "${mode}" == "full" || "${mode}" == "reuse" || "${mode}" == "epic_leading32" || "${mode}" == "cacheblend_vdiff" ]]; then
+  if [[ "${actual_mode}" == "full" || "${actual_mode}" == "reuse" || "${actual_mode}" == "epic_leading32" || "${actual_mode}" == "cacheblend_vdiff" ]]; then
     case_ratios=("1")
-  elif [[ "${mode}" == "snapkv_reuse" || "${mode}" == "epic_leading32_snapkv" || "${mode}" == "cacheblend_vdiff_snapkv" || "${mode}" == "snapkv_hybrid" || "${mode}" == "epic_leading32_snapkv_hybrid" || "${mode}" == "cacheblend_vdiff_snapkv_hybrid" || "${mode}" == "c2kv_aug_hybrid" || "${mode}" == "snapkv_aug_hybrid" || "${mode}" == "epic_leading32_snapkv_aug_hybrid" || "${mode}" == "cacheblend_vdiff_snapkv_aug_hybrid" ]]; then
+  elif [[ "${actual_mode}" == "snapkv_reuse" || "${actual_mode}" == "epic_leading32_snapkv" || "${actual_mode}" == "cacheblend_vdiff_snapkv" || "${actual_mode}" == "snapkv_hybrid" || "${actual_mode}" == "epic_leading32_snapkv_hybrid" || "${actual_mode}" == "cacheblend_vdiff_snapkv_hybrid" || "${actual_mode}" == "c2kv_aug_hybrid" || "${actual_mode}" == "snapkv_aug_hybrid" || "${actual_mode}" == "epic_leading32_snapkv_aug_hybrid" || "${actual_mode}" == "cacheblend_vdiff_snapkv_aug_hybrid" ]]; then
     case_ratios=("4")
   fi
   for ratio in "${case_ratios[@]}"; do
@@ -150,7 +162,7 @@ for mode in "${_modes[@]}"; do
     rm -f "${case_output}" "${case_summary}" "${case_log}"
     CASE_OUTPUTS+=("${case_output}")
     SUMMARY_FILES+=("${case_summary}")
-    echo "[launch] case=${case_name} device=${device} output=${case_output}"
+    echo "[launch] case=${case_name} actual_mode=${actual_mode} router_strategy=${case_router_strategy} device=${device} output=${case_output}"
     (
       export ASCEND_RT_VISIBLE_DEVICES="${device}"
       python agent/eval_agent_tool_definition_reuse_baselines.py \
@@ -163,9 +175,10 @@ for mode in "${_modes[@]}"; do
         --output_file "${case_output}" \
         --split "${SPLIT}" \
         "${SPLIT_ARGS[@]}" \
-        --compare_modes "${mode}" \
+        --compare_modes "${actual_mode}" \
         --ratios "${ratio}" \
         --hybrid_top_k "${HYBRID_TOP_K}" \
+        --router_strategy "${case_router_strategy}" \
         --cacheblend_recompute_ratio "${CACHEBLEND_RECOMPUTE_RATIO}" \
         --max_examples "${MAX_EXAMPLES}" \
         --selection_filter "${SELECTION_FILTER}" \
