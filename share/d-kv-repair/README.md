@@ -29,6 +29,7 @@ C2KV gist 压缩后 KV cache 的 in-place 修复实验核心。设计一句话�
 | `extract_cw_triggers.py` | C→W trigger 提取（纯 stdlib，零三方依赖） |
 | `d_sham_plan.py` | sham/corr 修复计划生成（纯 stdlib） |
 | `d_neutral_corpus.txt` | sham 臂中性语料（sha256 绑定进 plan） |
+| `d_witness_core.py` | witness 选块算法（纯 stdlib，冻结；用法见下方「Witness 选块」） |
 
 ## 接 BFCL 的三步流程
 
@@ -75,6 +76,42 @@ python -m metrology.bfcl_hf_runner \
 **接入后先跑守卫臂**：`c2kv_d_sham_mech` 的输出必须与 `c2kv` 基线臂逐 token 一致。不一致 = 手术管线有机械损伤，先修管线，再谈任何修复率数字。
 
 若要迁回自己的 harness 而非直接用 runner，`kv_repair_arms.py` 头部的接口契约仍是移植清单（宿主侧需要提供的接口现成 harness 里都有对应物）。
+
+## Witness 选块（oracle 定位器，`d_witness_core.py`）
+
+修复臂修**哪一块**历史，和怎么放 raw KV 是两个独立变量。AppWorld 单步电池上的结论（93 个 C→W 触发题，fixed_joint，ratio 8）：
+
+| 选块策略 | 救回率（tool_name_match，单 seed，n=93） |
+|---|---:|
+| 中位块（旧默认） | 33/93 = 35.5% |
+| **witness 块** | **71/93 = 76.3%** |
+| 乱修一块（823 次对照） | 25.0% |
+| 最优块天花板 | 81/93 = 87.1% |
+
+也就是说在那个电池上，块选对了修复率从 ~35% 到 ~76%，布局（原位 / 追加 / 删 gist）只差 1–5pp。这个包把选块算法单独交出来，供 BFCL 侧复用。
+
+**算法（prereg v2.2，冻结，`d_witness_core.py` 全文即算法）**：把目标动作拆成"工具名 + 参数叶子值"，每个值在多少个 doc 里出现记 df，每个 doc 的分数 = Σ 1/df（只算出现在该 doc 里的值），取 argmax；没有任何值出现过则返回 None。全部 doc 都有的值给每块加同样的 1/n，在 argmax 里抵消；只有一块有的值加 1.0。匹配在**模型实际看到的 doc 文本**上做（渲染后、截断后），不在原始 JSON 上做。
+
+**它是 oracle**：用到了目标动作（gold / reference action），所以测的是"定位的价值上界"，不是可上线的定位器。在线定位器是另一个问题，我们那边的信号层实验全部阴性，这里不重复。
+
+**接进 BFCL harness（约十行）**。`bfcl_history_kv_repair.py::_build_request_messages` 里 `texts = [_render_history_unit(unit) for unit in units]` 之后、`_recent_repair_indices` 之前，用触发本次修复的 reference step 的动作替换 `latest_index`：
+
+```python
+from d_witness_core import select_k_star, target_values
+
+if os.environ.get("REPAIR_LOCATOR", "recent") == "witness" and ref_action is not None:
+    # ref_action: 触发修复的 reference step 的 decoded tool call, 形如
+    # {"name": ..., "arguments": {...}}（oracle 触发时 runner 已经拿着它）
+    values = target_values(ref_action["name"], ref_action.get("arguments") or {})
+    k = select_k_star(texts, values)   # None = 历史里没有任何字面 witness
+    latest_index = k if k is not None else len(units) - 1   # 回退到 recent
+```
+
+`_recent_repair_indices` 不用改：window 仍以 `latest_index` 为右端，W1 就是"只修 witness 块"。`k is None` 是算法的正常输出（目标参数是自由文本、历史里没有字面依据），按 recent 回退并在日志里记一列。
+
+**建议的对照**：在现有 `replace_w1`（recent）之外加 `replace_w1@witness` 和 `replace_w1@first` 两臂。三者一起能把 W1→W2→W4→All 的阶梯拆开：如果 witness@W1 追上 W4/All，说明阶梯涨的是"盖住了对的块"而不是"raw 越多越好"；如果追不上，说明 BFCL 上的损伤不是块定位问题。两种结果都有信息量。
+
+**口径**：与 sham / corr 臂一样，请把 `k_star`、`df`、`score` 落到 details 行里（AppWorld 侧的 witness 表每题记 `n_docs, k_witness, k_median, df, score, target_doc_values`），方便对拍。
 
 ## 权重获取
 
