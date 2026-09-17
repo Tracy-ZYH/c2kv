@@ -1,0 +1,28 @@
+{
+  "schema": "c1-t02-release-provenance-v1",
+  "release_id": "c1-h0-r1-t02-v1",
+  "artifact_file": "c1_risk.t02_v1.json",
+  "artifact_file_sha256": "18a11f73aa1f7d4b0add86eed66ae9e5e129ea4bdfbe0dfad23faf4f7d2fb4ab",
+  "artifact_content_sha256": "dfe43deaa244997b1712a37a8928acc5ce8cad19cf40e3517dcad805ef0bffef",
+  "source_artifact": "/home/liuyancheng/c2kv-evidence-sets-20260916/eval_trained_v5/C1/canonical_full20/lanes/C1/trained_artifact.json",
+  "source_controller_sha256": "801140ac62df2ce101eeccda4a6ecfcf3db1c640f05a23e1560454134235460b",
+  "model_kind": "c1_risk_logistic",
+  "target": "c1_risk_label",
+  "feature_schema": "c2kv-c1-pca8-nll-stop-parse-v1",
+  "history": "H0",
+  "recovery_rounds": 1,
+  "selector_threshold": 0.5,
+  "threshold_comparison": ">",
+  "new_training_in_delivery": false,
+  "dataset": {
+    "dataset_schema": "t02-multi-plan-labeled-set-v1",
+    "format": "json",
+    "path": "/home/liuyancheng/c2kv-evidence-sets-20260916/prepared_v8/run/labels.json",
+    "sha256": "ac605900cf5f6730e3604b818061d8874bd7caa62edb71a572a661e542f5ddc7",
+    "trainer": "memory_runtime.recovery.set_training"
+  },
+  "known_training_examples": 62,
+  "unknown_training_labels_excluded": 18,
+  "calibration_states_excluded_from_fit": 38,
+  "training_groups": 15
+}

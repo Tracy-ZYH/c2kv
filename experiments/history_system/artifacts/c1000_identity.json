@@ -1,0 +1,46 @@
+{
+  "schema": "c2kv-c1000-identity-v1",
+  "identity_id": "arm-C-seed-42-checkpoint-1000",
+  "known_binding_paths": [
+    "/home/liuyancheng/c2kv-b-final-20260912/checkpoints/b_history/arm-C/seed-42/checkpoint-1000",
+    "/home/zhuyuhan/project/model/arm-C/checkpoint-1000"
+  ],
+  "files": {
+    "chat_template.jinja": {
+      "bytes": 2630,
+      "sha256": "64f85b198065d0fba2a81f37e10ed68161ce2c19a754c7100e67e0ca2ee9c326"
+    },
+    "config.json": {
+      "bytes": 3282,
+      "sha256": "15e14bfa5853ce7e74ef3cd6d65fc4b4411378c3111aebcfdc8ed272f5424655"
+    },
+    "generation_config.json": {
+      "bytes": 212,
+      "sha256": "99d326e3ef18620c0078da141909de5a954396c8c1675ffdef8e74009a5ea3a8"
+    },
+    "model.safetensors": {
+      "bytes": 10309929688,
+      "sha256": "b3ea50a5d7e4fa5225d8c5317686062fc4d09c6e4ecff984576fe75f411e846f"
+    },
+    "model.safetensors.reconstructing.json": {
+      "bytes": 7960,
+      "sha256": "8af9f38b3086ff45c03b975bb044cce7da4eaf61af7cfe328eea3c149117b517"
+    },
+    "tokenizer_config.json": {
+      "bytes": 693,
+      "sha256": "3d1614cb194c7710b666fb6ba7b4a8fecff340889ff8db4bf6592ca249fa299f"
+    },
+    "tokenizer.json": {
+      "bytes": 11422650,
+      "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"
+    }
+  },
+  "verification": {
+    "date": "2026-09-17",
+    "method": "pairwise SHA-256 on the NPU host",
+    "verified_paths": [
+      "/home/liuyancheng/c2kv-b-final-20260912/checkpoints/b_history/arm-C/seed-42/checkpoint-1000",
+      "/home/zhuyuhan/project/model/arm-C/checkpoint-1000"
+    ]
+  }
+}
