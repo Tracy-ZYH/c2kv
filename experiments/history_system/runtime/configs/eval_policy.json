@@ -1,0 +1,10 @@
+{
+  "schema": "a-event-native-eval-policy-v1",
+  "policy_id": "a-history-system-r001-r002_d3_prefill_event_mixed20_v1",
+  "policy": {
+    "history_budget_bytes": 113246208,
+    "workspace_budget_bytes": 113246208,
+    "lease_decisions": 0,
+    "max_retrieved_events": 2
+  }
+}

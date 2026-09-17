@@ -1,0 +1,61 @@
+{
+  "route": "ac_native_s0_lexical_raw_reserve_failed_operation",
+  "ratio": 8,
+  "compression_policy": "always-compress-v1",
+  "history_view_protocol": "fixed-budget-main",
+  "decode_strategy": "incremental",
+  "prefill_chunk_size": 256,
+  "sampling": {
+    "max_completion_tokens": 4096,
+    "mode": "greedy",
+    "seed": 0,
+    "temperature": 0
+  },
+  "session_cache_policy": "external-sglang-content-addressed-chunks-v1",
+  "limits": {
+    "extraction_calls_per_task": 1152,
+    "generation_attempts_per_task": 96,
+    "server_wall_seconds_per_task": 10800,
+    "stage_wall_seconds": 21600,
+    "tasks": 20
+  },
+  "checkpoint_selection": {
+    "status": "selected",
+    "path": "/home/liuyancheng/c2kv-b-final-20260912/checkpoints/b_history/arm-C/seed-42/checkpoint-1000",
+    "config_sha256": "15e14bfa5853ce7e74ef3cd6d65fc4b4411378c3111aebcfdc8ed272f5424655",
+    "selected_arm": "C",
+    "selected_step": 1000
+  },
+  "runtime": {
+    "controller": "configs/controller.json",
+    "eval_policy": "configs/eval_policy.json",
+    "eval_capacity": "configs/eval_capacity.json",
+    "shadow_feature_config": "configs/shadow_features.json",
+    "server_module": "benchmarks.memory_runtime.event_native_server",
+    "official_worker_module": "benchmarks.memory_runtime.event_native_bfcl",
+    "generation_backend": "sglang",
+    "sglang_backend_url": "http://127.0.0.1:36100",
+    "sglang_timeout_seconds": 10800,
+    "device": "cpu",
+    "dtype": "bfloat16",
+    "bfcl_python": "/home/liuyancheng/envs/bench/bin/python",
+    "npu_allocator_metrics": false
+  },
+  "retry_contract": {
+    "automatic_reruns": 0,
+    "bfcl_workers_per_task": 1,
+    "cache_miss_retries": 0,
+    "sdk_retries": 0,
+    "transport_retries": 0
+  },
+  "run_id_template": "a_history_r001_r002_d3_prefill_event_mixed20_v1",
+  "schema": "a-current-algorithm-v1",
+  "name": "Prefill-guided event recovery",
+  "candidate_id": "d3_prefill_event",
+  "source": {
+    "release": "releases/a_history_20260914/snapshots/selected_prefill_event_20260914_v2",
+    "package": "packages/bfcl_mixed20.tar.gz",
+    "package_sha256": "f31ce30bcb263b72dd254ca3d3ff1201015c2970d27782cae052132534dd5e2c",
+    "controller_sha256": "ea9fe56f0f9888ab5d7705ab181fc52717e60bcd5c017c4f4e8ab446d14ec680"
+  }
+}

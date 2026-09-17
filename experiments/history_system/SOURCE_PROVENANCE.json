@@ -1,0 +1,503 @@
+{
+  "schema": "c2kv-c1-source-provenance-v1",
+  "source_commit": "3a15fe2703b6c21009901ad5a4523c442157a3a8",
+  "source_worktree": "c2kv-a-runtime (uncommitted working-tree snapshot)",
+  "copied_source_files": {
+    "configs/current_algorithm.json": {
+      "sha256": "d5d294e94a85b0f3945eef7e780c5f72f8326a58d872bff8c3bbfad9b4752ef4",
+      "bytes": 2307
+    },
+    "current.py": {
+      "sha256": "55d52dc92486002490ab883c775354925794bc060f889759937ba8441a10f354",
+      "bytes": 5391
+    },
+    "evidence_sets.py": {
+      "sha256": "fb912389c14a0a42f4b7ea61fdeb871be29c467c8d762e5c47f76e729f64a8ea",
+      "bytes": 15804
+    },
+    "runner.py": {
+      "sha256": "938fc77e647800ee6e6ccc0e17630bafbcfa5525b2f89a313d5988efe2a59f9a",
+      "bytes": 35708
+    },
+    "runtime/agent/d_witness_core.py": {
+      "sha256": "147ae8d88b5bd81d1f9cbafd5df6914f6e7ab935be0d15fd98758bad0f44b839",
+      "bytes": 3928
+    },
+    "runtime/benchmarks/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "runtime/benchmarks/adapters/__init__.py": {
+      "sha256": "e7df590823a79094b6355973c77a3235656188c9317e7ab5d6f2f51052198aa1",
+      "bytes": 257
+    },
+    "runtime/benchmarks/adapters/base.py": {
+      "sha256": "eaf3a6abad0b53de20cf5ac459c551a743cc41266801369304fc00231dc583fc",
+      "bytes": 3122
+    },
+    "runtime/benchmarks/adapters/bfcl_adapter.py": {
+      "sha256": "23c12743faacbad0e4aaa0c54e62ed5aca2476a43b183a6f31750d650346fc1c",
+      "bytes": 31594
+    },
+    "runtime/benchmarks/arms.py": {
+      "sha256": "e80cdd6a5ee8129cc544d78dcc82c14a81ea63cd9505fbbb4ed007e5979ac7d3",
+      "bytes": 31917
+    },
+    "runtime/benchmarks/bfcl_gold_recovery.py": {
+      "sha256": "0bc8066c3f938a23e80e2197d003c981a6d81ad6479ccb302c36f0a085f52451",
+      "bytes": 47574
+    },
+    "runtime/benchmarks/memory_runtime/__init__.py": {
+      "sha256": "213f078952337ef5eabc02b92548427ab123c153aa8cf0082b101eee6653059e",
+      "bytes": 78
+    },
+    "runtime/benchmarks/memory_runtime/acebench_controls.py": {
+      "sha256": "10cdbf3ae1c09c4768ffec53b8de39f16c73b5346171add8dbdbd92468a95297",
+      "bytes": 7648
+    },
+    "runtime/benchmarks/memory_runtime/acebench_runtime.py": {
+      "sha256": "e74c97f8053130a1d2b1104dd50d40954ece6af74d35301f8e49f3c9e270e295",
+      "bytes": 5156
+    },
+    "runtime/benchmarks/memory_runtime/acebench_source.py": {
+      "sha256": "8fec7381fc7fea992004fd779f9e58fdb23343819524bfeab1be50a852bf1c7d",
+      "bytes": 19634
+    },
+    "runtime/benchmarks/memory_runtime/actor_evidence.py": {
+      "sha256": "1bcc08ac78823a9fd99926b1a576bb3d30de18fe5344a1c112d5a3eeff53ded5",
+      "bytes": 11521
+    },
+    "runtime/benchmarks/memory_runtime/adapter.py": {
+      "sha256": "636ceaf129f167a7ebe6a185eeab97cbf65956997dfe2bf90ce67cf30f525dd4",
+      "bytes": 46777
+    },
+    "runtime/benchmarks/memory_runtime/always_compress.py": {
+      "sha256": "e67b4a097cbe2c56431e0b144779758e82c8e7bbfcdc3bb59a0afe7ad5ed84d6",
+      "bytes": 6051
+    },
+    "runtime/benchmarks/memory_runtime/attempt_journal.py": {
+      "sha256": "7c1031c2c69be74b84235a4eeb0aa86693bba6d547aebd6074c82f364191dfc0",
+      "bytes": 11546
+    },
+    "runtime/benchmarks/memory_runtime/audit_b_training_overlap.py": {
+      "sha256": "f01da71c049bef38c9254c0e02622bb950fd9f1705ca759e1b84a703f029ad11",
+      "bytes": 31229
+    },
+    "runtime/benchmarks/memory_runtime/bfcl_overlap_admission.py": {
+      "sha256": "f887c84f462df4141c122f013430a3c53cf7bfaf2eed3b970ff2282f9d091c85",
+      "bytes": 6690
+    },
+    "runtime/benchmarks/memory_runtime/budget_guard.py": {
+      "sha256": "56f3322f4cfa2cd1e5a2d3ac5a1dee3cf64e715026e17b6309e4811988442d4c",
+      "bytes": 1880
+    },
+    "runtime/benchmarks/memory_runtime/capacity.py": {
+      "sha256": "2ef3723a7a4340ffdf0eed80bc0db92c320deab6ea98fffd004880cef622fafc",
+      "bytes": 2227
+    },
+    "runtime/benchmarks/memory_runtime/compact_first_failure.py": {
+      "sha256": "724dce0dfb823b0408d3de89ae8883d0836009b76bacefbf20ae867b9b4c4cce",
+      "bytes": 13412
+    },
+    "runtime/benchmarks/memory_runtime/dependency_packet.py": {
+      "sha256": "6b761d2c0edf0d99a95c7cad8881b171b4def9f6b4c8cface0fd735eaf2a3a9a",
+      "bytes": 21583
+    },
+    "runtime/benchmarks/memory_runtime/duplicate_gist.py": {
+      "sha256": "73318cecc14f142af0035982ce43bb533441d3ce0ee2be92387b1081c11d250e",
+      "bytes": 5188
+    },
+    "runtime/benchmarks/memory_runtime/event_native_allocator.py": {
+      "sha256": "3a6f03caca94d22185471aa01ac9890b0f9cec9f77233fba55dfcb25611bd2c7",
+      "bytes": 7407
+    },
+    "runtime/benchmarks/memory_runtime/event_native_always.py": {
+      "sha256": "6d4b43a5325fa76b242feecbf9356c40cc0f370c8b8bd508000f0a809aa1cb42",
+      "bytes": 805
+    },
+    "runtime/benchmarks/memory_runtime/event_native_api.py": {
+      "sha256": "b6f704653c98cd615216e84a586983164e9d8accf945b6ff55d5663ed6e49a1e",
+      "bytes": 27372
+    },
+    "runtime/benchmarks/memory_runtime/event_native_bfcl.py": {
+      "sha256": "361229080c90d8303172b2cf4c7b89aba35466a94454e33f8163c221cdcc19ad",
+      "bytes": 11914
+    },
+    "runtime/benchmarks/memory_runtime/event_native_controls.py": {
+      "sha256": "9405fa078e4b949485164d1f7fb0765a7a0cc195ab6eab5259ea4e7cb7c938b2",
+      "bytes": 26203
+    },
+    "runtime/benchmarks/memory_runtime/event_native_costs.py": {
+      "sha256": "5db2315e2f3f5c3abf05110efc6d931d5a0f9faeab37a3d97d0a19c1769ed794",
+      "bytes": 59496
+    },
+    "runtime/benchmarks/memory_runtime/event_native_draft.py": {
+      "sha256": "5fe4e8bed2119a58b8f0fab1d04e3721d518ed2f1ae393e3e583a4775532a21f",
+      "bytes": 4404
+    },
+    "runtime/benchmarks/memory_runtime/event_native_eval_packing.py": {
+      "sha256": "c5e3aa0bc5e0e760a7b53997ad101f0624be7da3548c735b11c75d0fbe838639",
+      "bytes": 1816
+    },
+    "runtime/benchmarks/memory_runtime/event_native_eval_policy.py": {
+      "sha256": "19682c93026310f148a01096ae2d7f5ffdcf2de657cc24fe11595df3b34ad2fb",
+      "bytes": 9479
+    },
+    "runtime/benchmarks/memory_runtime/event_native_exact_policy.py": {
+      "sha256": "188a6d3fc07bba5e2a0948df7f44f51fd479f4d3046b16189d757e4f5f556bb5",
+      "bytes": 64830
+    },
+    "runtime/benchmarks/memory_runtime/event_native_method_contract.py": {
+      "sha256": "1193af978d99de8fa9974332019b49815606e7bc4c8f27a58227de0fbeeacc79",
+      "bytes": 9804
+    },
+    "runtime/benchmarks/memory_runtime/event_native_policy.py": {
+      "sha256": "0a920d8be68d8d5cff69ac048ce257dca9897e600706507c8dcead1b0d0bfc42",
+      "bytes": 29742
+    },
+    "runtime/benchmarks/memory_runtime/event_native_raw.py": {
+      "sha256": "858ae3ab32f091f9128622e897a6620c401fdd7eec68b8afec3ba4e31b43b8ee",
+      "bytes": 26047
+    },
+    "runtime/benchmarks/memory_runtime/event_native_recovery.py": {
+      "sha256": "98495c76d6780f033ef70ee3f87ef16ef4ac1c299965c4611075005811348307",
+      "bytes": 888
+    },
+    "runtime/benchmarks/memory_runtime/event_native_s0_policy.py": {
+      "sha256": "fb3e0c8b4edeb888c4056b2a4201ea8d601d5f2ef1b633939c548b26b1c27b1a",
+      "bytes": 69595
+    },
+    "runtime/benchmarks/memory_runtime/event_native_server.py": {
+      "sha256": "1f02b86b7e163b523d359a9921be0f3a0b22c407e3d03f821a2ed8c220ceb6f4",
+      "bytes": 33051
+    },
+    "runtime/benchmarks/memory_runtime/event_native_step.py": {
+      "sha256": "f6bb8bbf9a30124fc273039bc10c65810ee1799424d8a3fa01c2a536ce11f253",
+      "bytes": 13084
+    },
+    "runtime/benchmarks/memory_runtime/event_native.py": {
+      "sha256": "d297cbc853786f2fc7979dfc4e98dfc53805d410b14583e7579e196ca25d4ab0",
+      "bytes": 30662
+    },
+    "runtime/benchmarks/memory_runtime/exact_gap.py": {
+      "sha256": "5f35f0def5e23b7be4186d84e8856d1a1ca1d9d00f95e30548a7f77f69851a8a",
+      "bytes": 7986
+    },
+    "runtime/benchmarks/memory_runtime/exact_policy.py": {
+      "sha256": "71da3b5420c6f838b9c306fb1d77dea45a9ba58151ef6b1cbc232543e4c4f06a",
+      "bytes": 13592
+    },
+    "runtime/benchmarks/memory_runtime/exact_raw.py": {
+      "sha256": "84431c4c0d0ee33a71ce132cfec8c1f9f1084809408b60b420566a572d58b29a",
+      "bytes": 7147
+    },
+    "runtime/benchmarks/memory_runtime/failed_operation.py": {
+      "sha256": "0488a6df1779dda03bb16c3555fe624e5d1983a966ee54bc6bc790fc48a32ab2",
+      "bytes": 10015
+    },
+    "runtime/benchmarks/memory_runtime/native_source_needs.py": {
+      "sha256": "5f47b5234cfa55f18c7789c947af6a04e937b484895eb376851ad638ea9f0e01",
+      "bytes": 4510
+    },
+    "runtime/benchmarks/memory_runtime/native_workspace.py": {
+      "sha256": "3905126bc8e472bab5d174a41c4399a25a399ea92a2c913f94cb042aab189fa4",
+      "bytes": 5709
+    },
+    "runtime/benchmarks/memory_runtime/observed_entity_slot_revision.py": {
+      "sha256": "76c4565924663c56537ae37884f0cc5cb97ba57db7387049a1f5d552593224f1",
+      "bytes": 16880
+    },
+    "runtime/benchmarks/memory_runtime/observed_entity_slot.py": {
+      "sha256": "789b8212baa3364e1a5f3c02ad0db0dc357eb512da83b540559b93412a31670e",
+      "bytes": 12805
+    },
+    "runtime/benchmarks/memory_runtime/observed_state.py": {
+      "sha256": "7536d80558c8e17dfb71e719c96fb95b018d3750844bd952c5b3b7a15fe9add2",
+      "bytes": 9269
+    },
+    "runtime/benchmarks/memory_runtime/policy.py": {
+      "sha256": "2378c290000c7eab3f43aa0d84b4b5cf6be152c34f14c7b412efbbf09266453c",
+      "bytes": 19971
+    },
+    "runtime/benchmarks/memory_runtime/raw_narration.py": {
+      "sha256": "1735d8c08bb030c4770f7e9c006c933cc2a63647002dc3ee0b972fd5b6120a2b",
+      "bytes": 5875
+    },
+    "runtime/benchmarks/memory_runtime/raw_recency.py": {
+      "sha256": "3dba42d82539b43230108eb381f875cf46071716ec6157176cee612a3666a8b2",
+      "bytes": 9301
+    },
+    "runtime/benchmarks/memory_runtime/raw_reserve.py": {
+      "sha256": "2650c22a042e35a1f585798f06be63fa4db29a4b344f8f6d8ab25c13abf43562",
+      "bytes": 9781
+    },
+    "runtime/benchmarks/memory_runtime/raw_warmup.py": {
+      "sha256": "9719584b1ccabf58efb65bc3a9ad9f272897ffde71d1e250ff474537fb36b685",
+      "bytes": 5532
+    },
+    "runtime/benchmarks/memory_runtime/recovery/__init__.py": {
+      "sha256": "119bb5bd59f6bced17b53b107260dc61257303edf7bbfe5df59ddb615924e7a7",
+      "bytes": 429
+    },
+    "runtime/benchmarks/memory_runtime/recovery/admission.py": {
+      "sha256": "159a5cbbe1f7a130817f0d66a7e2c912d7f374584de6b701c827b93117a2e5ef",
+      "bytes": 7292
+    },
+    "runtime/benchmarks/memory_runtime/recovery/config.py": {
+      "sha256": "149b9760c1c1bad20b12e02ab8e6668e1cb04e05be1322aa0014e02c677da698",
+      "bytes": 8826
+    },
+    "runtime/benchmarks/memory_runtime/recovery/evidence_units.py": {
+      "sha256": "ba417021d0bdf514b4f28cac4c42802c6cde9ca1fb1bb635baa5880cd5faec19",
+      "bytes": 43749
+    },
+    "runtime/benchmarks/memory_runtime/recovery/experiment_config.py": {
+      "sha256": "8cca0dfdf56cd23211d9bcbedc1756f4b47e120aea58c744f951560f90948597",
+      "bytes": 8982
+    },
+    "runtime/benchmarks/memory_runtime/recovery/experiment.py": {
+      "sha256": "b06a696cea1e3843928bcfc30b306e528573301b05a5d672b82f80c81d09ee57",
+      "bytes": 35940
+    },
+    "runtime/benchmarks/memory_runtime/recovery/gate.py": {
+      "sha256": "fcfa5ff89fe68a3ac47010fcdf2b645ed404a0f3e66c16ffb5fde6af0dc8a6b8",
+      "bytes": 6013
+    },
+    "runtime/benchmarks/memory_runtime/recovery/local_selection_models.py": {
+      "sha256": "fb0eae15b4c56f8027280087fe8df8cf1a74216c44d7c8d518c4dac82b90c96d",
+      "bytes": 72176
+    },
+    "runtime/benchmarks/memory_runtime/recovery/orchestrator.py": {
+      "sha256": "f849138f2d91bf0a9bb8a48811bf7d1edb3e791d8d3633289fb2c3c0573f99fd",
+      "bytes": 11188
+    },
+    "runtime/benchmarks/memory_runtime/recovery/selection_backends.py": {
+      "sha256": "20203a12a7a4d3ae197901d9d6f98cc583652ea6de334429130956d62a29dfc0",
+      "bytes": 13841
+    },
+    "runtime/benchmarks/memory_runtime/recovery/selection.py": {
+      "sha256": "a53375e760607a4edcb471d914cdac458557fb3fcc5ad3bcfc907a4641508ef3",
+      "bytes": 48718
+    },
+    "runtime/benchmarks/memory_runtime/recovery/set_models.py": {
+      "sha256": "4909216a9da9617b81807658a2e4fbc3c0e8a1c773d90434c404510644421bb9",
+      "bytes": 39174
+    },
+    "runtime/benchmarks/memory_runtime/recovery/set_protocol.py": {
+      "sha256": "4a0159e4837cc71110b1137490b49707d976436e744495c7d915563fa8cd98cb",
+      "bytes": 9738
+    },
+    "runtime/benchmarks/memory_runtime/recovery/set_retrieval.py": {
+      "sha256": "d5e7056b842c2f83ad570ca81ac190ffc62436ac48dd3ef28e4109b754bacafd",
+      "bytes": 9597
+    },
+    "runtime/benchmarks/memory_runtime/recovery/set_selectors.py": {
+      "sha256": "0b65db23771d278e486a506cf29c92f0de9af38bf7bfe071ed965df05779257e",
+      "bytes": 5335
+    },
+    "runtime/benchmarks/memory_runtime/recovery/set_training.py": {
+      "sha256": "31c2c319728f026b6273f9f91366d2cf45a782fee0e19dc701467c8a60d475ce",
+      "bytes": 42544
+    },
+    "runtime/benchmarks/memory_runtime/recovery/source.py": {
+      "sha256": "387c80c0cc4d5c99dc028805bfdcffb1d7f929864a690ef7b88e529216a51216",
+      "bytes": 6290
+    },
+    "runtime/benchmarks/memory_runtime/result_key_bridge.py": {
+      "sha256": "5d25aae7d19ccb1d337e42ff12326266f8f512b5915fc0847ba2df5952952218",
+      "bytes": 7486
+    },
+    "runtime/benchmarks/memory_runtime/same_event_bridge_only.py": {
+      "sha256": "202e3244e502ad29dde75d9d47d45ba02b378800d49f879cfce73f57bf03656d",
+      "bytes": 9952
+    },
+    "runtime/benchmarks/memory_runtime/same_event_reference.py": {
+      "sha256": "087beac687fdd262baffb9cf0194b2975a2e0a93d8017cf07f2c29d9efa0d9a1",
+      "bytes": 16553
+    },
+    "runtime/benchmarks/memory_runtime/single_task_harness_api.py": {
+      "sha256": "e98f3355ef723c7f761ea4465b9847ef3376b7464d373f67ded7af2da7b05d60",
+      "bytes": 10382
+    },
+    "runtime/benchmarks/memory_runtime/source_freshness.py": {
+      "sha256": "4327f29c3aa8433a046c4c98735862137f8b296812a85020d2fdd363ca3158a3",
+      "bytes": 3748
+    },
+    "runtime/benchmarks/memory_runtime/source_needs_runtime.py": {
+      "sha256": "b50967850c1d3cde22edc32cd1a9a480f16d8b3eceac8a11268c602eb33978d7",
+      "bytes": 66824
+    },
+    "runtime/benchmarks/memory_runtime/source_needs.py": {
+      "sha256": "ff586d03a2af21c4c06e75b83fbb1f2d97e5ae5a28942a7411508c484836e5fc",
+      "bytes": 10775
+    },
+    "runtime/benchmarks/memory_runtime/stalled_operation.py": {
+      "sha256": "45b94a3c29041b3001dd7e95cd484af18f72b1a29615181198bebc14412bccbc",
+      "bytes": 18201
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_audit_b_training_overlap.py": {
+      "sha256": "a929d310687eb79d31b9dccb23af5aca69f52d9913e6da7011dc639cef7eb686",
+      "bytes": 12755
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_event_native_bfcl.py": {
+      "sha256": "afecd8da07f19239ba2969b46e5d7c5b33653fc8a10be32e1b05d07fcb89d282",
+      "bytes": 16695
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_event_native_server.py": {
+      "sha256": "e93fb21c9baf13233b436f054cd4ce684b4422083e4a6ce4846486e0f71f95ba",
+      "bytes": 11578
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_local_selection_models.py": {
+      "sha256": "c6a660f94241d6c6426430eab2af38bff2fbeb8b8b5e6d92481e474fa14a9e66",
+      "bytes": 31321
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_recovery_evidence_units.py": {
+      "sha256": "5468eb0f184ed9e6a0e6ea3c7a4f2f862eb552450f61b48a5fd55809a0ab2e0f",
+      "bytes": 12130
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_recovery_selection.py": {
+      "sha256": "f8bd97cbf346fe1f23d59f2ee5e841c7c92135ed90d58c1f43451502f1c45d20",
+      "bytes": 17246
+    },
+    "runtime/benchmarks/memory_runtime/tests/test_set_models.py": {
+      "sha256": "e0ec8f90b80955245bf7b6b7cde7f4812a65234aec22a4735046bd4259d14a52",
+      "bytes": 19176
+    },
+    "runtime/benchmarks/memory_runtime/text_summary.py": {
+      "sha256": "db4b069416456d4e711b0aa82a7f756253851ecb18bbb62d9a3b1ca59c5fe898",
+      "bytes": 5475
+    },
+    "runtime/benchmarks/memory_runtime/tokenization.py": {
+      "sha256": "31f6cb265a4852f8cb3d43a2924f5b9c8974d05ecaa0018b1e089621530a96a0",
+      "bytes": 1111
+    },
+    "runtime/benchmarks/terminal_check.py": {
+      "sha256": "189ad1be6cf6fbee941cad8b3d19332cbb6f71e5bab8ece1f973c3ec8ced1f85",
+      "bytes": 7200
+    },
+    "runtime/configs/controller.json": {
+      "sha256": "ea9fe56f0f9888ab5d7705ab181fc52717e60bcd5c017c4f4e8ab446d14ec680",
+      "bytes": 228765
+    },
+    "runtime/configs/eval_capacity.json": {
+      "sha256": "3c31632e5e026741870d721780af05ebf6d10967cdebc87d64b35ae1156cb935",
+      "bytes": 146
+    },
+    "runtime/configs/eval_policy.json": {
+      "sha256": "0f3112d26eb834b7a4835041ddb8067ae4a6362512a2c1be7faf6c1a729ef678",
+      "bytes": 286
+    },
+    "runtime/configs/shadow_features.json": {
+      "sha256": "ef105c167ef33b6f1afd288ad802723642cd430d3a24ea7900ad2ec882753f0d",
+      "bytes": 73
+    },
+    "runtime/python/gist_args.py": {
+      "sha256": "9682603e049212049c940d6cbc3fd9cf6b72e15e909892f5789284ba7bd77538",
+      "bytes": 6007
+    },
+    "runtime/python/history_memory/__init__.py": {
+      "sha256": "53d942ccb8d1f63efb7fbb53e280ebd70059fb1b45f29d98765fb3e3a723d2d8",
+      "bytes": 178
+    },
+    "runtime/python/history_memory/cache_trace.py": {
+      "sha256": "5f44b6d4accd89a0b8f4eb33816f3d2e901b69f74669a367817d84be89c1b29c",
+      "bytes": 9441
+    },
+    "runtime/python/history_memory/encoding_scope.py": {
+      "sha256": "81036aba03bbdc054e7c9189922ff3cd4c42fda6cff16469a302f81a6b3a63ce",
+      "bytes": 15443
+    },
+    "runtime/python/history_memory/events.py": {
+      "sha256": "fed90958de12d3fc56bd26fe34f45fb2f2e24cef7af09980e97b70c4e4e2cb0f",
+      "bytes": 6353
+    },
+    "runtime/python/history_memory/evidence.py": {
+      "sha256": "6e4ab7c7bd396963fa92fd4b17aa7b885380ba974a04d9186f3708b3bfbeee89",
+      "bytes": 1776
+    },
+    "runtime/python/history_memory/inference.py": {
+      "sha256": "ef39b15cdacf680dcbacf9dd74956c24a144e4b1917e0f5e54d47c6835418106",
+      "bytes": 101697
+    },
+    "runtime/python/history_memory/packing.py": {
+      "sha256": "064e0757d1adfea5ccbb819e41873cd8e41ca5f4d3ab9cdcbb037f473b1faa2f",
+      "bytes": 31089
+    },
+    "runtime/python/history_memory/runtime.py": {
+      "sha256": "7ff81f5b58e6d07c52474c4f8f348305d8054b6719de8050a19bb6275c51b4c9",
+      "bytes": 25401
+    },
+    "runtime/python/history_memory/sglang_generator.py": {
+      "sha256": "fc374df92df042df8166679d66a27b47c9d623c4138b395e3e27220f6f48eddb",
+      "bytes": 63665
+    },
+    "runtime/python/history_memory/shadow_features.py": {
+      "sha256": "264b4fb7a23d08382aefe2a28b29c8a64f693b5bd3e293a7f65f92f48504c7a6",
+      "bytes": 16202
+    },
+    "runtime/python/history_memory/subgoals.py": {
+      "sha256": "163be1f47d286221b86af1a19aafc55b5df08ef62fcdc7393b9832631918b3f3",
+      "bytes": 17550
+    },
+    "runtime/python/inference/attn_bias.py": {
+      "sha256": "d72559bb2ebc89383187ef6054c982dd5e93a65bfd7c912af18805d96cac8ad6",
+      "bytes": 4511
+    },
+    "runtime/python/models/__init__.py": {
+      "sha256": "5875b7d56c06042b7d3c0d89d92c1b68b11c60ffc9907d387dfbf00697cdef73",
+      "bytes": 270
+    },
+    "runtime/python/models/gist_utils.py": {
+      "sha256": "56bafd6f8be156fd4fd95fa8d061c7b6f0b09c62e0c8f58aace12ed37768fcb7",
+      "bytes": 46756
+    },
+    "runtime/python/models/model_utils.py": {
+      "sha256": "bd0339999396ad5e21b3e44d2ee2eaa61d9c7ffdf78311b319af31848d16952b",
+      "bytes": 12382
+    },
+    "runtime/python/models/npu_attention.py": {
+      "sha256": "4f6d0ac4feabbdc20bb5a8dc0defe63d77c98ba86c24cf20035809c6951db088",
+      "bytes": 4569
+    },
+    "runtime/python/models/qwen3/__init__.py": {
+      "sha256": "11c527e0c37ab75d4e50f8fc0cf984d7b3ce2aaa5604ec59e495145f9e75ec5d",
+      "bytes": 165
+    },
+    "runtime/python/models/qwen3/configuration_qwen3.py": {
+      "sha256": "8e9b1cd005b6e8db3b91dec99eba92f9d83c2049681a33ded174159d5f59456a",
+      "bytes": 12208
+    },
+    "runtime/python/models/qwen3/modeling_qwen3.py": {
+      "sha256": "3fe8cf7c16abefe9d484e33c66053986bcaf8ee8c58431f606569a5099d0b215",
+      "bytes": 35990
+    },
+    "test_current.py": {
+      "sha256": "625027d464b02a8e8120707ea7adc6c2cf8e4e6abcb7ec7de7f93601a4a7b121",
+      "bytes": 8625
+    },
+    "test_evidence_sets_config.py": {
+      "sha256": "cc6a34c8c0e6dbc5b8be602eea9dc3800111236b2655195e50a3f9846125a0aa",
+      "bytes": 11878
+    },
+    "test_runner_runtime_failure.py": {
+      "sha256": "0f53cf8c00cb88af32bcc55602b16a375cd901cf7eff9a36e9fcc0d6b17f47bf",
+      "bytes": 800
+    }
+  },
+  "packaging_changes": {
+    "runtime/benchmarks/adapters/__init__.py": "Narrowed package imports to base and bfcl_adapter so the BFCL-only delivery does not require unrelated benchmark adapters.",
+    "evidence_sets.py": "Adds explicit legacy_prefill compatibility selector; C1 still requires the T02 artifact.",
+    "runtime/benchmarks/memory_runtime/recovery/experiment_config.py": "Validates explicit legacy_prefill mode and frozen threshold.",
+    "runtime/benchmarks/memory_runtime/recovery/experiment.py": "Routes the existing frozen Prefill gate through evidence-set selection.",
+    "runtime/benchmarks/memory_runtime/recovery/set_selectors.py": "Selects first feasible singleton only after positive frozen Prefill gate.",
+    "runtime/benchmarks/memory_runtime/event_native_bfcl.py": "Binds actual BFCL imports to the requested checkout and records source hashes.",
+    "test_evidence_sets_config.py": "Covers explicit compatibility mode and mandatory T02 artifact.",
+    "runtime/benchmarks/memory_runtime/tests/test_recovery_selection.py": "Covers positive, negative and incompatible Prefill gate inputs.",
+    "runtime/benchmarks/memory_runtime/tests/test_event_native_bfcl.py": "Adapts harness fixtures to the separately tested source binding."
+  },
+  "delivery_additions": [
+    "run_c1.py",
+    "README.md",
+    "runtime/benchmarks/memory_runtime/tests/test_bfcl_source_binding.py"
+  ]
+}
