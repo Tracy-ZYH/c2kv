@@ -243,7 +243,21 @@ def server_command(
     output: str,
     port: int,
     python: str,
+    benchmark: str = "bfcl",
+    source_profile: str | None = None,
 ) -> list[str]:
+    if benchmark not in {"bfcl", "tau2", "toolsandbox"}:
+        raise ValueError(f"unsupported C1 benchmark: {benchmark}")
+    expected_source_profile = (
+        "native-v1" if benchmark == "bfcl" else "openai-single-task-v1"
+    )
+    source_profile = source_profile or expected_source_profile
+    if source_profile != expected_source_profile:
+        raise ValueError(
+            f"benchmark={benchmark} requires source_profile={expected_source_profile}"
+        )
+    if not isinstance(task_id, str) or not task_id or "," in task_id:
+        raise ValueError("each C1 controller server requires exactly one task identity")
     command = [
         python,
         "-m",
@@ -257,9 +271,9 @@ def server_command(
         "--model-name",
         design["candidate_id"],
         "--benchmark",
-        "bfcl",
+        benchmark,
         "--source-profile",
-        "native-v1",
+        source_profile,
         "--view-mode",
         design["route"],
         "--compression-policy",

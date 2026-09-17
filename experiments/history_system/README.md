@@ -1,6 +1,6 @@
 # C1 end-to-end delivery
 
-这个目录提供独立的 C1 controller，并通过 SGLang C2KV native serving 运行官方 BFCL。源码包含实际使用的 archive、gist/raw packing、Prefill detector、evidence-set retrieval、B0 admission 和 append/regenerate 流程。
+这个目录提供独立的 C1 controller，并通过 SGLang C2KV native serving 运行官方 BFCL、τ²-bench 或 ToolSandbox。源码包含实际使用的 archive、gist/raw packing、Prefill detector、evidence-set retrieval、B0 admission 和 append/regenerate 流程。三者共用同一 controller 配置；benchmark 参数只切换 source profile 和官方 harness worker。
 
 默认 `legacy_prefill` 使用已训练的旧 Prefill head，加上当前 evidence-set 候选检索和首个可准入 singleton 选择。它是 **C1 的旧 detector 兼容版**。新 T02 risk head 尚未随此版本交付；`--detector t02_risk --selector-artifact PATH` 才会启用新 C1，缺少 artifact 会报错。
 
@@ -18,7 +18,7 @@ ratio、B0、任务 generation/extraction 限额来自 `configs/current_algorith
 
 - Python 环境需提供 `torch`、`transformers`、`numpy`、`safetensors`、`requests`；NPU 另需可用的 `torch_npu` 和 Ascend 环境。
 - SGLang checkout 必须实现 `POST /v1/c2kv/native_generate` 和相应 `/model_info` capability。普通 OpenAI `/v1/chat/completions` 接口不足以承载 gist KV 与 Prefill feature。
-- 已验证的 native-serving 实现为 [66ec2db10](https://github.com/setsuna113/kvoffload-sglang-c2kv/commit/66ec2db101fe9db9ab41b1a39311444cb0ef971b)，在雨涵现有 SGLang checkout 的独立副本上测试。
+- 当前 multi-benchmark native-serving 基线要求 `Tracy-ZYH/kvoffload-sglang-c2kv` 的 PR #5（包含 `7e55632`）或更新版本。
 - 使用选定的 C1000 checkpoint 和 `Qwen3-Embedding-0.6B` 本地目录。模型权重另行提供，不包含在源码 PR 中。
 - `--benchmark-dir` 指向含 `bfcl_eval/` 的 BFCL checkout；`--bfcl-python` 指向它的依赖环境。wrapper 会核对实际导入的源码路径。
 
@@ -46,7 +46,7 @@ export BFCL_PYTHON=/path/to/bfcl/env/bin/python
 
 ```bash
 PYTHONPATH="$SGLANG_ROOT/python" "$SGLANG_PYTHON" -m sglang.launch_server \
-  --model-path "$CHECKPOINT" --served-model-name c1-c1000 \
+  --model-path "$CHECKPOINT" --served-model-name c1_legacy_prefill \
   --model-impl sglang --device npu --attention-backend ascend --dtype bfloat16 \
   --enable-c2kv --c2kv-gist-type dynamic-interleave --c2kv-gist-param qkv \
   --c2kv-query-proj base --c2kv-pool-fraction 0.05 \
@@ -54,6 +54,14 @@ PYTHONPATH="$SGLANG_ROOT/python" "$SGLANG_PYTHON" -m sglang.launch_server \
   --mem-fraction-static 0.55 --max-total-tokens 65536 --context-length 131072 \
   --max-running-requests 1 --page-size 128 --chunked-prefill-size 256 \
   --disable-radix-cache --disable-cuda-graph --host 127.0.0.1 --port 38800
+```
+
+等 engine 打印 ready 后，先确认 native C1 capability；`run_c1.py` 的非 preview
+运行也会执行同一类只读预检，并在创建输出目录前拒绝未启动、checkpoint 不匹配
+或缺少 native-packed/Prefill feature 能力的后端。
+
+```bash
+curl -fsS --noproxy '*' http://127.0.0.1:38800/model_info | "$SGLANG_PYTHON" -m json.tool
 ```
 
 在另一终端加载相同环境，从仓库根目录运行完整 BFCL task loop 和官方 scoring：
@@ -69,15 +77,24 @@ PYTHONPATH="$SGLANG_ROOT/python" "$SGLANG_PYTHON" -m sglang.launch_server \
 
 重复 `--task-id` 可以顺序运行多个 base/long-context task。每次使用新的输出目录；程序不会覆盖旧结果或自动重跑。加 `--preview` 只验证配置并打印 profile，不调用模型。
 
+τ² 使用 `--benchmark tau2 --tau2-task-id ID`，ToolSandbox 使用
+`--benchmark toolsandbox --ts-scenario NAME`。这两类普通 OpenAI harness 使用
+`openai-single-task-v1`，每个 controller 只绑定一个 task/scenario；多个 ID 会顺序运行多个全新 controller。必须显式提供 `--user-base-url` 指向 raw Full engine，且它不能是 C1 controller 地址，从而只压缩 agent、不压缩 user simulator。官方评分仍分别由 `tau2 evaluate-trajs` 和 `tool_sandbox` CLI 产生。
+
 新 head 就绪后的入口保持相同，只替换 detector 参数：
 
 ```bash
 --detector t02_risk --selector-artifact /path/to/c1_risk.json
 ```
 
+同 checkpoint、8x event packing 和 generation 配置下的纯 C2KV 对照使用
+`--method c2kv_only`。该模式从同一个 S0 controller 配置中只移除
+`post_draft_recovery`/detector，并且不请求 shadow detector feature；不要用绑定
+旧 checkpoint-1088 profile 的 portable `c2kv` arm 代替这个 C1000 对照。
+
 ## Outputs and validation
 
-`profile.json` 保存 detector、checkpoint、controller 和任务身份；`result.json` 保存运行状态和官方成绩。每题的 `task_shards/TASK/server/` 保留 engine HTTP、模型调用、detector/恢复决策与最终成本；`task_shards/TASK/bfcl/` 保留 BFCL contract、真实源码绑定、完整轨迹和官方评分。
+`profile.json` 保存 detector、checkpoint、controller 和任务身份；`result.json` 保存运行状态和官方成绩。每题的 `task_shards/TASK/server/` 保留 engine HTTP、模型调用、detector/恢复决策与最终成本；相邻的 `bfcl/`、`tau2/` 或 `toolsandbox/` 保留对应 native harness 输出。根目录的 `unified_summary.json/csv` 只汇总官方 score 和 C1 runtime telemetry，不重新定义 benchmark accuracy。
 
 运行成功要求官方生成和评分完成、controller 正常结束、模型调用没有失败或悬空。题目答错可以是正常的模型结果；HTTP 错误或 actor 崩溃不能冒充正常的零分。
 
