@@ -104,6 +104,8 @@ curl -fsS --noproxy '*' http://127.0.0.1:38800/model_info | "$SGLANG_PYTHON" -m 
 
 交付 smoke 的成绩仅表示选定题目的功能验收，标为 `preliminary, n=1`，不作为完整 benchmark 质量成绩。
 
+本次 T02 默认入口在 2026-09-18 的 NPU 验证见 [tracy_t02_npu_smoke.json](validation/tracy_t02_npu_smoke.json)：不传 detector/artifact 参数，BFCL `multi_turn_base_26` 完成 10 个 decision、11 次 HTTP 200，记录 5 次真实风险评分、5 次无合法候选免评分和 1 次追加再生成。官方结果为 **1/1，preliminary, n=1**，仅是功能 smoke。原入口在评分后因压缩率 `0.90175` 不大于 1 误报失败；修正验收条件后，用不变的终态证据 CPU 重评通过，原失败记录保留，未重跑任务。78 项测试及 4 项 subtests 通过；服务器现有 checkpoint 副本的自动路径适配通过，测试 NPU 已释放。
+
 旧 `legacy_prefill` 交付版在 2026-09-17 的实机验收见 [tracy_npu_smoke.json](validation/tracy_npu_smoke.json)：BFCL base/long-context 的 5 个任务均到达官方评分终态，86 次 native 请求全部 HTTP 200，取得 83 次真实 Prefill score，发生 3 次证据追加与再生成。每次生成都通过 B0 检查，held draft 没有作为最终动作提交，模型调用无失败或悬空，task controller 正常退出。108 项 runtime 回归、30 项 SGLang contract tests、5 项实机 hidden-capture 检查通过。
 
 这组 smoke 的官方成绩为 **0/5，preliminary, n=1**：两题因模型达到 BFCL step cap 结束，两题 execution-response mismatch，一题 instance-state mismatch。这组旧 detector 验收证明当时链路可运行，不能代替本次 T02 默认入口的验收。测试 engine 已关闭。
