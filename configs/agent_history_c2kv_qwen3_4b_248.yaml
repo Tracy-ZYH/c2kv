@@ -1,0 +1,57 @@
+# Multi-source Agent History Compression for Qwen3-4B-Instruct-2507.
+model_name_or_path: /home/zhuyuhan/project/c2kv/models/Qwen3-4B-Instruct-2507
+train_data: /home/zhuyuhan/project/c2kv/datasets/processed_agent_history_c2kv_60k/train.jsonl
+eval_data: /home/zhuyuhan/project/c2kv/datasets/processed_agent_history_c2kv_60k/val.jsonl
+output_dir: /home/zhuyuhan/project/c2kv/outputs/qwen3_4b_agent_c2kv_60k_248
+
+seed: 42
+attn_impl: sdpa
+dtype: bf16
+bf16: true
+teacher_attn_impl: sdpa
+
+gist_overlap: 64
+gist_residual_type: embed-mean
+gist_gradient_checkpointing: false
+
+max_history_docs: 8
+max_doc_length: 768
+max_length: 768
+max_target_length: 128
+max_system_length: 1024
+max_teacher_length: 4096
+
+# Completed-history full/compressed augmentation. System/tools/current turn are always full.
+history_policy_probs:
+  all_compressed: 1.0
+
+# 80% homogeneous ratio, 20% heterogeneous old/middle/recent = 8/4/2.
+ratio_probs:
+  2: 0.333333
+  4: 0.333333
+  8: 0.333334
+heterogeneous_ratio_prob: 0.0
+
+kd_coef: 0.7
+ce_coef: 0.3
+kd_temperature: 2.0
+
+per_device_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 1.0e-6
+weight_decay: 0.1
+num_train_epochs: 2
+max_steps: -1
+warmup_steps: 100
+lr_scheduler_type: cosine
+
+logging_steps: 10
+eval_strategy: steps
+eval_steps: 200
+save_strategy: steps
+save_steps: 200
+save_total_limit: 3
+dataloader_num_workers: 0
+report_to: tensorboard
+ddp_timeout: 7200

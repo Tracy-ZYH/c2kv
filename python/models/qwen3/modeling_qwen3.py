@@ -628,6 +628,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         logits_to_keep: int | torch.Tensor = 0,
         system_input_ids: torch.LongTensor | None = None, # make trainer compatible
         context_input_ids: Optional[Union[List[torch.LongTensor], torch.LongTensor]] = None,
+        context_ratios: Optional[torch.LongTensor] = None,
         use_gist: Optional[bool] = None,
         reconstruct_loss_coef: Optional[float] = None,
         **kwargs: Unpack[TransformersKwargs],
@@ -655,7 +656,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 reconstruct_kwargs = {"lm_head": self.lm_head, "loss_function": self.loss_function}
             past_key_values, attention_mask, reconstruct_loss = process_context_input_ids(
                 self.model, context_input_ids, past_key_values, attention_mask, position_ids,
-                reconstruct_kwargs, past_attention_mask,
+                reconstruct_kwargs, past_attention_mask, context_ratios,
             )
             kwargs['use_gist'] = True
 

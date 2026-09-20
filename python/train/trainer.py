@@ -200,8 +200,12 @@ class GistMultiDocTrainer(TrainerDistillMixin, Trainer):
 
     def _system_attn_impl(self) -> str:
         attn_impl = getattr(self.model_args, "attn_impl", None)
-        if attn_impl in (None, "flex_attention"):
-            return "flash_attention_2"
+        # System/tool prefill is ordinary full-context attention. Avoid silently
+        # switching to flash_attention_2 here because some environments have no
+        # compatible hub kernels installed; the compressed gist path can still use
+        # flex attention when explicitly requested.
+        if attn_impl in (None, "flex_attention", "flash_attention_2"):
+            return "sdpa"
         return attn_impl
 
     def _gist_attn_impl(self) -> str:
