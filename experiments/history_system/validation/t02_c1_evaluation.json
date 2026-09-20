@@ -1,0 +1,32 @@
+{
+  "schema": "c1-t02-evaluation-evidence-v1",
+  "scope": "Historical frozen experiment evidence; not delivery integration validation",
+  "quality_label": "preliminary, n=1",
+  "source_receipt": "/home/liuyancheng/c2kv-evidence-sets-20260916/d128_sup_v1_summary/SUP_R1__C1.terminal_d128.json",
+  "source_receipt_sha256": "5ada08bebe39dfb20ed076a8636428febd292fc33ac942e66798957fba30f341",
+  "source_algorithm_id": "evidence_sets_v1_h0_c1",
+  "configuration_binding": {
+    "d20_compatibility_audit_sha256": null,
+    "evaluated_controller_sha256": "801140ac62df2ce101eeccda4a6ecfcf3db1c640f05a23e1560454134235460b",
+    "promotion_status": "not_promoted_d20_tie_group_member",
+    "source_algorithm_id": "evidence_sets_v1_h0_c1",
+    "source_controller_sha256": "801140ac62df2ce101eeccda4a6ecfcf3db1c640f05a23e1560454134235460b",
+    "source_design_sha256": "14484dd2a28737adf6a66ffde941cb262aac776f03f8387d2592b7e8b9121fc4",
+    "status": "exact_frozen_config",
+    "supplementary_d20_provenance_sha256": "4596842a44171893898175929e073145d0ab22b0be2f0cf84a403c31e3f74a7a"
+  },
+  "task_manifest_sha256": "e6063f178788c0ace9cc20c3933e551baf0a2afa242b5a252af09b23bef3afc9",
+  "D128": {
+    "operational_success_count": 23,
+    "operational_denominator": 128,
+    "normal_completed_task_cells": 122,
+    "audited_capacity_failure_task_cells": 6,
+    "unknown_failure_task_cells": 0,
+    "selection_eligible": true
+  },
+  "D20": {
+    "success": 6,
+    "denominator": 20
+  },
+  "comparison_limit": "No matched D128 legacy_prefill delivery evaluation; superiority over the delivered legacy detector is not established."
+}
