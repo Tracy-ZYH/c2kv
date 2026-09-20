@@ -5,13 +5,22 @@ set -Eeuo pipefail
 # This script starts and owns exactly one PR #5 SGLang process group.
 
 METHOD="${METHOD:-proposed}"
+DETECTOR="${DETECTOR:-t02_risk}"
 DEVICE="${DEVICE:?set DEVICE to one physical NPU id}"
 ENGINE_PORT="${ENGINE_PORT:?set ENGINE_PORT}"
 CONTROLLER_PORT="${CONTROLLER_PORT:?set CONTROLLER_PORT}"
 OUTPUT="${OUTPUT:?set OUTPUT to a new directory}"
 
 case "${METHOD}" in
-  proposed) SERVED_MODEL=c1_legacy_prefill; DETECTOR_ARGS=(--detector legacy_prefill); EMBEDDING_DEVICE=npu:0 ;;
+  proposed)
+    case "${DETECTOR}" in
+      t02_risk|legacy_prefill) ;;
+      *) echo "DETECTOR must be t02_risk or legacy_prefill" >&2; exit 2 ;;
+    esac
+    SERVED_MODEL="c1_${DETECTOR}"
+    DETECTOR_ARGS=(--detector "${DETECTOR}")
+    EMBEDDING_DEVICE=npu:0
+    ;;
   c2kv_only) SERVED_MODEL=c2kv_only; DETECTOR_ARGS=(); EMBEDDING_DEVICE=cpu ;;
   *) echo "METHOD must be proposed or c2kv_only" >&2; exit 2 ;;
 esac

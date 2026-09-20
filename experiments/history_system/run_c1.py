@@ -26,9 +26,12 @@ from urllib.request import Request, urlopen
 import current
 import evidence_sets
 import runner
+from c1_artifact_binding import bind_risk_artifact
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = HERE / "runtime"
+DEFAULT_RISK_ARTIFACT = HERE / "artifacts/c1_risk.t02_v1.json"
+DEFAULT_RISK_ARTIFACT_SHA256 = "18a11f73aa1f7d4b0add86eed66ae9e5e129ea4bdfbe0dfad23faf4f7d2fb4ab"
 BENCHMARKS = ("bfcl", "tau2", "toolsandbox")
 METHODS = ("proposed", "c2kv_only")
 SOURCE_PROFILE = {
@@ -49,7 +52,8 @@ SUMMARY_FIELDS = (
     "active_history_kv", "kv_retention", "compression_ratio",
     "generation_prefill_tokens", "recovery_prefill_tokens",
     "total_prefill_tokens", "wall_time", "native_generate_requests",
-    "prefill_detector_scores", "gist_tokens", "raw_workspace_tokens",
+    "prefill_detector_scores", "risk_detector_scores", "risk_detector_unavailable",
+    "gist_tokens", "raw_workspace_tokens",
     "gist_cache_hits", "native_packing_present",
 )
 
@@ -196,20 +200,32 @@ def build_profile(args: argparse.Namespace) -> tuple[dict, dict]:
             ).hexdigest(),
             "automatic_reruns": 0,
         }
-    if args.detector == "t02_risk" and args.selector_artifact is None:
-        raise ValueError("t02_risk requires --selector-artifact; no automatic detector substitution")
     if args.detector == "legacy_prefill" and args.selector_artifact is not None:
         raise ValueError("--selector-artifact is only used with --detector t02_risk")
+    artifact_path = None
+    artifact_sha256 = None
+    if args.detector == "t02_risk":
+        artifact_path = args.selector_artifact or DEFAULT_RISK_ARTIFACT
+        if not artifact_path.is_file():
+            raise FileNotFoundError(f"selector_artifact does not exist: {artifact_path}")
+        artifact_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if args.selector_artifact is None and artifact_sha256 != DEFAULT_RISK_ARTIFACT_SHA256:
+            raise ValueError("Bundled T02 C1 artifact differs from the evaluated release")
     config, _ = evidence_sets.build_config(
         history="H0",
         selector="legacy_prefill" if args.detector == "legacy_prefill" else "risk",
-        selector_artifact=args.selector_artifact,
+        selector_artifact=artifact_path,
         selector_threshold=args.selector_threshold,
         embedding_model=str(args.embedding_model.resolve()),
         embedding_device=args.embedding_device,
         semantic_query_overflow_policy="task_head_tail_preserve_draft_v1",
     )
     config["local_models"]["embedding"]["dtype"] = "bfloat16"
+    artifact_binding = None
+    if artifact_path is not None:
+        config["selector_artifact"], artifact_binding = bind_risk_artifact(
+            config["selector_artifact"], args.checkpoint
+        )
     controller = current._configure_controller(evidence_sets._base_controller(), config)
     selected = current.load_config()
     actual = hashlib.sha256((args.checkpoint / "config.json").read_bytes()).hexdigest()
@@ -221,6 +237,10 @@ def build_profile(args: argparse.Namespace) -> tuple[dict, dict]:
         "detector": args.detector,
         "algorithm": "C1 legacy Prefill compatibility" if args.detector == "legacy_prefill" else "C1 T02 risk",
         "new_c1_training_claimed": args.detector == "t02_risk",
+        "selector_artifact": str(artifact_path.resolve()) if artifact_path else None,
+        "selector_artifact_sha256": artifact_sha256,
+        "selector_artifact_binding": artifact_binding,
+        "selector_threshold": args.selector_threshold if artifact_path else None,
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_config_sha256": actual,
         "selection_protocol": "evidence_sets_v1",
@@ -401,6 +421,18 @@ def summarize_task(benchmark: str, task: str, task_out: Path, official: Mapping[
         for decision in decisions
         if isinstance(decision.get("gate"), Mapping)
     ]
+    risk_selections = [
+        decision["selection"] for decision in decisions
+        if isinstance(decision.get("selection"), Mapping)
+        and decision["selection"].get("selector") == "risk"
+        and decision["selection"].get("score_semantics") == "current_turn_failure_risk"
+    ]
+    legacy_gates = [gate for gate in gates if gate.get("type") != "risk"]
+    risk_scores = sum(
+        selection.get("available") is True and _number(selection.get("score")) is not None
+        for selection in risk_selections
+    )
+    risk_unavailable = sum(selection.get("available") is False for selection in risk_selections)
     recovery_rows = [
         decision for decision in decisions if decision.get("status") == "recover"
     ]
@@ -468,7 +500,7 @@ def summarize_task(benchmark: str, task: str, task_out: Path, official: Mapping[
         "normal_termination": official_row.get("normal_termination"),
         "protocol_legal": official_row.get("protocol_legal"),
         "generation_calls": generation_calls,
-        "detector_calls": len(gates),
+        "detector_calls": len(legacy_gates) + len(risk_selections),
         "detector_trigger_count": sum(gate.get("triggered") is True for gate in gates),
         "recovery_count": len(recovery_rows),
         "successful_recovery_count": successful,
@@ -483,7 +515,9 @@ def summarize_task(benchmark: str, task: str, task_out: Path, official: Mapping[
         "total_prefill_tokens": generation_prefill + recovery_prefill,
         "wall_time": wall_time,
         "native_generate_requests": len(native_stats),
-        "prefill_detector_scores": sum(_number(gate.get("score")) is not None for gate in gates),
+        "prefill_detector_scores": sum(_number(gate.get("score")) is not None for gate in legacy_gates),
+        "risk_detector_scores": risk_scores,
+        "risk_detector_unavailable": risk_unavailable,
         "gist_tokens": sum(int(stats.get("gist_tokens") or 0) for stats in native_stats),
         "raw_workspace_tokens": sum(int(stats.get("workspace_tokens") or 0) for stats in native_stats),
         "gist_cache_hits": sum(
@@ -505,6 +539,31 @@ def write_unified_summary(out: Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(stream, fieldnames=SUMMARY_FIELDS)
         writer.writeheader()
         writer.writerows({key: row.get(key) for key in SUMMARY_FIELDS} for row in rows)
+
+
+def functional_checks(method: str, detector: str, telemetry: Mapping[str, Any]) -> dict:
+    """Separate required runtime behavior from descriptive efficiency telemetry."""
+
+    return {
+        "required": {
+            "native_generate_requests": telemetry["native_generate_requests"] > 0,
+            "detector_contract": (
+                telemetry["detector_calls"] == 0
+                if method == "c2kv_only"
+                else telemetry["risk_detector_unavailable"] == 0
+                if detector == "t02_risk"
+                else telemetry["prefill_detector_scores"] > 0
+            ),
+        },
+        "observed": {
+            "native_packing_present": telemetry["native_packing_present"] is True,
+            "gist_cache_used": telemetry["gist_cache_hits"] > 0,
+            "compression_ratio_gt_one": (
+                telemetry["compression_ratio"] is not None
+                and telemetry["compression_ratio"] > 1.0
+            ),
+        },
+    }
 
 
 def run_task(args: argparse.Namespace, task: str, controller_path: Path) -> tuple[dict, dict]:
@@ -559,20 +618,8 @@ def run_task(args: argparse.Namespace, task: str, controller_path: Path) -> tupl
     if journal.get("failed") or journal.get("pending") or not journal.get("completed"):
         raise RuntimeError(f"Model attempts failed, remain pending, or are missing; see {final_path}")
     telemetry = summarize_task(args.benchmark, task, task_out, summary, time.monotonic() - started)
-    required = {
-        "native_generate_requests": telemetry["native_generate_requests"] > 0,
-        "detector_contract": (
-            telemetry["prefill_detector_scores"] == 0
-            if args.method == "c2kv_only"
-            else telemetry["prefill_detector_scores"] > 0
-        ),
-        "native_packing_present": telemetry["native_packing_present"] is True,
-        "gist_cache_used": telemetry["gist_cache_hits"] > 0,
-        "compression_ratio_gt_one": (
-            telemetry["compression_ratio"] is not None
-            and telemetry["compression_ratio"] > 1.0
-        ),
-    }
+    acceptance = functional_checks(args.method, args.detector, telemetry)
+    required = acceptance["required"]
     if not all(required.values()):
         raise RuntimeError(f"C1 functional acceptance failed: {required}; see {task_out / 'server'}")
     return {
@@ -592,8 +639,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sglang-backend-url", required=True)
     parser.add_argument("--embedding-model", type=Path, required=True)
     parser.add_argument("--embedding-device", default="cpu")
-    parser.add_argument("--detector", choices=("legacy_prefill", "t02_risk"), default="legacy_prefill")
-    parser.add_argument("--selector-artifact", type=Path)
+    parser.add_argument("--detector", choices=("legacy_prefill", "t02_risk"), default="t02_risk")
+    parser.add_argument("--selector-artifact", type=Path,
+                        help="Override the bundled, evaluated T02 C1 risk artifact")
     parser.add_argument("--selector-threshold", type=float, default=0.5)
     parser.add_argument("--benchmark-dir", type=Path)
     parser.add_argument("--bfcl-python", default=sys.executable)

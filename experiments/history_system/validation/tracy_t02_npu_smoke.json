@@ -1,0 +1,128 @@
+{
+  "schema": "c1-t02-tracy-acceptance-reassessed-v1",
+  "created_at": "2026-09-17T23:04:29.465376+00:00",
+  "passed": true,
+  "original_wrapper_status": "failed",
+  "original_wrapper_error": "RuntimeError: C1 functional acceptance failed: {'native_generate_requests': True, 'detector_contract': True, 'native_packing_present': True, 'gist_cache_used': True, 'compression_ratio_gt_one': False}; see /home/zhuyuhan/project/c1-t02-e2e-20260917-v1/smoke/task_shards/multi_turn_base_26/server",
+  "original_acceptance_sha256": "fb474782e9369ff053732c5751f0d36eed1d083a747e9d12bbea3df4749d2e55",
+  "original_evidence_preserved_without_rerun": true,
+  "postrun_acceptance_bug": "The original wrapper treated descriptive compression_ratio_gt_one as a functional requirement. Its failed result remains unchanged.",
+  "raw_runtime_official_passed": true,
+  "reassessed_required_passed": true,
+  "hash_identity_passed": true,
+  "reassessed_functional_checks": {
+    "required": {
+      "native_generate_requests": true,
+      "detector_contract": true
+    },
+    "observed": {
+      "native_packing_present": true,
+      "gist_cache_used": true,
+      "compression_ratio_gt_one": false
+    },
+    "telemetry": {
+      "benchmark": "bfcl",
+      "task_id": "multi_turn_base_26",
+      "status": "completed",
+      "official_score": 1.0,
+      "normal_termination": true,
+      "protocol_legal": null,
+      "generation_calls": 11,
+      "detector_calls": 5,
+      "detector_trigger_count": 1,
+      "recovery_count": 1,
+      "successful_recovery_count": 1,
+      "evidence_units_appended": 1,
+      "raw_tokens_restored": 95,
+      "full_history_kv": 2680.0,
+      "active_history_kv": 2972.0,
+      "kv_retention": 1.108955223880597,
+      "compression_ratio": 0.901749663526245,
+      "generation_prefill_tokens": 38871.0,
+      "recovery_prefill_tokens": 4220.0,
+      "total_prefill_tokens": 43091.0,
+      "wall_time": 0.0,
+      "native_generate_requests": 11,
+      "prefill_detector_scores": 0,
+      "risk_detector_scores": 5,
+      "risk_detector_unavailable": 0,
+      "gist_tokens": 703,
+      "raw_workspace_tokens": 2486,
+      "gist_cache_hits": 60,
+      "native_packing_present": true
+    },
+    "model_calls": 0
+  },
+  "task_result": {
+    "task_id": "multi_turn_base_26",
+    "qualification": "preliminary, n=1",
+    "official_correct_count": 1,
+    "official_scored": 1,
+    "official_semantic_score": 1.0,
+    "decisions": 10,
+    "native_requests": 11,
+    "risk_scores": 5,
+    "risk_score_min": 0.32138243991523296,
+    "risk_score_max": 0.6897796819221814,
+    "no_feasible_set_decisions": 5,
+    "recoveries": 1
+  },
+  "source_identity": {
+    "initial_source_archive_sha256": "b9b0a96908d7964f9aca2ad237acdbbe2c3eafa84e99dc53e3db33a4adc9dc1b",
+    "final_source_archive_sha256": "33c2ad293384bd625db3e0bf07b8d7b64837c0f793a7c8b9b543e3c2e69a9be9",
+    "c2kv_base_commit": "2a20ab38505fc40dec3a1c5a68bd488beabf70a3",
+    "c2kv_tracked_diff_sha256": "7c8b306bf7d2b3fb2f6a0621a4d9a98c3cb498efb08da9770aae15f5451ba147",
+    "sglang_merged_commit": "6023e69bcdcc6d5f4f204265e55a3e4c8e59ceba",
+    "bfcl_commit": "5ca61d3fbc23342714a09cc2ba5296b47e8ce4f5",
+    "run_source_run_c1_sha256": "8a01a8908aca806632a1cf592748692f3d3047a9e5b5791f88fd198dd4dc3509",
+    "reassessed_code_sha256": "ab9992c3c72fa3d7bb1c3c97fd3cbc4e28723eb4d9dbfd9496edd70363aa542f"
+  },
+  "artifact_identity": {
+    "profile_default_artifact_file_sha256": "18a11f73aa1f7d4b0add86eed66ae9e5e129ea4bdfbe0dfad23faf4f7d2fb4ab",
+    "source_artifact_sha256": "dfe43deaa244997b1712a37a8928acc5ce8cad19cf40e3517dcad805ef0bffef",
+    "bound_artifact_sha256": "dfe43deaa244997b1712a37a8928acc5ce8cad19cf40e3517dcad805ef0bffef",
+    "binding_status": "exact_binding",
+    "selector_threshold": 0.5
+  },
+  "compression_diagnostic": {
+    "records": 11,
+    "sum_full_history_bytes": 395182080,
+    "sum_active_history_bytes": 438239232,
+    "sum_common_live_bytes": 5915787264,
+    "history_only_ratio_used_by_failed_wrapper": 0.901749663526245,
+    "whole_input_ratio": 0.993223642988095,
+    "claim": "This single smoke does not establish compression_ratio_gt_one.",
+    "helper_observed_compression_ratio_gt_one": false
+  },
+  "cpu_validation": {
+    "passed": true,
+    "pytest_passed": 78,
+    "unittest_subtests_passed": 4,
+    "elapsed_seconds": 5.1,
+    "log_sha256": "1d6240cd3cd70c9dad07649800f66a0d1cd84331cdff567c75fefaf1317ce593",
+    "command_script_sha256": "e1a798a64bc419a4b98fd764e9d447f5fd5f51be18d7811092a1fe4d88c28411"
+  },
+  "hash_checks": {
+    "raw_evidence_hashes_unchanged": true,
+    "artifact_hashes_match": true,
+    "controller_hash_matches": true
+  },
+  "failure_reasons": [],
+  "evidence_sha256": {
+    "smoke/result.json": "a943352c2f85b5a845258043853c2a94b4911772f2f30c3db741c2ebe9559269",
+    "smoke/profile.json": "f28120eddc71aa1d3eb4dffaa5a31bb0132231eb60bc2e82fe5c1c62620e3734",
+    "smoke/controller.json": "1c03a13484151de6fb6b720694afcccca79a048e8c1fe3fc2222b93b93078397",
+    "smoke.log": "f2c903aaccb9e564d22e19e53ce1917f793bf732500159633ade182e36814979",
+    "smoke/task_shards/multi_turn_base_26/server/steps.jsonl": "f039bbf3580b2efd1de8acf7b09b93b295e3913e4af7441d5fd30fa1da2eecb5",
+    "smoke/task_shards/multi_turn_base_26/server/sglang_http.jsonl": "5d7a56cf25b1c28264551ac2a5a1aa90ee43ef227174e23e0b03f077d88a1403",
+    "smoke/task_shards/multi_turn_base_26/server/final.json": "99d3113606c5a410effff36ac56b15ba0a073d01973876513deb8be974fff8e3",
+    "smoke/task_shards/multi_turn_base_26/server.supervisor.json": "6355e0f5f11c5e28484814056ccb1ca951b0a29755dc7afd66274656cb590d78",
+    "smoke/task_shards/multi_turn_base_26/bfcl/final.json": "aae4dd87717f6af4ac326c5117f3176f70bb14b324bde6ed96b86188fd4d44ec",
+    "smoke/task_shards/multi_turn_base_26/bfcl/official_summary.json": "6652e035fb485a30af407fe78957ec107a286afbe23d5b6eb035878898063783",
+    "smoke/task_shards/multi_turn_base_26/bfcl/bfcl_source.json": "83715f52beb287f25c52e9bfd72f2afbaebb60f2e718d0409c7c992a08a5e425",
+    "engine.cleanup.json": "6527ec4b8b33b5ede781eb589725ecb7fa861085e5232c865aaf6e0eebb5ddd5",
+    "checkpoint_copy.validation.json": "ac2b0c9c6f9762f5586914a5a1343dcef42f7cbc83de3163eb24cb3bd0fa1eca",
+    "final_cpu_tests.log": "1d6240cd3cd70c9dad07649800f66a0d1cd84331cdff567c75fefaf1317ce593",
+    "run_cpu_tests.sh": "e1a798a64bc419a4b98fd764e9d447f5fd5f51be18d7811092a1fe4d88c28411"
+  }
+}
